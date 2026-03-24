@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Types of changes: Added, Changed, Deprecated, Removed, Fixed, Security
 
+## [0.3.0] - 2026-03-24
+
+### Added
+
+- bash-completion file
+- man page file
+
+### Changed
+
+- Arg --ipv4-only is now -4
+- Arg --ipv6-only is now -6
+- Arg --ipv4-file is now -f/--file
+- Arg --ipv6-file is now -f6/--file6
+- Usage description/header
+
+### Removed
+
+- Args --check-services, --live removed because these are implicit
+
 ## [0.2.0] - 2026-03-24
 
 ### Added

@@ -1,0 +1,111 @@
+.TH IPTABLES\-ANALYZER 1 "2026-03-24" "0.2.0" "iptables-analyzer manual"
+.SH NAME
+iptables\-analyzer \- analyze iptables/ip6tables firewall rules for security issues
+.SH SYNOPSIS
+.B iptables\-analyzer
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B iptables\-analyzer
+inspects iptables and ip6tables rules to identify security weaknesses, including
+shadowed or ineffective rules, Docker NAT bypasses that make INPUT rules useless,
+services exposed to the network, and missing best practices. It provides a
+security score and actionable recommendations.
+.PP
+When run as root without any file arguments, it reads rules directly from the
+live system. Otherwise, provide saved rule files with \fB\-f\fR and \fB\-\-file6\fR.
+.SH OPTIONS
+.TP
+.BR \-f ", " \-\-file " \fIFILE\fR"
+Path to iptables-save output file (IPv4 rules).
+.TP
+.BR \-\-file6 " \fIFILE\fR"
+Path to ip6tables-save output file (IPv6 rules).
+.TP
+.BR \-4 ", " \-\-ipv4\-only
+Analyze only IPv4 rules.
+.TP
+.BR \-6 ", " \-\-ipv6\-only
+Analyze only IPv6 rules.
+.TP
+.BR \-\-no\-color
+Disable colored output.
+.TP
+.BR \-\-json
+Output results as JSON.
+.TP
+.BR \-v ", " \-\-verbose
+Show all rules including empty chains.
+.TP
+.BR \-\-services\-file " \fIFILE\fR"
+Path to saved
+.BR ss (8)
+output file (alternative to live service detection).
+.TP
+.BR \-s ", " \-\-score\-only
+Only print the security score.
+.TP
+.BR \-V ", " \-\-version
+Print version and exit.
+.TP
+.BR \-h ", " \-\-help
+Show help message and exit.
+.SH EXAMPLES
+Run live analysis as root (auto-detects rules and listening services):
+.PP
+.RS 4
+.EX
+sudo iptables\-analyzer
+.EE
+.RE
+.PP
+Analyze saved rule files:
+.PP
+.RS 4
+.EX
+iptables\-analyzer \-f rules.v4 \-\-file6 rules.v6
+.EE
+.RE
+.PP
+Analyze saved rules with saved service data:
+.PP
+.RS 4
+.EX
+iptables\-analyzer \-f rules.v4 \-\-services\-file services.txt
+.EE
+.RE
+.PP
+Output only the security score:
+.PP
+.RS 4
+.EX
+sudo iptables\-analyzer \-s
+.EE
+.RE
+.PP
+Save rules for offline analysis:
+.PP
+.RS 4
+.EX
+sudo iptables\-save > rules.v4
+sudo ip6tables\-save > rules.v6
+.EE
+.RE
+.PP
+Save listening services for offline analysis:
+.PP
+.RS 4
+.EX
+ss \-tlnp > services.txt
+ss \-ulnp >> services.txt
+.EE
+.RE
+.SH SEE ALSO
+.BR iptables (8),
+.BR ip6tables (8),
+.BR iptables\-save (8),
+.BR ip6tables\-save (8),
+.BR ss (8)
+.SH AUTHORS
+iptables\-analyzer was written by c0m4r.
+.PP
+Source code: https://github.com/c0m4r/iptables\-analyzer
