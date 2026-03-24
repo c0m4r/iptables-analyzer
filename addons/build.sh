@@ -6,10 +6,11 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BINARY_NAME="iptables-analyzer"
-VERSION="${VERSION:-v1.0}"
 LDFLAGS="-s -w"
 
 cd "$PROJECT_ROOT"
+
+VERSION=$(cat VERSION)
 
 # Default to linux/amd64 if no targets specified
 TARGETS="${1:-linux/amd64,linux/arm64,linux/riscv64}"

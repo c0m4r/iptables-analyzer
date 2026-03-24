@@ -28,6 +28,9 @@ func DetectDockerBypasses(rs *models.Ruleset) []models.DockerBypassFinding {
 	// (we also flag DNAT ports that are exposed even without an INPUT block,
 	//  since users might not realize Docker bypasses INPUT entirely)
 
+	// seen tracks (exposedPort → containerDest) pairs already reported
+	seen := make(map[string]bool)
+
 	for _, dnat := range dnatRules {
 		dnatPort := dnat.DstPort
 		if dnatPort == "" {
@@ -38,7 +41,14 @@ func DetectDockerBypasses(rs *models.Ruleset) []models.DockerBypassFinding {
 			continue
 		}
 
+		portKey := dnatPort + "→" + containerDest
+		if seen[portKey] {
+			continue
+		}
+
 		// Check 1: Is there an INPUT block for this port that is ineffective?
+		// Report only the first matching block to avoid duplicate findings.
+		foundBlock := false
 		for _, block := range inputBlocks {
 			if portsOverlap(dnatPort, block.DstPort) && protocolsOverlap(dnat.Protocol, block.Protocol) {
 				findings = append(findings, models.DockerBypassFinding{
@@ -51,11 +61,14 @@ func DetectDockerBypasses(rs *models.Ruleset) []models.DockerBypassFinding {
 						". Traffic goes through PREROUTING->FORWARD, bypassing INPUT entirely.",
 					Severity: models.SeverityCritical,
 				})
+				seen[portKey] = true
+				foundBlock = true
+				break
 			}
 		}
 
 		// Check 2: Flag DNAT ports that have no FORWARD chain restriction
-		if !hasForwardBlock(rs, dnatPort, dnat.Protocol) {
+		if !foundBlock && !hasForwardBlock(rs, dnatPort, dnat.Protocol) {
 			findings = append(findings, models.DockerBypassFinding{
 				NATRule:       dnat,
 				ExposedPort:   dnatPort,
@@ -66,6 +79,7 @@ func DetectDockerBypasses(rs *models.Ruleset) []models.DockerBypassFinding {
 					"Use the DOCKER-USER chain to add restrictions.",
 				Severity: models.SeverityHigh,
 			})
+			seen[portKey] = true
 		}
 	}
 

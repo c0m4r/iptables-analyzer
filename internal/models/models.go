@@ -181,11 +181,21 @@ type DockerBypassFinding struct {
 	Severity      Severity
 }
 
-// ExposedServiceFinding represents a service exposed to the world
+// AccessScope describes how restricted access to a service is
+type AccessScope string
+
+const (
+	ScopeExposed     AccessScope = "EXPOSED"     // reachable from any source
+	ScopeLocalnet    AccessScope = "LOCALNET"    // reachable only from private IP ranges
+	ScopeWhitelisted AccessScope = "WHITELISTED" // reachable only from specific /32 hosts
+)
+
+// ExposedServiceFinding represents a service accessible through the firewall
 type ExposedServiceFinding struct {
 	Service      ListeningService
 	AllowingRule *Rule
 	Severity     Severity
+	Scope        AccessScope
 	Reason       string
 }
 

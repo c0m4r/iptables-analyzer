@@ -131,8 +131,9 @@ func renderOverview(w io.Writer, result *models.AnalysisResult) {
 
 	fmt.Fprintln(w)
 
+	exposedCount := countExposed(result)
 	totalFindings := len(result.ShadowedRules) + len(result.DockerBypasses) +
-		len(result.ExposedServices) + len(result.EffectiveIssues)
+		exposedCount + len(result.EffectiveIssues)
 
 	if totalFindings == 0 {
 		fmt.Fprintf(w, "  Findings:        %s\n", styleSuccess.Render("none"))
@@ -144,8 +145,8 @@ func renderOverview(w io.Writer, result *models.AnalysisResult) {
 		if n := len(result.ShadowedRules); n > 0 {
 			parts = append(parts, styleWarning.Render(fmt.Sprintf("%d shadowed rules", n)))
 		}
-		if n := len(result.ExposedServices); n > 0 {
-			parts = append(parts, styleDanger.Render(fmt.Sprintf("%d exposed services", n)))
+		if exposedCount > 0 {
+			parts = append(parts, styleDanger.Render(fmt.Sprintf("%d exposed services", exposedCount)))
 		}
 		if n := len(result.EffectiveIssues); n > 0 {
 			parts = append(parts, styleMuted.Render(fmt.Sprintf("%d effectiveness", n)))
@@ -445,8 +446,9 @@ func deduplicateEffectivenessIssues(issues []models.EffectivenessFinding) []mode
 }
 
 func renderFindingsAndRecommendations(w io.Writer, result *models.AnalysisResult) {
+	exposedOnlyCount := countExposed(result)
 	totalFindings := len(result.ShadowedRules) + len(result.DockerBypasses) +
-		len(result.ExposedServices) + len(result.EffectiveIssues) + len(result.UnusedRules)
+		exposedOnlyCount + len(result.EffectiveIssues) + len(result.UnusedRules)
 
 	if totalFindings == 0 && len(result.Recommendations) == 0 {
 		return
@@ -482,11 +484,13 @@ func renderFindingsAndRecommendations(w io.Writer, result *models.AnalysisResult
 		fmt.Fprintln(w)
 	}
 
-	// Exposed services
-	if len(result.ExposedServices) > 0 {
-		renderSubSection(w, "Exposed Services", len(result.ExposedServices))
+	// Exposed services (only truly EXPOSED scope — LOCALNET/WHITELISTED shown in service table)
+	if exposedOnlyCount > 0 {
+		renderSubSection(w, "Exposed Services", exposedOnlyCount)
 		for _, f := range result.ExposedServices {
-			renderFindingRow(w, f.Severity.String(), f.Reason, "")
+			if f.Scope == models.ScopeExposed {
+				renderFindingRow(w, f.Severity.String(), f.Reason, "")
+			}
 		}
 		fmt.Fprintln(w)
 	}
@@ -563,4 +567,15 @@ func pluralS(n int) string {
 		return ""
 	}
 	return "s"
+}
+
+// countExposed returns the number of findings with ScopeExposed (truly open services).
+func countExposed(result *models.AnalysisResult) int {
+	n := 0
+	for _, f := range result.ExposedServices {
+		if f.Scope == models.ScopeExposed {
+			n++
+		}
+	}
+	return n
 }

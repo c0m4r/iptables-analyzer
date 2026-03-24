@@ -159,7 +159,14 @@ func getServiceStatus(svc models.ListeningService, result *models.AnalysisResult
 		if exposed.Service.Port == svc.Port &&
 			exposed.Service.Protocol == svc.Protocol &&
 			exposed.Service.Address == svc.Address {
-			return styleDanger.Render("EXPOSED")
+			switch exposed.Scope {
+			case models.ScopeLocalnet:
+				return styleWarning.Render("LOCALNET")
+			case models.ScopeWhitelisted:
+				return styleSuccess.Render("WHITELISTED")
+			default:
+				return styleDanger.Render("EXPOSED")
+			}
 		}
 	}
 

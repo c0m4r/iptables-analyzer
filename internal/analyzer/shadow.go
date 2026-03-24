@@ -238,6 +238,7 @@ var narrowingModules = map[string]bool{
 	"u32":       true,
 	"mark":      true,
 	"owner":     true,
+	"addrtype":  true, // --dst-type, --src-type restrict which address types match
 }
 
 // narrowingParams lists per-module params that restrict the match scope.
@@ -250,9 +251,10 @@ var narrowingParams = map[string]map[string]bool{
 		"--update": true, "--rcheck": true, "--seconds": true,
 		"--hitcount": true, "--rttl": true,
 	},
-	"icmp6": {"--icmpv6-type": true},
-	"icmp":  {"--icmp-type": true},
-	"limit": {"--limit": true, "--limit-burst": true},
+	"icmp6":    {"--icmpv6-type": true},
+	"icmp":     {"--icmp-type": true},
+	"limit":    {"--limit": true, "--limit-burst": true},
+	"addrtype": {"--dst-type": true, "--src-type": true},
 }
 
 func matchExtsCovers(aExts, bExts []models.MatchExt) bool {

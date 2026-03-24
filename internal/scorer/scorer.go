@@ -27,8 +27,12 @@ func Calculate(result *models.AnalysisResult) models.ScoreResult {
 	score -= policyDeduct
 
 	// Exposure deductions (max -30)
+	// Only penalise truly EXPOSED services; LOCALNET/WHITELISTED have intentional restrictions.
 	exposureDeduct := 0
 	for _, svc := range result.ExposedServices {
+		if svc.Scope != models.ScopeExposed {
+			continue
+		}
 		if svc.Service.Port < 1024 {
 			exposureDeduct += 5 // well-known port
 		} else {

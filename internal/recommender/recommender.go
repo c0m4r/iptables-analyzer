@@ -83,6 +83,11 @@ func exposureRecommendations(result *models.AnalysisResult) []models.Recommendat
 	var recs []models.Recommendation
 
 	for _, exposed := range result.ExposedServices {
+		// Only recommend restrictions for truly exposed services.
+		// LOCALNET and WHITELISTED services already have source restrictions in place.
+		if exposed.Scope != models.ScopeExposed {
+			continue
+		}
 		svc := exposed.Service
 		recs = append(recs, models.Recommendation{
 			Title: "Restrict access to " + svc.Process + " on port " + strconv.Itoa(svc.Port),
