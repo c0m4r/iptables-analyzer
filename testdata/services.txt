@@ -1,0 +1,11 @@
+State      Recv-Q     Send-Q         Local Address:Port          Peer Address:Port     Process
+LISTEN     0          128                  0.0.0.0:22               0.0.0.0:*         users:(("sshd",pid=1234,fd=3))
+LISTEN     0          128                127.0.0.1:631              0.0.0.0:*         users:(("cupsd",pid=567,fd=12))
+LISTEN     0          511                  0.0.0.0:80               0.0.0.0:*         users:(("nginx",pid=890,fd=6))
+LISTEN     0          511                  0.0.0.0:443              0.0.0.0:*         users:(("nginx",pid=890,fd=7))
+LISTEN     0          128                  0.0.0.0:3306             0.0.0.0:*         users:(("mysqld",pid=1100,fd=22))
+LISTEN     0          128                     [::]:22                  [::]:*         users:(("sshd",pid=1234,fd=4))
+LISTEN     0          128                    [::1]:631                 [::]:*         users:(("cupsd",pid=567,fd=13))
+State      Recv-Q     Send-Q         Local Address:Port          Peer Address:Port     Process
+UNCONN     0          0                    0.0.0.0:68               0.0.0.0:*         users:(("dhclient",pid=450,fd=6))
+UNCONN     0          0              127.0.0.53%lo:53               0.0.0.0:*         users:(("systemd-resolve",pid=400,fd=12))
