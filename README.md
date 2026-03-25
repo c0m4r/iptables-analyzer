@@ -8,7 +8,7 @@
 
 A Go CLI tool for analyzing iptables/ip6tables firewall rules to find security issues, shadowed rules, Docker NAT bypasses, exposed services, and policy violations. Provides security scoring and actionable recommendations.
 
-<img width="645" height="647" alt="image" src="https://github.com/user-attachments/assets/8f804d08-1ab4-4a3d-91c9-d76fe70a2038" />
+<img width="833" height="330" alt="image" src="https://github.com/user-attachments/assets/3ec0795e-7ab7-4494-ba69-5fa00404cfc8" />
 
 </div>
 
