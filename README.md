@@ -71,7 +71,7 @@ sudo ip6tables-save > /tmp/rules.v6
 ### Other modes
 ```bash
 # Security score only
-./iptables-analyzer --ipv4-file /tmp/rules.v4 --score-only
+./iptables-analyzer -f /tmp/rules.v4 --score-only
 
 # JSON output for integration
 ./iptables-analyzer --file /tmp/rules.v4 --json
@@ -149,7 +149,7 @@ sudo iptables -I DOCKER-USER -i eth0 -p tcp --dport 8080 -s 10.0.0.0/8 -j ACCEPT
 
 ### Analyze Docker setup
 ```bash
-sudo ./iptables-analyzer --live --check-services
+sudo ./iptables-analyzer
 # Will flag any DNAT rules with bypassed INPUT blocks
 ```
 
@@ -219,8 +219,8 @@ GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o iptables-analyzer-amd64 .
 
 Only runtime dependencies:
 - Go 1.26+
-- iptables/ip6tables (for --live mode)
-- ss utility (for --check-services mode, usually in iproute2 package)
+- iptables/ip6tables (for live analysis, requires root)
+- ss utility (for service cross-referencing, usually in iproute2 package)
 
 ## Limitations
 

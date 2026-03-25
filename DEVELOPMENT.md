@@ -12,8 +12,8 @@ make test         # Run tests with race detector
 ./iptables-analyzer --help
 
 # Test with fixtures
-./iptables-analyzer --ipv4-file testdata/docker.iptables-save
-./iptables-analyzer --ipv4-file testdata/insecure.iptables-save
+./iptables-analyzer -f testdata/docker.iptables-save
+./iptables-analyzer -f testdata/insecure.iptables-save
 ```
 
 ## Project Structure
@@ -26,8 +26,12 @@ iptables-analyzer/
 ├── DEVELOPMENT.md            # This file
 ├── Makefile                  # Build and test targets
 ├── addons/
-│   ├── update-deps.sh       # Update Go dependencies
-│   └── build.sh            # Cross-platform build script
+│   ├── build.sh                    # Cross-platform build script
+│   ├── update-deps.sh              # Update Go dependencies
+│   ├── bash-completion/
+│   │   └── iptables-analyzer       # Bash completion script
+│   └── man1/
+│       └── iptables-analyzer.1     # Manpage
 ├── cmd/
 │   └── root.go              # CLI setup with cobra
 ├── internal/
@@ -145,12 +149,12 @@ fmt.Fprintf(os.Stderr, "Debug: %+v\n", obj)
 
 ### Detailed output
 ```bash
-./iptables-analyzer --ipv4-file rules.v4 --verbose
+./iptables-analyzer -f rules.v4 --verbose
 ```
 
 ### JSON output for inspection
 ```bash
-./iptables-analyzer --ipv4-file rules.v4 --json | jq .ShadowedRules
+./iptables-analyzer -f rules.v4 --json | jq .ShadowedRules
 ```
 
 ### Test parsing
@@ -165,10 +169,7 @@ rs, _ := parser.Parse(testData, models.IPv4)
 
 ```bash
 # Update all dependencies
-./scripts/update-deps.sh
-
-# Update only patch versions
-./scripts/update-deps.sh --patch
+./addons/update-deps.sh
 
 # Manual update and verification
 go get -u ./...
@@ -190,7 +191,7 @@ make build         # Stripped, optimized size (~3MB)
 
 ### Cross-platform
 ```bash
-./scripts/build.sh "linux/amd64,linux/arm64,linux/386"
+./addons/build.sh "linux/amd64,linux/arm64,linux/riscv64"
 # Outputs to dist/
 ```
 
