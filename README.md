@@ -47,11 +47,17 @@ make build        # or: go build -ldflags="-s -w" -o iptables-analyzer .
 
 The binary is self-contained with no runtime dependencies.
 
+### Cross build
+
+```bash
+./addons/build.sh
+```
+
 ## Usage
 
 ### Live system analysis
 ```bash
-sudo ./iptables-analyzer --live --check-services
+sudo ./iptables-analyzer
 ```
 
 ### File-based analysis
@@ -59,7 +65,7 @@ Save your firewall rules first:
 ```bash
 sudo iptables-save > /tmp/rules.v4
 sudo ip6tables-save > /tmp/rules.v6
-./iptables-analyzer --ipv4-file /tmp/rules.v4 --ipv6-file /tmp/rules.v6
+./iptables-analyzer --file /tmp/rules.v4 --file6 /tmp/rules.v6
 ```
 
 ### Other modes
@@ -68,16 +74,19 @@ sudo ip6tables-save > /tmp/rules.v6
 ./iptables-analyzer --ipv4-file /tmp/rules.v4 --score-only
 
 # JSON output for integration
-./iptables-analyzer --ipv4-file /tmp/rules.v4 --json
+./iptables-analyzer --file /tmp/rules.v4 --json
 
 # Verbose: show all rules including empty chains
-./iptables-analyzer --ipv4-file /tmp/rules.v4 --verbose
+./iptables-analyzer --file /tmp/rules.v4 --verbose
 
 # IPv4-only (skip IPv6 check)
-./iptables-analyzer --ipv4-file /tmp/rules.v4 --ipv4-only
+./iptables-analyzer -4 --file /tmp/rules.v4
+
+# IPv6-only
+./iptables-analyzer -6 --file6 /tmp/rules.v6
 
 # No colors (for logs/piping)
-./iptables-analyzer --live --no-color
+./iptables-analyzer --no-color
 ```
 
 ### Full help
