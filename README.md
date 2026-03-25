@@ -1,8 +1,16 @@
+<div align="center">
+
 # iptables-analyzer
+
+![Linux](https://img.shields.io/badge/made%20for-linux-yellow?logo=linux&logoColor=ffffff)
+![Go](https://img.shields.io/badge/go%20go%20go-blue?logo=go&logoColor=ffffff)
+[![License: GPL v3](https://img.shields.io/badge/License-AGPLv3-red.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
 A Go CLI tool for analyzing iptables/ip6tables firewall rules to find security issues, shadowed rules, Docker NAT bypasses, exposed services, and policy violations. Provides security scoring and actionable recommendations.
 
-<img width="822" height="724" alt="image" src="https://github.com/user-attachments/assets/ccbd372d-625c-47e0-b623-d7d77363eda4" />
+<img width="645" height="647" alt="image" src="https://github.com/user-attachments/assets/8f804d08-1ab4-4a3d-91c9-d76fe70a2038" />
+
+</div>
 
 ## Features
 
