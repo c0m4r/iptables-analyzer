@@ -42,13 +42,19 @@ func CrossReferenceServices(result *models.AnalysisResult, services []models.Lis
 			}
 		}
 
-		// Check IPv4 / IPv6 rules
+		// Check IPv4 / IPv6 rules; skip services for stacks that weren't analyzed
 		if svc.IsIPv6 {
+			if result.IPv6Rules == nil {
+				continue
+			}
 			scope, allowRule := classifyPortScope(result.IPv6Rules, svc)
 			if scope != "" {
 				addServiceFinding(result, svc, allowRule, scope, "IPv6")
 			}
 		} else {
+			if result.IPv4Rules == nil {
+				continue
+			}
 			scope, allowRule := classifyPortScope(result.IPv4Rules, svc)
 			if scope != "" {
 				addServiceFinding(result, svc, allowRule, scope, "IPv4")

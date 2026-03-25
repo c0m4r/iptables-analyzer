@@ -24,6 +24,8 @@ type RenderOptions struct {
 	Verbose  bool
 	JSON     bool
 	LiveMode bool
+	IPv4Only bool
+	IPv6Only bool
 	Version  string
 }
 
@@ -99,8 +101,14 @@ func renderHeader(w io.Writer, opts RenderOptions) {
 	if opts.LiveMode {
 		mode = "live system"
 	}
+	var stack string
+	if opts.IPv4Only {
+		stack = " │ IPv4 only"
+	} else if opts.IPv6Only {
+		stack = " │ IPv6 only"
+	}
 	ts := time.Now().Format("2006-01-02 15:04:05")
-	fmt.Fprintln(w, styleMuted.Render(fmt.Sprintf("  mode: %s  │  %s", mode, ts)))
+	fmt.Fprintln(w, styleMuted.Render(fmt.Sprintf("  mode: %s%s  │  %s", mode, stack, ts)))
 	fmt.Fprintln(w)
 }
 
@@ -189,7 +197,11 @@ func renderRulesetOverview(w io.Writer, rs *models.Ruleset, label string) {
 				case "DROP":
 					policyRendered = styleSuccess.Render(policy)
 				case "ACCEPT":
-					policyRendered = styleWarning.Render(policy)
+					if name == "OUTPUT" {
+						policyRendered = styleLow.Render(policy)
+					} else {
+						policyRendered = styleWarning.Render(policy)
+					}
 				default:
 					policyRendered = styleMuted.Render(policy)
 				}

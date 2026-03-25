@@ -85,15 +85,17 @@ func Calculate(result *models.AnalysisResult) models.ScoreResult {
 	breakdown["hygiene"] = -hygieneDeduct
 	score -= hygieneDeduct
 
-	// IPv6 deductions (max -10)
+	// IPv6 deductions (max -10); skip when only IPv4 was analyzed
 	ipv6Deduct := 0
-	if result.IPv6Rules == nil || len(result.IPv6Rules.Tables) == 0 {
-		ipv6Deduct += 10
-	} else {
-		ipv6Deduct += checkChainPolicy(result.IPv6Rules, "INPUT", 5)
-	}
-	if ipv6Deduct > 10 {
-		ipv6Deduct = 10
+	if !result.IPv4Only {
+		if result.IPv6Rules == nil || len(result.IPv6Rules.Tables) == 0 {
+			ipv6Deduct += 10
+		} else {
+			ipv6Deduct += checkChainPolicy(result.IPv6Rules, "INPUT", 5)
+		}
+		if ipv6Deduct > 10 {
+			ipv6Deduct = 10
+		}
 	}
 	breakdown["ipv6"] = -ipv6Deduct
 	score -= ipv6Deduct
@@ -111,7 +113,7 @@ func Calculate(result *models.AnalysisResult) models.ScoreResult {
 
 func checkChainPolicy(rs *models.Ruleset, chainName string, deduction int) int {
 	if rs == nil {
-		return deduction
+		return 0 // stack was not analyzed; no penalty
 	}
 	filterTable, ok := rs.Tables["filter"]
 	if !ok {

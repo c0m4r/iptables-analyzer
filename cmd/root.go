@@ -92,6 +92,12 @@ func runAnalysis(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// If both -4 and -6 are set, treat as neither (full dual-stack)
+	if ipv4Only && ipv6Only {
+		ipv4Only = false
+		ipv6Only = false
+	}
+
 	// Load rulesets
 	cfg := loader.Config{
 		IPv4File: ipv4File,
@@ -108,6 +114,8 @@ func runAnalysis(cmd *cobra.Command, args []string) error {
 
 	// Run analysis
 	result := analyzer.Analyze(ipv4Rules, ipv6Rules)
+	result.IPv4Only = ipv4Only
+	result.IPv6Only = ipv6Only
 
 	// Cross-reference with listening services
 	if servicesFile != "" {
@@ -142,6 +150,8 @@ func runAnalysis(cmd *cobra.Command, args []string) error {
 		Verbose:  verbose,
 		JSON:     jsonOutput,
 		LiveMode: live,
+		IPv4Only: ipv4Only,
+		IPv6Only: ipv6Only,
 		Version:  Version,
 	}
 

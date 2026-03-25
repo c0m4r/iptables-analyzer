@@ -153,6 +153,8 @@ type ListeningService struct {
 type AnalysisResult struct {
 	IPv4Rules       *Ruleset
 	IPv6Rules       *Ruleset
+	IPv4Only        bool // set when -4 flag is used; IPv6 stack was not analyzed
+	IPv6Only        bool // set when -6 flag is used; IPv4 stack was not analyzed
 	Services        []ListeningService
 	ShadowedRules   []ShadowFinding
 	DockerBypasses  []DockerBypassFinding

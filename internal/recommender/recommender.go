@@ -142,7 +142,7 @@ func hygieneRecommendations(result *models.AnalysisResult) []models.Recommendati
 func ipv6Recommendations(result *models.AnalysisResult) []models.Recommendation {
 	var recs []models.Recommendation
 
-	if result.IPv6Rules == nil || len(result.IPv6Rules.Tables) == 0 {
+	if !result.IPv4Only && (result.IPv6Rules == nil || len(result.IPv6Rules.Tables) == 0) {
 		recs = append(recs, models.Recommendation{
 			Title: "Configure IPv6 firewall rules",
 			Detail: "No ip6tables rules detected. If IPv6 is enabled on this system, " +
