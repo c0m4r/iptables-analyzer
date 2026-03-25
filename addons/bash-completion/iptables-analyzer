@@ -1,0 +1,43 @@
+# Bash completion for iptables-analyzer
+# Install to /usr/share/bash-completion/completions/iptables-analyzer
+# or source from ~/.bashrc
+
+_iptables_analyzer() {
+    local cur prev words cword
+    _init_completion || return
+
+    case "$prev" in
+        -f|--file)
+            _filedir
+            return
+            ;;
+        --file6)
+            _filedir
+            return
+            ;;
+        --services-file)
+            _filedir
+            return
+            ;;
+    esac
+
+    if [[ "$cur" == -* ]]; then
+        local opts="
+            -f --file
+            --file6
+            -4 --ipv4-only
+            -6 --ipv6-only
+            --no-color
+            --json
+            -v --verbose
+            --services-file
+            -s --score-only
+            -V --version
+            -h --help
+        "
+        COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+        return
+    fi
+}
+
+complete -F _iptables_analyzer iptables-analyzer

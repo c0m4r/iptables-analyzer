@@ -1,6 +1,6 @@
 # Build artifacts
-iptables-analyzer
-iptables-analyzer-*
+/iptables-analyzer
+/iptables-analyzer-*
 dist/
 build/
 *.o
