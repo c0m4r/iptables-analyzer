@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Types of changes: Added, Changed, Deprecated, Removed, Fixed, Security
 
+## [Unreleased]
+
+### Fixed
+
+- v4/v6 mode enhancements/fixes
+
 ## [0.3.0] - 2026-03-24
 
 ### Added
@@ -25,10 +31,6 @@ Types of changes: Added, Changed, Deprecated, Removed, Fixed, Security
 ### Removed
 
 - Args --check-services, --live removed because these are implicit
-
-### Fixed
-
-- v4/v6 mode enhancements/fixes
 
 ## [0.2.0] - 2026-03-24
 
