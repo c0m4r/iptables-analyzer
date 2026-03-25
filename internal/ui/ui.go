@@ -79,7 +79,7 @@ func renderBanner(w io.Writer, version string) {
 
 	var meta string
 	if version != "" {
-		meta = styleMuted.Render("v"+version) + "  " + styleFaint.Render(repoURL)
+		meta = styleMuted.Render("v"+version) + "  " + styleMuted.Render(repoURL)
 	} else {
 		meta = styleFaint.Render(repoURL)
 	}
@@ -360,7 +360,7 @@ func renderHealthBar(retained, mx int) string {
 	}
 	empty := width - filled
 
-	var barColor lipgloss.Color
+	var barColor lipgloss.TerminalColor
 	switch {
 	case mx == 0 || retained >= mx:
 		barColor = green

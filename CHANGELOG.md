@@ -9,6 +9,10 @@ Types of changes: Added, Changed, Deprecated, Removed, Fixed, Security
 
 ## [Unreleased]
 
+### Changed
+
+- adaptive color scheme based on terminal theme
+
 ### Fixed
 
 - v4/v6 mode enhancements/fixes
