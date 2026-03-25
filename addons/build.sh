@@ -28,7 +28,7 @@ IFS=',' read -ra PLATFORM_PAIRS <<< "$TARGETS"
 for PLATFORM in "${PLATFORM_PAIRS[@]}"; do
     IFS='/' read -r GOOS GOARCH <<< "$PLATFORM"
 
-    OUTPUT_NAME="${BINARY_NAME}-${GOARCH}"
+    OUTPUT_NAME="${BINARY_NAME}-${VERSION}-${GOARCH}"
 
     OUTPUT_PATH="dist/${OUTPUT_NAME}"
 
