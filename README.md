@@ -25,6 +25,19 @@ A Go CLI tool for analyzing iptables/ip6tables firewall rules to find security i
 
 ## Installation
 
+### Download
+
+This is sketchy, unsafe, don't do it at home, diry as Dirty Diana, omg what the fuck way of installing iptables-analyzer:
+
+```bash
+LATEST_VERSION=$(curl -s https://github.com/c0m4r/iptables-analyzer/releases | grep "releases/tag" | grep -o "<a href.*</a>" | head -n 1 | cut -f2 -d\> | cut -f1 -d\<)
+if [[ ! "$(echo ${LATEST_VERSION} | sed 's/\.//g;')" =~ ^[0-9]+$ ]]; then echo "wrong version :(" ; fi
+if [[ "$(uname -m)" == "x86_64" ]]; then ARCH="amd64" ; fi
+if [[ "$(uname -m | grep risc)" ]]; then ARCH="riscv64" ; fi
+if [[ "$(uname -m | grep arm)" ]]; then ARCH="arm64" ; fi
+if [[ "$ARCH" && "$LATEST_VERSION" ]]; then wget -nv -O iptables-analyzer https://github.com/c0m4r/iptables-analyzer/releases/download/${LATEST_VERSION}/iptables-analyzer-${LATEST_VERSION}-${ARCH} ; else echo "<sad pepe the frog meme>" ; fi
+```
+
 ### From source
 ```bash
 git clone https://github.com/c0m4r/iptables-analyzer
