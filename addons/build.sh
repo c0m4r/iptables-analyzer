@@ -34,8 +34,9 @@ for PLATFORM in "${PLATFORM_PAIRS[@]}"; do
 
     echo "Building $GOOS/$GOARCH → $OUTPUT_PATH"
 
-    CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build \
-        -ldflags="$LDFLAGS -X main.Version=$VERSION -s -w" \
+	CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build \
+		-mod=readonly \
+		-ldflags="$LDFLAGS" \
         -trimpath \
         -buildvcs=false \
         -o "$OUTPUT_PATH" \

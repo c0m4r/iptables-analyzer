@@ -1,4 +1,4 @@
-.PHONY: build build-min check test vet fmt clean help update-deps
+.PHONY: build build-dev check test test-cover test-race vet fmt fmt-check clean help update-deps update-deps-patch rebuild test-coverage pre-commit
 
 BINARY_NAME=iptables-analyzer
 GO=go
@@ -20,34 +20,32 @@ help:
 
 build: vet test
 	@echo "Building optimized binary..."
-	$(GO) build $(LDFLAGS) -trimpath -buildvcs=false -o $(BINARY_NAME) .
+	$(GO) build -mod=readonly $(LDFLAGS) -trimpath -buildvcs=false -o $(BINARY_NAME) .
 	@ls -lh $(BINARY_NAME)
 
 build-dev:
 	@echo "Building development binary..."
-	$(GO) build -o $(BINARY_NAME) .
+	$(GO) build -mod=readonly -o $(BINARY_NAME) .
 	@ls -lh $(BINARY_NAME)
 
 check: fmt-check vet test
 	@echo "✓ All checks passed"
 
-TEST_PKGS := $(shell go list ./... 2>/dev/null | xargs -I{} sh -c 'ls {#}/*_test.go 2>/dev/null | head -1' 2>/dev/null | xargs dirname 2>/dev/null || echo "./internal/parser ./internal/analyzer")
-
 test:
 	@echo "Running tests..."
-	$(GO) test -v ./internal/parser/... ./internal/analyzer/...
+	$(GO) test -mod=readonly -v ./...
 
 test-cover:
 	@echo "Running tests with coverage..."
-	$(GO) test -v -cover ./internal/parser/... ./internal/analyzer/...
+	$(GO) test -mod=readonly -v -cover ./...
 
 test-race:
 	@echo "Running tests with race detector..."
-	$(GO) test -v -race ./internal/parser/... ./internal/analyzer/...
+	$(GO) test -mod=readonly -v -race ./...
 
 vet:
 	@echo "Running go vet..."
-	$(GO) vet ./...
+	$(GO) vet -mod=readonly ./...
 
 fmt:
 	@echo "Formatting code..."
@@ -55,7 +53,8 @@ fmt:
 
 fmt-check:
 	@echo "Checking code formatting..."
-	@if [ -n "$$($(GO) fmt ./... | tee /dev/stderr)" ]; then \
+	@if [ -n "$$(gofmt -l $$(find . -name '*.go' -type f))" ]; then \
+		gofmt -l $$(find . -name '*.go' -type f); \
 		echo "❌ Code formatting issues found. Run 'make fmt' to fix."; \
 		exit 1; \
 	else \
@@ -90,7 +89,7 @@ rebuild: clean update-deps check build
 .PHONY: test-coverage
 test-coverage:
 	@echo "Running tests with coverage..."
-	$(GO) test -cover -coverprofile=coverage.out ./...
+	$(GO) test -mod=readonly -cover -coverprofile=coverage.out ./...
 	$(GO) tool cover -html=coverage.out -o coverage.html
 	@echo "✓ Coverage report: coverage.html"
 

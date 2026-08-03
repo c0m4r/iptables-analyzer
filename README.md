@@ -76,6 +76,16 @@ sudo ip6tables-save > /tmp/rules.v6
 ./iptables-analyzer --file /tmp/rules.v4 --file6 /tmp/rules.v6
 ```
 
+File mode does not inspect services on the machine running the analyzer. To
+cross-reference saved rules with listening sockets from the same host, capture
+and provide `ss` output explicitly:
+
+```bash
+ss -tlnp > /tmp/services.txt
+ss -ulnp >> /tmp/services.txt
+./iptables-analyzer --file /tmp/rules.v4 --file6 /tmp/rules.v6 --services-file /tmp/services.txt
+```
+
 ### Other modes
 ```bash
 # Security score only
@@ -106,11 +116,11 @@ sudo ip6tables-save > /tmp/rules.v6
 
 ### Security Score
 Shows a 0-100 score with letter grade (A-F) and breakdown of deductions:
-- **Policy**: -15 INPUT ACCEPT, -10 FORWARD ACCEPT, -5 OUTPUT ACCEPT
-- **Exposure**: -5 per well-known port, -2 per high port exposed to world
-- **Shadows/Bypasses**: -10 per Docker bypass, -5 per shadowed rule
+- **Policy**: -15 INPUT ACCEPT, -10 FORWARD ACCEPT (maximum -25); OUTPUT ACCEPT is advisory
+- **Exposure**: -5 per well-known port, -2 per high port exposed to world (maximum -25)
+- **Shadows/Bypasses**: -12 per critical Docker bypass, -5 per high-severity shadow (maximum -25)
 - **Hygiene**: -5 no conntrack ESTABLISHED, -5 no final DROP, -2 dead rules
-- **IPv6**: -10 no rules, -5 ACCEPT policy
+- **IPv6**: -10 when IPv6 is in scope but no IPv6 rules were loaded
 
 ### Findings
 Lists security issues grouped by severity:
@@ -150,9 +160,9 @@ sudo iptables -A INPUT -p icmp -j ACCEPT
 
 ### Docker with restricted access
 ```bash
-# Add to DOCKER-USER chain (processed before Docker's own rules)
-sudo iptables -I DOCKER-USER -i eth0 -p tcp --dport 8080 -j DROP
-sudo iptables -I DOCKER-USER -i eth0 -p tcp --dport 8080 -s 10.0.0.0/8 -j ACCEPT
+# Match the original published port because DOCKER-USER sees post-DNAT packets
+sudo iptables -I DOCKER-USER 1 -i eth0 -p tcp -s 10.0.0.0/8 -m conntrack --ctorigdstport 8080 -j ACCEPT
+sudo iptables -I DOCKER-USER 2 -i eth0 -p tcp -m conntrack --ctorigdstport 8080 -j DROP
 ```
 
 ### Analyze Docker setup
@@ -170,7 +180,8 @@ sudo ./iptables-analyzer
 - **internal/parser/**: Hand-rolled iptables-save format parser with token walker
 - **internal/loader/**: Load from files or live system (exec iptables-save/ip6tables-save)
 - **internal/analyzer/**: Core analysis logic
-  - `analyzer.go`: Service exposure detection with user-defined chain jump traversal
+  - `evaluation.go`: Order-aware packet-path evaluation with jump, goto, and RETURN traversal
+  - `analyzer.go`: Service exposure detection and listening-service cross-reference
   - `shadow.go`: Detect shadowed rules using CIDR containment, port range logic, and match extension awareness
   - `docker.go`: Docker NAT bypass detection by cross-referencing nat and filter tables
   - `effectiveness.go`: Policy checks, dead rules (with match extension awareness), conntrack optimization
@@ -196,7 +207,7 @@ sudo ./iptables-analyzer
 4. Flag: Input block is ineffective because traffic goes PREROUTING (DNAT) → FORWARD, bypassing INPUT entirely
 5. Also flag DNAT ports with no FORWARD restriction
 
-**Cross-Reference Services**: Walk filter/INPUT chain rules in order to determine if a port is ACCEPT/DROP/DROP, following user-defined chain jumps (e.g. SSHBRUTE → ACCEPT means port is exposed), then compare with listening services from `ss`.
+**Cross-Reference Services**: Walk filter/INPUT rules in order, following user-defined jumps, goto, RETURN, and default policies. Source CIDRs are split symbolically so earlier terminal rules and partial allowlists are respected before comparing the result with listening services from `ss`.
 
 ## Testing
 
@@ -206,8 +217,8 @@ make check        # Run vet, fmt, test
 ```
 
 Test fixtures in `testdata/`:
-- `basic.iptables-save`: Secure baseline (score: B)
-- `docker.iptables-save`: Docker with INPUT blocks on DNAT ports (score: F, detects bypasses)
+- `basic.iptables-save`: Secure IPv4 baseline (score: A with `--ipv4-only`)
+- `docker.iptables-save`: Docker with INPUT blocks on two DNAT ports (score: F, detects two bypasses)
 - `insecure.iptables-save`: Default ACCEPT policies with shadowed rules (score: F)
 
 ## Building
@@ -233,8 +244,7 @@ Only runtime dependencies:
 ## Limitations
 
 - Requires iptables-save format (supports most iptables rule syntax)
-- Some advanced match extensions may not parse (falls back to storing in Matches)
-- IPv6 address parsing follows IPv4 logic; may not handle all IPv6 notation
+- Advanced match extensions that are not modeled are preserved and handled conservatively: they cannot prove shadow/dead-rule findings, while possible exposure paths remain visible
 - Does not track iptables rule counters/statistics
 
 ## Disclaimer

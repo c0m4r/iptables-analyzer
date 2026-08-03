@@ -66,20 +66,23 @@ type Rule struct {
 	DNATTarget string // for DNAT: "ip:port"
 	Comment    string
 	Negations  map[string]bool // which fields are negated
+	Goto       bool            // true for --goto/-g; false for --jump/-j
 	RawLine    string
 	IPVersion  IPVersion
 }
 
 // MatchExt represents a match extension module
 type MatchExt struct {
-	Module string
-	Params map[string]string
+	Module    string
+	Params    map[string]string
+	Negations map[string]bool // negated module parameters, keyed by option name
+	RawTokens []string        // ordered module arguments for unsupported extensions
 }
 
 // IsTerminal returns true if this rule's target terminates packet processing
 func (r *Rule) IsTerminal() bool {
 	switch r.Target {
-	case "ACCEPT", "DROP", "REJECT", "DNAT", "SNAT", "MASQUERADE", "REDIRECT":
+	case "ACCEPT", "DROP", "REJECT", "RETURN", "DNAT", "SNAT", "MASQUERADE", "REDIRECT":
 		return true
 	default:
 		return false
@@ -209,11 +212,12 @@ type UnusedRuleFinding struct {
 
 // EffectivenessFinding represents a general effectiveness issue
 type EffectivenessFinding struct {
-	Title    string
-	Detail   string
-	Severity Severity
-	Chain    string
-	Table    string
+	Title     string
+	Detail    string
+	Severity  Severity
+	Chain     string
+	Table     string
+	IPVersion IPVersion
 }
 
 // Recommendation is a security improvement suggestion

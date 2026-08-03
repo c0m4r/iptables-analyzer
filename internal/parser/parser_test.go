@@ -155,3 +155,96 @@ func TestTokenize(t *testing.T) {
 		}
 	}
 }
+
+func TestParsePreservesModuleNegation(t *testing.T) {
+	data := `*filter
+:INPUT DROP [0:0]
+-A INPUT -p tcp -m tcp ! --dport 22 -j ACCEPT
+COMMIT
+`
+	rs, err := Parse(data, models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := rs.Tables["filter"].Chains["INPUT"].Rules[0]
+	if !rule.Negations["dport"] || !rule.Matches[0].Negations["--dport"] {
+		t.Fatalf("expected dport negation to be preserved: %+v", rule)
+	}
+}
+
+func TestParseRejectsIncompleteInput(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{"empty", ""},
+		{"missing commit", "*filter\n:INPUT DROP [0:0]\n"},
+		{"undeclared chain", "*filter\n:INPUT DROP [0:0]\n-A MISSING -j ACCEPT\nCOMMIT\n"},
+		{"malformed rule", "*filter\n:INPUT DROP [0:0]\n-A INPUT -p\nCOMMIT\n"},
+		{"unterminated quote", "*filter\n:INPUT DROP [0:0]\n-A INPUT -m comment --comment \"oops -j ACCEPT\nCOMMIT\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := Parse(tt.data, models.IPv4); err == nil {
+				t.Fatal("expected parse error")
+			}
+		})
+	}
+}
+
+func TestParseAllowsRuleWithoutVerdict(t *testing.T) {
+	data := "*filter\n:INPUT DROP [0:0]\n-A INPUT -p tcp\nCOMMIT\n"
+	rs, err := Parse(data, models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := rs.Tables["filter"].Chains["INPUT"].Rules[0]
+	if rule.Protocol != models.ProtoTCP || rule.Target != "" {
+		t.Fatalf("unexpected non-verdict rule: %+v", rule)
+	}
+}
+
+func TestParseGoto(t *testing.T) {
+	data := "*filter\n:INPUT DROP [0:0]\n:CUSTOM - [0:0]\n-A INPUT -g CUSTOM\nCOMMIT\n"
+	rs, err := Parse(data, models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rs.Tables["filter"].Chains["INPUT"].Rules[0].Goto {
+		t.Fatal("expected goto to be distinguished from jump")
+	}
+}
+
+func TestParsePreservesUnsupportedModuleTokens(t *testing.T) {
+	data := "*filter\n:INPUT DROP [0:0]\n-A INPUT -m set --match-set allowed src -j ACCEPT\nCOMMIT\n"
+	rs, err := Parse(data, models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens := rs.Tables["filter"].Chains["INPUT"].Rules[0].Matches[0].RawTokens
+	if len(tokens) != 3 || tokens[0] != "--match-set" || tokens[1] != "allowed" || tokens[2] != "src" {
+		t.Fatalf("unsupported module arguments were not preserved: %v", tokens)
+	}
+}
+
+func TestTokenizeEscapedQuote(t *testing.T) {
+	tokens, err := tokenizeChecked(`-A INPUT -m comment --comment "say \"hello\"" -j ACCEPT`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tokens) != 8 || tokens[5] != `say "hello"` {
+		t.Fatalf("unexpected tokens: %v", tokens)
+	}
+}
+
+func TestParseRuleCounters(t *testing.T) {
+	data := "*filter\n:INPUT DROP [0:0]\n[12:345] -A INPUT -p tcp --dport 22 -j ACCEPT\nCOMMIT\n"
+	rs, err := Parse(data, models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := rs.Tables["filter"].Chains["INPUT"].Rules[0]
+	if rule.DstPort != "22" || rule.RawLine != "[12:345] -A INPUT -p tcp --dport 22 -j ACCEPT" {
+		t.Fatalf("unexpected counter-prefixed rule: %+v", rule)
+	}
+}

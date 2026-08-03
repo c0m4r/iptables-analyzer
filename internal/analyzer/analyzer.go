@@ -1,7 +1,7 @@
 package analyzer
 
 import (
-	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 
@@ -94,176 +94,17 @@ func addServiceFinding(result *models.AnalysisResult, svc models.ListeningServic
 	})
 }
 
-// classifyPortScope determines how accessible a service is through filter/INPUT.
-//
-// It scans all ACCEPT rules for the service's port and protocol, and classifies:
-//   - ScopeWhitelisted  — only specific /32 hosts are allowed
-//   - ScopeLocalnet     — only private RFC1918 ranges are allowed
-//   - ScopeExposed      — any source can reach the service
-//
-// Port-specific ACCEPT rules (DstPort set) take precedence over broad rules
-// (no DstPort) for determining scope, reflecting admin intent.
-// Returns ("", nil) when the service is blocked.
+// classifyPortScope evaluates filter/INPUT in rule order, including jumps and
+// RETURN behavior. Returns ("", nil) when no source can reach the service.
 func classifyPortScope(rs *models.Ruleset, svc models.ListeningService) (models.AccessScope, *models.Rule) {
-	if rs == nil {
-		return models.ScopeExposed, nil
-	}
-
-	filterTable, ok := rs.Tables["filter"]
-	if !ok {
-		return models.ScopeExposed, nil
-	}
-
-	input, ok := filterTable.Chains["INPUT"]
-	if !ok {
-		return models.ScopeExposed, nil
-	}
-
-	svcPortStr := strconv.Itoa(svc.Port)
-
-	var portSpecificScope models.AccessScope
-	var portSpecificRule *models.Rule
-	var broadScope models.AccessScope
-	var broadRule *models.Rule
-
-	for i := range input.Rules {
-		rule := &input.Rules[i]
-
-		// Skip loopback-only rules
-		if rule.InIface == "lo" {
-			continue
-		}
-
-		// Protocol filter
-		if rule.Protocol != "" && rule.Protocol != models.ProtoAll && rule.Protocol != svc.Protocol {
-			continue
-		}
-
-		// State filter — only NEW connections matter for exposure
-		if len(rule.States) > 0 && !containsState(rule.States, "NEW") {
-			continue
-		}
-
-		// Skip negated sources (too complex to classify reliably)
-		if rule.Negations["src"] {
-			continue
-		}
-
-		if !rule.IsAllow() {
-			continue
-		}
-
-		if rule.DstPort != "" {
-			// Port-specific rule
-			if !portMatches(rule.DstPort, svcPortStr) {
-				continue
-			}
-			scope := scopeForSource(rule.SrcAddr)
-			if isScopeMorePermissive(scope, portSpecificScope) {
-				portSpecificScope = scope
-				portSpecificRule = rule
-			}
-		} else {
-			// Broad rule — matches any port
-			// Check for user-defined chain jumps
-			if !rule.IsAllow() {
-				if targetChain, ok := filterTable.Chains[rule.Target]; ok {
-					if !chainCanAccept(targetChain) {
-						continue
-					}
-				}
-			}
-			scope := scopeForSource(rule.SrcAddr)
-			if isScopeMorePermissive(scope, broadScope) {
-				broadScope = scope
-				broadRule = rule
-			}
-		}
-	}
-
-	// Port-specific rules reflect the admin's intent for this service.
-	// Prefer them over broad rules when present.
-	if portSpecificRule != nil {
-		return portSpecificScope, portSpecificRule
-	}
-
-	if broadRule != nil {
-		return broadScope, broadRule
-	}
-
-	// No ACCEPT rule found — check default policy
-	if input.Policy == "ACCEPT" || input.Policy == "" {
-		return models.ScopeExposed, nil
-	}
-	return "", nil
-}
-
-// chainCanAccept returns true if a user-defined chain has any ACCEPT path.
-func chainCanAccept(chain *models.Chain) bool {
-	for _, rule := range chain.Rules {
-		if rule.IsAllow() {
-			return true
-		}
-	}
-	return chain.Policy == "ACCEPT"
-}
-
-// scopeForSource classifies a source address into an access scope.
-func scopeForSource(srcAddr string) models.AccessScope {
-	if srcAddr == "" || srcAddr == "0.0.0.0/0" || srcAddr == "::/0" {
-		return models.ScopeExposed
-	}
-	if isSpecificHost(srcAddr) {
-		return models.ScopeWhitelisted
-	}
-	if isPrivateNetwork(srcAddr) {
-		return models.ScopeLocalnet
-	}
-	return models.ScopeExposed // public IP range
-}
-
-// isScopeMorePermissive returns true when scope a is more permissive than b.
-func isScopeMorePermissive(a, b models.AccessScope) bool {
-	order := map[models.AccessScope]int{
-		"":                      0,
-		models.ScopeWhitelisted: 1,
-		models.ScopeLocalnet:    2,
-		models.ScopeExposed:     3,
-	}
-	return order[a] > order[b]
-}
-
-// isSpecificHost returns true for /32 (IPv4) or /128 (IPv6) addresses.
-func isSpecificHost(addr string) bool {
-	if strings.HasSuffix(addr, "/32") || strings.HasSuffix(addr, "/128") {
-		return true
-	}
-	return !strings.Contains(addr, "/") // bare IP without CIDR
-}
-
-// isPrivateNetwork returns true when addr falls within RFC1918 / ULA ranges.
-func isPrivateNetwork(addr string) bool {
-	if !strings.Contains(addr, "/") {
-		addr += "/32"
-	}
-	_, addrNet, err := net.ParseCIDR(addr)
-	if err != nil {
-		return false
-	}
-	for _, r := range []string{
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-		"100.64.0.0/10", // CGNAT (RFC 6598)
-		"fc00::/7",      // IPv6 ULA
-		"fe80::/10",     // IPv6 link-local
-	} {
-		_, privateNet, _ := net.ParseCIDR(r)
-		if privateNet != nil && privateNet.Contains(addrNet.IP) {
-			return true
-		}
-	}
-	return false
+	scope, allowRule, _ := evaluateAccess(rs, "INPUT", packetQuery{
+		Protocol: svc.Protocol,
+		DstPort:  svc.Port,
+		DstAddr:  svc.Address,
+		State:    "NEW",
+		External: true,
+	})
+	return scope, allowRule
 }
 
 func portMatches(rulePort, servicePort string) bool {
@@ -307,28 +148,38 @@ func checkUnusedInRuleset(result *models.AnalysisResult, rs *models.Ruleset) {
 
 		// Check if any service is listening on this port
 		ports := expandPorts(rule.DstPort)
+		found := false
 		for _, portRange := range ports {
-			for p := portRange[0]; p <= portRange[1]; p++ {
-				found := false
-				for _, svc := range result.Services {
-					if svc.Port == p && (rule.Protocol == "" || rule.Protocol == models.ProtoAll || rule.Protocol == svc.Protocol) {
-						found = true
-						break
-					}
+			for _, svc := range result.Services {
+				if (rs.IPVersion == models.IPv6) != svc.IsIPv6 {
+					continue
 				}
-				if !found && p > 0 {
-					result.UnusedRules = append(result.UnusedRules, models.UnusedRuleFinding{
-						Rule: rule,
-						Reason: "Rule #" + strconv.Itoa(rule.RuleNum) + " allows " +
-							string(rule.Protocol) + " port " + strconv.Itoa(p) +
-							" but no service is listening on that port",
-					})
+				if svc.Port >= portRange[0] && svc.Port <= portRange[1] &&
+					(rule.Protocol == "" || rule.Protocol == models.ProtoAll || rule.Protocol == svc.Protocol) {
+					found = true
+					break
 				}
 			}
+			if found {
+				break
+			}
+		}
+		if !found && len(ports) > 0 {
+			result.UnusedRules = append(result.UnusedRules, models.UnusedRuleFinding{
+				Rule: rule,
+				Reason: "Rule #" + strconv.Itoa(rule.RuleNum) + " allows " +
+					string(rule.Protocol) + " port(s) " + rule.DstPort +
+					" but no matching service is listening",
+			})
 		}
 	}
 }
 
 func isLoopback(addr string) bool {
-	return addr == "127.0.0.1" || addr == "::1" || strings.HasPrefix(addr, "127.")
+	addr = strings.Split(addr, "%")[0]
+	if prefix, err := netip.ParsePrefix(addr); err == nil {
+		return prefix.Addr().IsLoopback()
+	}
+	parsed, err := netip.ParseAddr(addr)
+	return err == nil && parsed.IsLoopback()
 }

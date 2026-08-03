@@ -23,7 +23,8 @@ func CheckEffectiveness(rs *models.Ruleset) []models.EffectivenessFinding {
 	findings = append(findings, checkPolicies(filterTable)...)
 
 	// Check for dead rules (rules after a catch-all DROP/REJECT)
-	for _, chain := range filterTable.Chains {
+	for _, chainName := range sortedChainNames(filterTable) {
+		chain := filterTable.Chains[chainName]
 		findings = append(findings, checkDeadRules(chain, filterTable.Name)...)
 	}
 
@@ -32,6 +33,9 @@ func CheckEffectiveness(rs *models.Ruleset) []models.EffectivenessFinding {
 
 	// Check for missing explicit final DROP in INPUT
 	findings = append(findings, checkFinalDrop(filterTable)...)
+	for i := range findings {
+		findings[i].IPVersion = rs.IPVersion
+	}
 
 	return findings
 }
@@ -79,7 +83,7 @@ func checkDeadRules(chain *models.Chain, tableName string) []models.Effectivenes
 
 	catchAllIdx := -1
 	for i, rule := range chain.Rules {
-		if isCatchAll(&rule) && rule.IsTerminal() {
+		if IsCatchAll(&rule) && rule.IsTerminal() {
 			catchAllIdx = i
 			break
 		}
@@ -104,8 +108,13 @@ func checkDeadRules(chain *models.Chain, tableName string) []models.Effectivenes
 	return findings
 }
 
-// isCatchAll returns true if a rule matches all traffic (no specific match criteria)
-func isCatchAll(rule *models.Rule) bool {
+// IsCatchAll returns true if a rule is known to match all traffic. Unknown or
+// unsupported predicates make this return false rather than risking a false
+// dead-rule or policy conclusion.
+func IsCatchAll(rule *models.Rule) bool {
+	if len(rule.Negations) > 0 {
+		return false
+	}
 	if rule.Protocol != "" && rule.Protocol != models.ProtoAll {
 		return false
 	}
@@ -135,14 +144,8 @@ func isCatchAll(rule *models.Rule) bool {
 // packets the rule applies to beyond protocol/addr/port/state.
 func hasNarrowingMatches(exts []models.MatchExt) bool {
 	for _, ext := range exts {
-		if !narrowingModules[ext.Module] {
-			continue
-		}
-		nps := narrowingParams[ext.Module]
-		for key := range ext.Params {
-			if nps != nil && nps[key] {
-				return true
-			}
+		if matchConstraintSignature(ext) != "" {
+			return true
 		}
 	}
 	return false
@@ -204,7 +207,7 @@ func checkFinalDrop(filterTable *models.Table) []models.EffectivenessFinding {
 	if input.Policy == "ACCEPT" && len(input.Rules) > 0 {
 		// Check if the last rule is a catch-all DROP
 		lastRule := input.Rules[len(input.Rules)-1]
-		if !lastRule.IsBlock() || !isCatchAll(&lastRule) {
+		if !lastRule.IsBlock() || !IsCatchAll(&lastRule) {
 			findings = append(findings, models.EffectivenessFinding{
 				Title: "No explicit DROP at end of INPUT chain with ACCEPT policy",
 				Detail: "The INPUT chain has a default ACCEPT policy but no catch-all DROP rule at the end. " +

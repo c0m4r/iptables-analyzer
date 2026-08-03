@@ -1,6 +1,9 @@
 package scorer
 
 import (
+	"strings"
+
+	"github.com/c0m4r/iptables-analyzer/internal/analyzer"
 	"github.com/c0m4r/iptables-analyzer/internal/models"
 )
 
@@ -15,18 +18,19 @@ func Calculate(result *models.AnalysisResult) models.ScoreResult {
 		"ipv6":     0,
 	}
 
-	// Policy deductions (max -30)
+	// Policy deductions (max -25). OUTPUT ACCEPT is reported as a low-severity
+	// hardening opportunity, but is common and is not scored as a policy flaw.
 	policyDeduct := 0
-	policyDeduct += checkChainPolicy(result.IPv4Rules, "INPUT", 15)
-	policyDeduct += checkChainPolicy(result.IPv4Rules, "FORWARD", 10)
-	policyDeduct += checkChainPolicy(result.IPv4Rules, "OUTPUT", 5)
-	if policyDeduct > 30 {
-		policyDeduct = 30
+	policyRulesets := analyzedPolicyRulesets(result)
+	policyDeduct += maxChainPolicyDeduction(policyRulesets, "INPUT", 15)
+	policyDeduct += maxChainPolicyDeduction(policyRulesets, "FORWARD", 10)
+	if policyDeduct > 25 {
+		policyDeduct = 25
 	}
 	breakdown["policy"] = -policyDeduct
 	score -= policyDeduct
 
-	// Exposure deductions (max -30)
+	// Exposure deductions (max -25)
 	// Only penalise truly EXPOSED services; LOCALNET/WHITELISTED have intentional restrictions.
 	exposureDeduct := 0
 	for _, svc := range result.ExposedServices {
@@ -39,17 +43,17 @@ func Calculate(result *models.AnalysisResult) models.ScoreResult {
 			exposureDeduct += 2 // high port
 		}
 	}
-	if exposureDeduct > 30 {
-		exposureDeduct = 30
+	if exposureDeduct > 25 {
+		exposureDeduct = 25
 	}
 	breakdown["exposure"] = -exposureDeduct
 	score -= exposureDeduct
 
-	// Shadow/Docker bypass deductions (max -20)
+	// Shadow/Docker bypass deductions (max -25)
 	shadowDeduct := 0
 	for _, bypass := range result.DockerBypasses {
 		if bypass.Severity == models.SeverityCritical {
-			shadowDeduct += 10
+			shadowDeduct += 12
 		} else {
 			shadowDeduct += 5
 		}
@@ -61,8 +65,8 @@ func Calculate(result *models.AnalysisResult) models.ScoreResult {
 			shadowDeduct += 2
 		}
 	}
-	if shadowDeduct > 20 {
-		shadowDeduct = 20
+	if shadowDeduct > 25 {
+		shadowDeduct = 25
 	}
 	breakdown["shadow"] = -shadowDeduct
 	score -= shadowDeduct
@@ -70,6 +74,12 @@ func Calculate(result *models.AnalysisResult) models.ScoreResult {
 	// Hygiene deductions (max -15)
 	hygieneDeduct := 0
 	for _, issue := range result.EffectiveIssues {
+		// Policy findings are accounted for in the policy category. Avoid
+		// charging for the same condition a second time as hygiene.
+		if strings.Contains(issue.Title, "default policy is ACCEPT") ||
+			issue.Title == "No explicit DROP at end of INPUT chain with ACCEPT policy" {
+			continue
+		}
 		switch issue.Severity {
 		case models.SeverityHigh:
 			hygieneDeduct += 5
@@ -90,8 +100,6 @@ func Calculate(result *models.AnalysisResult) models.ScoreResult {
 	if !result.IPv4Only {
 		if result.IPv6Rules == nil || len(result.IPv6Rules.Tables) == 0 {
 			ipv6Deduct += 10
-		} else {
-			ipv6Deduct += checkChainPolicy(result.IPv6Rules, "INPUT", 5)
 		}
 		if ipv6Deduct > 10 {
 			ipv6Deduct = 10
@@ -111,6 +119,25 @@ func Calculate(result *models.AnalysisResult) models.ScoreResult {
 	}
 }
 
+func analyzedPolicyRulesets(result *models.AnalysisResult) []*models.Ruleset {
+	if result.IPv4Only {
+		return []*models.Ruleset{result.IPv4Rules}
+	}
+	if result.IPv6Only {
+		return []*models.Ruleset{result.IPv6Rules}
+	}
+	return []*models.Ruleset{result.IPv4Rules, result.IPv6Rules}
+}
+
+func maxChainPolicyDeduction(rulesets []*models.Ruleset, chainName string, deduction int) int {
+	for _, ruleset := range rulesets {
+		if ruleset != nil && len(ruleset.Tables) > 0 && checkChainPolicy(ruleset, chainName, deduction) > 0 {
+			return deduction
+		}
+	}
+	return 0
+}
+
 func checkChainPolicy(rs *models.Ruleset, chainName string, deduction int) int {
 	if rs == nil {
 		return 0 // stack was not analyzed; no penalty
@@ -121,38 +148,19 @@ func checkChainPolicy(rs *models.Ruleset, chainName string, deduction int) int {
 	}
 	chain, ok := filterTable.Chains[chainName]
 	if !ok {
-		return 0
+		return deduction
 	}
 	if chain.Policy == "ACCEPT" {
 		// Check if there's a catch-all DROP at the end
 		if len(chain.Rules) > 0 {
 			last := chain.Rules[len(chain.Rules)-1]
-			if last.IsBlock() && isCatchAll(&last) {
+			if last.IsBlock() && analyzer.IsCatchAll(&last) {
 				return 0 // effectively DROP policy
 			}
 		}
 		return deduction
 	}
 	return 0
-}
-
-func isCatchAll(rule *models.Rule) bool {
-	if rule.Protocol != "" && rule.Protocol != models.ProtoAll {
-		return false
-	}
-	if rule.SrcAddr != "" && rule.SrcAddr != "0.0.0.0/0" && rule.SrcAddr != "::/0" {
-		return false
-	}
-	if rule.DstAddr != "" && rule.DstAddr != "0.0.0.0/0" && rule.DstAddr != "::/0" {
-		return false
-	}
-	if rule.DstPort != "" || rule.SrcPort != "" {
-		return false
-	}
-	if rule.InIface != "" || rule.OutIface != "" {
-		return false
-	}
-	return true
 }
 
 func gradeFromScore(score int) string {

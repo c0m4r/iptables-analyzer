@@ -1,9 +1,11 @@
 package loader
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"time"
 
 	"github.com/c0m4r/iptables-analyzer/internal/models"
 	"github.com/c0m4r/iptables-analyzer/internal/parser"
@@ -33,12 +35,7 @@ func Load(cfg Config) (*models.Ruleset, *models.Ruleset, error) {
 	if !cfg.IPv4Only {
 		ipv6, err = loadOne(cfg.IPv6File, cfg.Live, "ip6tables-save", models.IPv6)
 		if err != nil {
-			// IPv6 failure is non-fatal if we have IPv4
-			if ipv4 != nil {
-				ipv6 = &models.Ruleset{IPVersion: models.IPv6, Tables: make(map[string]*models.Table)}
-			} else {
-				return nil, nil, fmt.Errorf("loading IPv6 rules: %w", err)
-			}
+			return nil, nil, fmt.Errorf("loading IPv6 rules: %w (use --ipv4-only to skip IPv6)", err)
 		}
 	}
 
@@ -58,8 +55,13 @@ func loadOne(filePath string, live bool, command string, ver models.IPVersion) (
 		if os.Geteuid() != 0 {
 			return nil, fmt.Errorf("%s requires root privileges; use sudo or provide a file with --ipv4-file/--ipv6-file", command)
 		}
-		out, err := exec.Command(command).Output()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, command).Output()
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("running %s timed out: %w", command, ctx.Err())
+			}
 			return nil, fmt.Errorf("running %s: %w", command, err)
 		}
 		data = string(out)

@@ -37,6 +37,7 @@ var rootCmd = &cobra.Command{
 	Short:              "Analyze iptables/ip6tables firewall rules for security issues",
 	DisableFlagParsing: false,
 	SilenceUsage:       true,
+	Args:               cobra.NoArgs,
 	RunE:               runAnalysis,
 }
 
@@ -70,6 +71,15 @@ func runAnalysis(cmd *cobra.Command, args []string) error {
 	if noColor {
 		lipgloss.DefaultRenderer().SetColorProfile(termenv.Ascii)
 	}
+	if ipv4Only && ipv6Only {
+		return fmt.Errorf("--ipv4-only and --ipv6-only cannot be used together")
+	}
+	if ipv4Only && ipv6File != "" {
+		return fmt.Errorf("--file6 cannot be used with --ipv4-only")
+	}
+	if ipv6Only && ipv4File != "" {
+		return fmt.Errorf("--file cannot be used with --ipv6-only")
+	}
 
 	// Determine mode
 	hasFiles := ipv4File != "" || ipv6File != ""
@@ -88,14 +98,8 @@ func runAnalysis(cmd *cobra.Command, args []string) error {
 			fmt.Fprintln(os.Stderr, "To save rules for offline analysis:")
 			fmt.Fprintln(os.Stderr, "  sudo iptables-save > rules.v4")
 			fmt.Fprintln(os.Stderr, "  sudo ip6tables-save > rules.v6")
-			return nil
+			return fmt.Errorf("no input specified")
 		}
-	}
-
-	// If both -4 and -6 are set, treat as neither (full dual-stack)
-	if ipv4Only && ipv6Only {
-		ipv4Only = false
-		ipv6Only = false
 	}
 
 	// Load rulesets
@@ -125,12 +129,12 @@ func runAnalysis(cmd *cobra.Command, args []string) error {
 		} else {
 			analyzer.CrossReferenceServices(result, svcs)
 		}
-	} else {
+	} else if live {
 		svcs, err := services.GetListening()
 		if err != nil {
 			if live {
 				fmt.Fprintf(os.Stderr, "Warning: could not get listening services: %v\n", err)
-				fmt.Fprintf(os.Stderr, "  Tip: save ss output with: ss -tlnp && ss -ulnp > services.txt\n")
+				fmt.Fprintf(os.Stderr, "  Tip: save ss output with: ss -tlnp > services.txt && ss -ulnp >> services.txt\n")
 				fmt.Fprintf(os.Stderr, "  Then use: --services-file services.txt\n")
 			}
 		} else {

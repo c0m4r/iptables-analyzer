@@ -6,7 +6,8 @@
 # Build and check
 make build        # Optimized build (3MB)
 make check        # Run vet, fmt check, tests
-make test         # Run tests with race detector
+make test         # Run all unit tests
+make test-race    # Run all tests with race detector
 
 # View help
 ./iptables-analyzer --help
@@ -43,6 +44,7 @@ iptables-analyzer/
 │   ├── loader/
 │   │   └── loader.go        # File and live system input
 │   ├── analyzer/
+│   │   ├── evaluation.go    # Ordered jump/goto/RETURN packet-path evaluator
 │   │   ├── shadow.go        # Shadowed rule detection (with match extension awareness)
 │   │   ├── docker.go        # Docker NAT bypass detection
 │   │   ├── effectiveness.go # Policy and hygiene checks (with match extension awareness)
@@ -102,8 +104,8 @@ make test-coverage # Generates coverage.html
 3. Use existing fixtures in `testdata/` when possible
 
 ### Test fixtures
-- `basic.iptables-save`: Clean, secure config. Expected: score B, no critical findings
-- `docker.iptables-save`: Docker setup with DNAT on ports blocked in INPUT. Expected: score F, 4+ Docker bypass findings
+- `basic.iptables-save`: Clean, secure IPv4 config. Expected with `--ipv4-only`: score A, no critical findings
+- `docker.iptables-save`: Docker setup with two DNAT ports blocked in INPUT. Expected: score F, two Docker bypass findings
 - `insecure.iptables-save`: Default ACCEPT policies with shadowed rules. Expected: score F, multiple shadow findings
 
 ## Adding Features
@@ -220,4 +222,3 @@ make clean && make build
 - **DEVELOPMENT.md**: This file
 - **Code comments**: Explain non-obvious algorithms
 - **Function docstrings**: Public API documentation
-

@@ -23,18 +23,21 @@ func policyRecommendations(result *models.AnalysisResult) []models.Recommendatio
 	var recs []models.Recommendation
 
 	for _, issue := range result.EffectiveIssues {
+		command := firewallCommand(issue.IPVersion)
+		stack := stackLabel(issue.IPVersion)
 		if issue.Chain == "INPUT" && issue.Title == "INPUT default policy is ACCEPT" {
 			recs = append(recs, models.Recommendation{
-				Title:    "Set INPUT chain default policy to DROP",
-				Detail:   "Change the INPUT chain policy to DROP and explicitly allow needed services. This follows the principle of least privilege.\n  Command: iptables -P INPUT DROP",
+				Title: "Set " + stack + " INPUT chain default policy to DROP",
+				Detail: "Install and verify required allow rules first, with a tested rollback path, then change the INPUT policy to DROP.\n" +
+					"  Command: " + command + " -P INPUT DROP",
 				Severity: models.SeverityHigh,
 				Category: "policy",
 			})
 		}
 		if issue.Chain == "FORWARD" && issue.Title == "FORWARD default policy is ACCEPT" {
 			recs = append(recs, models.Recommendation{
-				Title:    "Set FORWARD chain default policy to DROP",
-				Detail:   "Change the FORWARD chain policy to DROP. This is especially important with Docker, as it prevents unrestricted container traffic.\n  Command: iptables -P FORWARD DROP",
+				Title:    "Set " + stack + " FORWARD chain default policy to DROP",
+				Detail:   "After verifying required forwarding paths, change the FORWARD policy to DROP.\n  Command: " + command + " -P FORWARD DROP",
 				Severity: models.SeverityHigh,
 				Category: "policy",
 			})
@@ -51,29 +54,43 @@ func dockerRecommendations(result *models.AnalysisResult) []models.Recommendatio
 		return recs
 	}
 
+	severity := models.SeverityHigh
+	for _, bypass := range result.DockerBypasses {
+		if bypass.Severity == models.SeverityCritical {
+			severity = models.SeverityCritical
+			break
+		}
+	}
+
 	// General Docker recommendation
 	recs = append(recs, models.Recommendation{
 		Title: "Use DOCKER-USER chain for container access control",
 		Detail: "Docker manages the DOCKER chain directly. To restrict access to containerized services, " +
-			"add rules to the DOCKER-USER chain instead of INPUT.\n" +
-			"  Example: iptables -I DOCKER-USER -i eth0 -p tcp --dport 80 -j DROP\n" +
-			"  This chain is processed before Docker's own rules and persists across container restarts.",
-		Severity: models.SeverityCritical,
+			"add reviewed rules to DOCKER-USER instead of INPUT. Packets are already DNATed there, " +
+			"so match the published host port with conntrack --ctorigdstport or match the translated container tuple.",
+		Severity: severity,
 		Category: "docker",
 	})
 
 	for _, bypass := range result.DockerBypasses {
-		if bypass.InputRule.RuleNum > 0 {
-			recs = append(recs, models.Recommendation{
-				Title: "Move port " + bypass.ExposedPort + " block from INPUT to DOCKER-USER",
-				Detail: "The block on port " + bypass.ExposedPort + " in INPUT (rule #" +
-					strconv.Itoa(bypass.InputRule.RuleNum) + ") is ineffective because Docker DNAT " +
-					"bypasses INPUT. Move this rule to the DOCKER-USER chain:\n" +
-					"  iptables -I DOCKER-USER -i eth0 -p tcp --dport " + bypass.ExposedPort + " -j DROP",
-				Severity: models.SeverityCritical,
-				Category: "docker",
-			})
+		protocol := string(bypass.NATRule.Protocol)
+		if protocol == "" || protocol == string(models.ProtoAll) {
+			protocol = "tcp"
 		}
+		command := firewallCommand(bypass.NATRule.IPVersion)
+		detail := "Restrict the original published port before Docker's forwarding accept rules:\n" +
+			"  " + command + " -I DOCKER-USER -i <external-interface> -p " + protocol +
+			" -m conntrack --ctorigdstport " + bypass.ExposedPort + " -j DROP"
+		if bypass.InputRule.RuleNum > 0 {
+			detail = "The INPUT block at rule #" + strconv.Itoa(bypass.InputRule.RuleNum) +
+				" does not see DNATed traffic. " + detail
+		}
+		recs = append(recs, models.Recommendation{
+			Title:    "Restrict published port " + bypass.ExposedPort + " in DOCKER-USER",
+			Detail:   detail,
+			Severity: bypass.Severity,
+			Category: "docker",
+		})
 	}
 
 	return recs
@@ -89,13 +106,23 @@ func exposureRecommendations(result *models.AnalysisResult) []models.Recommendat
 			continue
 		}
 		svc := exposed.Service
+		command := "iptables"
+		if svc.IsIPv6 {
+			command = "ip6tables"
+		}
+		detail := svc.Process + " is listening on port " + strconv.Itoa(svc.Port) + "/" +
+			string(svc.Protocol) + " and is accessible from unrestricted sources. "
+		if exposed.AllowingRule != nil {
+			detail += "Replace or remove the permissive INPUT rule #" + strconv.Itoa(exposed.AllowingRule.RuleNum) +
+				", then add a source-restricted rule and ensure unmatched traffic is dropped.\n"
+		} else {
+			detail += "Add a source-restricted allow rule, then ensure unmatched traffic is dropped by policy or a final rule.\n"
+		}
+		detail += "  Example allow: " + command + " -I INPUT -p " + string(svc.Protocol) + " --dport " +
+			strconv.Itoa(svc.Port) + " -s <trusted-network> -j ACCEPT"
 		recs = append(recs, models.Recommendation{
-			Title: "Restrict access to " + svc.Process + " on port " + strconv.Itoa(svc.Port),
-			Detail: svc.Process + " is listening on port " + strconv.Itoa(svc.Port) + "/" +
-				string(svc.Protocol) + " and is accessible from any source. " +
-				"Consider restricting access to specific IP ranges:\n" +
-				"  iptables -A INPUT -p " + string(svc.Protocol) + " --dport " +
-				strconv.Itoa(svc.Port) + " -s <trusted-network> -j ACCEPT",
+			Title:    "Restrict access to " + svc.Process + " on port " + strconv.Itoa(svc.Port),
+			Detail:   detail,
 			Severity: exposed.Severity,
 			Category: "exposure",
 		})
@@ -106,20 +133,31 @@ func exposureRecommendations(result *models.AnalysisResult) []models.Recommendat
 
 func hygieneRecommendations(result *models.AnalysisResult) []models.Recommendation {
 	var recs []models.Recommendation
+	inputAcceptPolicy := map[models.IPVersion]bool{}
+	for _, issue := range result.EffectiveIssues {
+		if issue.Title == "INPUT default policy is ACCEPT" {
+			inputAcceptPolicy[issue.IPVersion] = true
+		}
+	}
 
 	for _, issue := range result.EffectiveIssues {
+		command := firewallCommand(issue.IPVersion)
+		stack := stackLabel(issue.IPVersion)
 		switch issue.Title {
 		case "No conntrack ESTABLISHED,RELATED rule in INPUT":
 			recs = append(recs, models.Recommendation{
-				Title:    "Add conntrack rule for established connections",
-				Detail:   "Add an early rule to accept established/related connections for better performance:\n  iptables -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+				Title:    "Add " + stack + " conntrack rule for established connections",
+				Detail:   "Add an early rule to accept established/related connections for better performance:\n  " + command + " -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
 				Severity: models.SeverityMedium,
 				Category: "hygiene",
 			})
 		case "No explicit DROP at end of INPUT chain with ACCEPT policy":
+			if inputAcceptPolicy[issue.IPVersion] {
+				continue // covered by the policy recommendation
+			}
 			recs = append(recs, models.Recommendation{
-				Title:    "Add explicit DROP at end of INPUT or change policy",
-				Detail:   "Either change the INPUT policy to DROP or add a catch-all rule:\n  iptables -A INPUT -j DROP\n  Or: iptables -P INPUT DROP",
+				Title:    "Add explicit " + stack + " DROP at end of INPUT or change policy",
+				Detail:   "After verifying required allow rules and a rollback path, either change the INPUT policy to DROP or add a catch-all rule:\n  " + command + " -A INPUT -j DROP\n  Or: " + command + " -P INPUT DROP",
 				Severity: models.SeverityHigh,
 				Category: "hygiene",
 			})
@@ -127,16 +165,33 @@ func hygieneRecommendations(result *models.AnalysisResult) []models.Recommendati
 	}
 
 	// Check for SSH rate limiting
-	if hasSSHWithoutRateLimit(result.IPv4Rules) {
+	if sshRule := findSSHWithoutRateLimit(result.IPv4Rules); sshRule != nil {
 		recs = append(recs, models.Recommendation{
-			Title:    "Add rate limiting for SSH",
-			Detail:   "SSH (port 22) is allowed without rate limiting. Add rate limiting to mitigate brute-force attacks:\n  iptables -I INPUT -p tcp --dport 22 -m conntrack --ctstate NEW -m limit --limit 3/min --limit-burst 5 -j ACCEPT",
+			Title: "Add rate limiting for SSH",
+			Detail: "Replace unrestricted SSH ACCEPT rule #" + strconv.Itoa(sshRule.RuleNum) +
+				" with a rate-limited rule, and verify that attempts which exceed the limit fall through to DROP:\n" +
+				"  iptables -R INPUT " + strconv.Itoa(sshRule.RuleNum) +
+				" -p tcp --dport 22 -m conntrack --ctstate NEW -m limit --limit 3/min --limit-burst 5 -j ACCEPT",
 			Severity: models.SeverityMedium,
 			Category: "hygiene",
 		})
 	}
 
 	return recs
+}
+
+func firewallCommand(version models.IPVersion) string {
+	if version == models.IPv6 {
+		return "ip6tables"
+	}
+	return "iptables"
+}
+
+func stackLabel(version models.IPVersion) string {
+	if version == models.IPv6 {
+		return "IPv6"
+	}
+	return "IPv4"
 }
 
 func ipv6Recommendations(result *models.AnalysisResult) []models.Recommendation {
@@ -159,21 +214,23 @@ func ipv6Recommendations(result *models.AnalysisResult) []models.Recommendation 
 	return recs
 }
 
-func hasSSHWithoutRateLimit(rs *models.Ruleset) bool {
+func findSSHWithoutRateLimit(rs *models.Ruleset) *models.Rule {
 	if rs == nil {
-		return false
+		return nil
 	}
 	filterTable, ok := rs.Tables["filter"]
 	if !ok {
-		return false
+		return nil
 	}
 	input, ok := filterTable.Chains["INPUT"]
 	if !ok {
-		return false
+		return nil
 	}
 
-	for _, rule := range input.Rules {
-		if rule.IsAllow() && rule.Protocol == models.ProtoTCP && rule.DstPort == "22" {
+	for i := range input.Rules {
+		rule := &input.Rules[i]
+		if rule.IsAllow() && rule.Protocol == models.ProtoTCP && rule.DstPort == "22" &&
+			(rule.SrcAddr == "" || rule.SrcAddr == "0.0.0.0/0") && !rule.Negations["src"] {
 			// Check if there's a limit match
 			hasLimit := false
 			for _, m := range rule.Matches {
@@ -183,9 +240,9 @@ func hasSSHWithoutRateLimit(rs *models.Ruleset) bool {
 				}
 			}
 			if !hasLimit {
-				return true
+				return rule
 			}
 		}
 	}
-	return false
+	return nil
 }

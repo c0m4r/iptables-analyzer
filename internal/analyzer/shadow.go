@@ -2,6 +2,7 @@ package analyzer
 
 import (
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -16,8 +17,10 @@ func DetectShadowedRules(rs *models.Ruleset) []models.ShadowFinding {
 
 	var findings []models.ShadowFinding
 
-	for _, table := range rs.Tables {
-		for _, chain := range table.Chains {
+	for _, tableName := range sortedTableNames(rs) {
+		table := rs.Tables[tableName]
+		for _, chainName := range sortedChainNames(table) {
+			chain := table.Chains[chainName]
 			findings = append(findings, detectShadowsInChain(chain, table.Name, rs.IPVersion)...)
 		}
 	}
@@ -135,10 +138,18 @@ func addrCovers(a, b, anyAddr string) bool {
 func cidrContains(outer, inner string) bool {
 	// Normalize: add /32 or /128 if missing
 	if !strings.Contains(outer, "/") {
-		outer += "/32"
+		if strings.Contains(outer, ":") {
+			outer += "/128"
+		} else {
+			outer += "/32"
+		}
 	}
 	if !strings.Contains(inner, "/") {
-		inner += "/32"
+		if strings.Contains(inner, ":") {
+			inner += "/128"
+		} else {
+			inner += "/32"
+		}
 	}
 
 	_, outerNet, err := net.ParseCIDR(outer)
@@ -198,14 +209,30 @@ func expandPorts(spec string) [][2]int {
 	for _, part := range strings.Split(spec, ",") {
 		part = strings.TrimSpace(part)
 		if idx := strings.Index(part, ":"); idx >= 0 {
-			lo, _ := strconv.Atoi(part[:idx])
-			hi, _ := strconv.Atoi(part[idx+1:])
+			lo, hi := 0, 65535
+			var err error
+			if part[:idx] != "" {
+				lo, err = strconv.Atoi(part[:idx])
+				if err != nil {
+					return nil
+				}
+			}
+			if part[idx+1:] != "" {
+				hi, err = strconv.Atoi(part[idx+1:])
+				if err != nil {
+					return nil
+				}
+			}
+			if lo < 0 || hi > 65535 || lo > hi {
+				return nil
+			}
 			ranges = append(ranges, [2]int{lo, hi})
 		} else {
-			p, _ := strconv.Atoi(part)
-			if p > 0 {
-				ranges = append(ranges, [2]int{p, p})
+			p, err := strconv.Atoi(part)
+			if err != nil || p < 0 || p > 65535 {
+				return nil
 			}
+			ranges = append(ranges, [2]int{p, p})
 		}
 	}
 	return ranges
@@ -225,22 +252,6 @@ func ifaceCovers(a, b string) bool {
 	return a == b
 }
 
-// narrowingModules lists match modules whose parameters restrict which
-// packets the rule applies to.  If rule A uses one of these, it can only
-// shadow rule B if B uses the same module with compatible parameters.
-var narrowingModules = map[string]bool{
-	"icmp6":     true, // --icmpv6-type
-	"icmp":      true, // --icmp-type
-	"recent":    true, // --update --seconds --hitcount
-	"limit":     true, // --limit --limit-burst
-	"hashlimit": true,
-	"string":    true,
-	"u32":       true,
-	"mark":      true,
-	"owner":     true,
-	"addrtype":  true, // --dst-type, --src-type restrict which address types match
-}
-
 // narrowingParams lists per-module params that restrict the match scope.
 // A module might have a param that only sets state (e.g. recent --set)
 // rather than narrowing — those are tracked here so we can tell apart
@@ -258,50 +269,87 @@ var narrowingParams = map[string]map[string]bool{
 }
 
 func matchExtsCovers(aExts, bExts []models.MatchExt) bool {
-	// Index B's modules for quick lookup.
-	bByMod := map[string]*models.MatchExt{}
-	for i := range bExts {
-		bByMod[bExts[i].Module] = &bExts[i]
+	bSignatures := make(map[string]int)
+	for _, ext := range bExts {
+		if signature := matchConstraintSignature(ext); signature != "" {
+			bSignatures[signature]++
+		}
 	}
-
-	for _, aExt := range aExts {
-		if !narrowingModules[aExt.Module] {
+	for _, ext := range aExts {
+		signature := matchConstraintSignature(ext)
+		if signature == "" {
 			continue
 		}
-		// Check if this ext instance actually narrows (has narrowing params).
+		if bSignatures[signature] == 0 {
+			return false
+		}
+		bSignatures[signature]--
+	}
+	return true
+}
+
+// matchConstraintSignature returns a stable representation of match behavior
+// that is not already modeled by Rule fields. Unknown extensions are treated
+// as restrictive; equality is required before claiming one rule covers another.
+func matchConstraintSignature(ext models.MatchExt) string {
+	ignored := map[string]bool{}
+	switch ext.Module {
+	case "comment":
+		return ""
+	case "tcp", "udp":
+		ignored["--dport"] = true
+		ignored["--destination-port"] = true
+		ignored["--sport"] = true
+		ignored["--source-port"] = true
+	case "multiport":
+		ignored["--dports"] = true
+		ignored["--destination-ports"] = true
+		ignored["--sports"] = true
+		ignored["--source-ports"] = true
+	case "conntrack", "state":
+		ignored["--ctstate"] = true
+		ignored["--state"] = true
+	case "recent":
+		// --set only records the address and does not narrow the match.
 		hasNarrowing := false
-		nps := narrowingParams[aExt.Module]
-		for key := range aExt.Params {
-			if nps != nil && nps[key] {
+		for key := range ext.Params {
+			if narrowingParams[ext.Module][key] {
 				hasNarrowing = true
-				break
 			}
 		}
 		if !hasNarrowing {
-			continue // e.g. "recent --set" without --update is non-narrowing
-		}
-		// A narrows on this module — B must have the same module with same
-		// narrowing params, otherwise A is more restrictive than B.
-		bExt, ok := bByMod[aExt.Module]
-		if !ok {
-			return false // A restricts on a module B doesn't use
-		}
-		// Both have the module. Compare narrowing params — A covers B only
-		// if every narrowing param in A has the same value in B.
-		for key := range aExt.Params {
-			if nps != nil && nps[key] {
-				if bExt.Params[key] != aExt.Params[key] {
-					return false
-				}
-			}
+			return ""
 		}
 	}
 
-	// Also: if B has a narrowing module that A doesn't, then A IS wider
-	// on that axis — that's fine, A still covers B. So we only need to
-	// check A's modules (done above).
-
-	return true
+	keys := make([]string, 0, len(ext.Params))
+	for key := range ext.Params {
+		if !ignored[key] {
+			keys = append(keys, key)
+		}
+	}
+	if len(keys) == 0 {
+		switch ext.Module {
+		case "tcp", "udp", "multiport", "conntrack", "state":
+			return ""
+		}
+	}
+	if len(ext.RawTokens) > 0 {
+		return ext.Module + "|" + strings.Join(ext.RawTokens, "\x1f")
+	}
+	sort.Strings(keys)
+	var signature strings.Builder
+	signature.WriteString(ext.Module)
+	for _, key := range keys {
+		signature.WriteString("|")
+		if ext.Negations[key] {
+			signature.WriteString("!")
+		}
+		signature.WriteString(key)
+		signature.WriteString("=")
+		signature.WriteString(ext.Params[key])
+	}
+	return signature.String()
 }
 
 func statesCovers(a, b []string) bool {

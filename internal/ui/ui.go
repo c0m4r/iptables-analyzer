@@ -141,7 +141,7 @@ func renderOverview(w io.Writer, result *models.AnalysisResult) {
 
 	exposedCount := countExposed(result)
 	totalFindings := len(result.ShadowedRules) + len(result.DockerBypasses) +
-		exposedCount + len(result.EffectiveIssues)
+		exposedCount + len(result.EffectiveIssues) + len(result.UnusedRules)
 
 	if totalFindings == 0 {
 		fmt.Fprintf(w, "  Findings:        %s\n", styleSuccess.Render("none"))
@@ -158,6 +158,9 @@ func renderOverview(w io.Writer, result *models.AnalysisResult) {
 		}
 		if n := len(result.EffectiveIssues); n > 0 {
 			parts = append(parts, styleMuted.Render(fmt.Sprintf("%d effectiveness", n)))
+		}
+		if n := len(result.UnusedRules); n > 0 {
+			parts = append(parts, styleMuted.Render(fmt.Sprintf("%d unused rules", n)))
 		}
 		summary := strings.Join(parts, styleFaint.Render(" · "))
 		fmt.Fprintf(w, "  Findings:        %s  %s\n",
@@ -244,11 +247,16 @@ func renderRulesetTables(w io.Writer, rs *models.Ruleset, label string, verbose 
 		renderTableChains(w, table, verbose)
 	}
 
-	for tableName, table := range rs.Tables {
+	extraTables := make([]string, 0, len(rs.Tables))
+	for tableName := range rs.Tables {
 		if shown[tableName] {
 			continue
 		}
-		renderTableChains(w, table, verbose)
+		extraTables = append(extraTables, tableName)
+	}
+	sort.Strings(extraTables)
+	for _, tableName := range extraTables {
+		renderTableChains(w, rs.Tables[tableName], verbose)
 	}
 }
 
@@ -267,10 +275,16 @@ func renderTableChains(w io.Writer, table *models.Table, verbose bool) {
 		}
 	}
 
-	for chainName, chain := range table.Chains {
+	extraChains := make([]string, 0, len(table.Chains))
+	for chainName := range table.Chains {
 		if shown[chainName] {
 			continue
 		}
+		extraChains = append(extraChains, chainName)
+	}
+	sort.Strings(extraChains)
+	for _, chainName := range extraChains {
+		chain := table.Chains[chainName]
 		if verbose || len(chain.Rules) > 0 {
 			renderRuleTable(w, chain, table.Name, verbose)
 		}
@@ -282,9 +296,9 @@ func renderTableChains(w io.Writer, table *models.Table, verbose bool) {
 // ──────────────────────────────────────────────────────────────
 
 var categoryMax = map[string]int{
-	"policy":   30,
-	"exposure": 30,
-	"shadow":   20,
+	"policy":   25,
+	"exposure": 25,
+	"shadow":   25,
 	"hygiene":  15,
 	"ipv6":     10,
 }
@@ -442,13 +456,16 @@ func formatShadowedNums(nums []int) string {
 	return strings.Join(parts, ", ")
 }
 
-type effectKey struct{ title, detail string }
+type effectKey struct {
+	title, detail string
+	ipVersion     models.IPVersion
+}
 
 func deduplicateEffectivenessIssues(issues []models.EffectivenessFinding) []models.EffectivenessFinding {
 	seen := map[effectKey]bool{}
 	var result []models.EffectivenessFinding
 	for _, iss := range issues {
-		k := effectKey{iss.Title, iss.Detail}
+		k := effectKey{iss.Title, iss.Detail, iss.IPVersion}
 		if !seen[k] {
 			seen[k] = true
 			result = append(result, iss)
@@ -512,7 +529,13 @@ func renderFindingsAndRecommendations(w io.Writer, result *models.AnalysisResult
 	if len(deduped) > 0 {
 		renderSubSection(w, "Effectiveness Issues", len(deduped))
 		for _, f := range deduped {
-			renderFindingRow(w, f.Severity.String(), f.Title, f.Detail)
+			stack := ""
+			if f.IPVersion == models.IPv4 {
+				stack = " (IPv4)"
+			} else if f.IPVersion == models.IPv6 {
+				stack = " (IPv6)"
+			}
+			renderFindingRow(w, f.Severity.String(), f.Title+stack, f.Detail)
 		}
 		fmt.Fprintln(w)
 	}

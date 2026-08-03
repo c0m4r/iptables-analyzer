@@ -17,7 +17,7 @@ echo "✓ Saved: $OUTPUT_DIR/rules.v6"
 
 echo ""
 echo "To analyze:"
-echo "  iptables-analyzer --ipv4-file $OUTPUT_DIR/rules.v4 --ipv6-file $OUTPUT_DIR/rules.v6"
+echo "  iptables-analyzer --file $OUTPUT_DIR/rules.v4 --file6 $OUTPUT_DIR/rules.v6"
 echo ""
 echo "To share rules for review:"
 echo "  # Share the files, but note they may contain sensitive network info"

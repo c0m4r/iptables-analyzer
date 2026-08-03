@@ -2,12 +2,14 @@ package services
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/c0m4r/iptables-analyzer/internal/models"
 )
@@ -39,16 +41,24 @@ func getListeners(proto string) ([]models.ListeningService, error) {
 		flag = "-ulnp"
 	}
 
-	out, err := exec.Command("ss", flag).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ss", flag).Output()
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("ss %s timed out: %w", flag, ctx.Err())
+		}
 		// Try without -p (no root)
 		if proto == "tcp" {
 			flag = "-tln"
 		} else {
 			flag = "-uln"
 		}
-		out, err = exec.Command("ss", flag).Output()
+		out, err = exec.CommandContext(ctx, "ss", flag).Output()
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("ss %s timed out: %w", flag, ctx.Err())
+			}
 			return nil, err
 		}
 	}
@@ -61,6 +71,7 @@ var processRe = regexp.MustCompile(`users:\(\("([^"]*)",pid=(\d+)`)
 func parseSSOutput(output string, proto string) ([]models.ListeningService, error) {
 	var services []models.ListeningService
 	scanner := bufio.NewScanner(strings.NewReader(output))
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
 	// Skip header
 	if scanner.Scan() {
@@ -115,6 +126,9 @@ func parseSSOutput(output string, proto string) ([]models.ListeningService, erro
 		services = append(services, svc)
 	}
 
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scanning ss output: %w", err)
+	}
 	return services, nil
 }
 
@@ -175,6 +189,7 @@ func ParseSSData(data string) ([]models.ListeningService, error) {
 	var services []models.ListeningService
 
 	scanner := bufio.NewScanner(strings.NewReader(data))
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 		fields := strings.Fields(line)
@@ -220,5 +235,8 @@ func ParseSSData(data string) ([]models.ListeningService, error) {
 		services = append(services, svc)
 	}
 
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scanning ss data: %w", err)
+	}
 	return services, nil
 }
