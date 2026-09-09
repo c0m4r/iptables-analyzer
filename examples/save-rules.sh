@@ -1,18 +1,34 @@
 #!/bin/bash
 # Save current iptables/ip6tables rules to files for offline analysis
 
+set -euo pipefail
+
 OUTPUT_DIR="${1:-.}"
 
-if [ ! -d "$OUTPUT_DIR" ]; then
-    mkdir -p "$OUTPUT_DIR"
-fi
+mkdir -p "$OUTPUT_DIR"
+
+TMP_V4=""
+TMP_V6=""
+cleanup() {
+	if [[ -n "$TMP_V4" ]]; then rm -f "$TMP_V4"; fi
+	if [[ -n "$TMP_V6" ]]; then rm -f "$TMP_V6"; fi
+}
+trap cleanup EXIT INT TERM
+TMP_V4=$(mktemp "$OUTPUT_DIR/.rules.v4.XXXXXX")
+TMP_V6=$(mktemp "$OUTPUT_DIR/.rules.v6.XXXXXX")
 
 echo "Saving iptables rules to $OUTPUT_DIR..."
 
-sudo iptables-save > "$OUTPUT_DIR/rules.v4"
+sudo iptables-save | tee "$TMP_V4" >/dev/null
+
+sudo ip6tables-save | tee "$TMP_V6" >/dev/null
+
+mv "$TMP_V4" "$OUTPUT_DIR/rules.v4"
+TMP_V4=""
 echo "✓ Saved: $OUTPUT_DIR/rules.v4"
 
-sudo ip6tables-save > "$OUTPUT_DIR/rules.v6"
+mv "$TMP_V6" "$OUTPUT_DIR/rules.v6"
+TMP_V6=""
 echo "✓ Saved: $OUTPUT_DIR/rules.v6"
 
 echo ""

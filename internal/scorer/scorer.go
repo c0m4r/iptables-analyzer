@@ -1,8 +1,6 @@
 package scorer
 
 import (
-	"strings"
-
 	"github.com/c0m4r/iptables-analyzer/internal/analyzer"
 	"github.com/c0m4r/iptables-analyzer/internal/models"
 )
@@ -30,13 +28,25 @@ func Calculate(result *models.AnalysisResult) models.ScoreResult {
 	breakdown["policy"] = -policyDeduct
 	score -= policyDeduct
 
-	// Exposure deductions (max -25)
-	// Only penalise truly EXPOSED services; LOCALNET/WHITELISTED have intentional restrictions.
+	// Exposure deductions (max -25). Findings retain one entry per reachable
+	// address family so the report can explain each firewall path, but the score
+	// is defined per exposed protocol/port. Do not charge a dual-stack endpoint
+	// twice merely because both its IPv4 and IPv6 paths are reachable.
 	exposureDeduct := 0
+	type exposedEndpoint struct {
+		protocol models.Protocol
+		port     int
+	}
+	countedEndpoints := make(map[exposedEndpoint]struct{})
 	for _, svc := range result.ExposedServices {
 		if svc.Scope != models.ScopeExposed {
 			continue
 		}
+		endpoint := exposedEndpoint{protocol: svc.Service.Protocol, port: svc.Service.Port}
+		if _, counted := countedEndpoints[endpoint]; counted {
+			continue
+		}
+		countedEndpoints[endpoint] = struct{}{}
 		if svc.Service.Port < 1024 {
 			exposureDeduct += 5 // well-known port
 		} else {
@@ -76,8 +86,7 @@ func Calculate(result *models.AnalysisResult) models.ScoreResult {
 	for _, issue := range result.EffectiveIssues {
 		// Policy findings are accounted for in the policy category. Avoid
 		// charging for the same condition a second time as hygiene.
-		if strings.Contains(issue.Title, "default policy is ACCEPT") ||
-			issue.Title == "No explicit DROP at end of INPUT chain with ACCEPT policy" {
+		if issue.Code == models.FindingPolicyAccept || issue.Code == models.FindingMissingFinalDrop {
 			continue
 		}
 		switch issue.Severity {
@@ -112,10 +121,31 @@ func Calculate(result *models.AnalysisResult) models.ScoreResult {
 		score = 0
 	}
 
+	complete := result.ServiceAssessment == models.AssessmentComplete && len(result.Diagnostics) == 0
+	unassessed := []string{}
+	if result.ServiceAssessment != models.AssessmentComplete {
+		unassessed = append(unassessed, "listening-service exposure")
+	}
+	areas := map[string]bool{}
+	for _, diagnostic := range result.Diagnostics {
+		areas[diagnostic.Area] = true
+	}
+	if areas["docker"] {
+		unassessed = append(unassessed, "one or more firewall translations")
+	}
+	if areas["services"] && result.ServiceAssessment == models.AssessmentComplete {
+		unassessed = append(unassessed, "listening-service exposure")
+	}
+	grade := gradeFromScore(score)
+	if !complete {
+		grade = "INCOMPLETE"
+	}
 	return models.ScoreResult{
-		Total:     score,
-		Breakdown: breakdown,
-		Grade:     gradeFromScore(score),
+		Total:      score,
+		Breakdown:  breakdown,
+		Grade:      grade,
+		Complete:   complete,
+		Unassessed: unassessed,
 	}
 }
 

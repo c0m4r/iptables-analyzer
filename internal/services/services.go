@@ -3,6 +3,7 @@ package services
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,22 +18,23 @@ import (
 // GetListening returns all listening services from ss output
 func GetListening() ([]models.ListeningService, error) {
 	var services []models.ListeningService
+	var errs []error
 
 	// Get TCP listeners
 	tcpSvcs, err := getListeners("tcp")
 	if err != nil {
-		return nil, err
+		errs = append(errs, fmt.Errorf("TCP listener discovery: %w", err))
 	}
 	services = append(services, tcpSvcs...)
 
 	// Get UDP listeners
 	udpSvcs, err := getListeners("udp")
 	if err != nil {
-		return nil, err
+		errs = append(errs, fmt.Errorf("UDP listener discovery: %w", err))
 	}
 	services = append(services, udpSvcs...)
 
-	return services, nil
+	return services, errors.Join(errs...)
 }
 
 func getListeners(proto string) ([]models.ListeningService, error) {
@@ -69,67 +71,7 @@ func getListeners(proto string) ([]models.ListeningService, error) {
 var processRe = regexp.MustCompile(`users:\(\("([^"]*)",pid=(\d+)`)
 
 func parseSSOutput(output string, proto string) ([]models.ListeningService, error) {
-	var services []models.ListeningService
-	scanner := bufio.NewScanner(strings.NewReader(output))
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-
-	// Skip header
-	if scanner.Scan() {
-		// header line
-	}
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		fields := strings.Fields(line)
-		if len(fields) < 4 {
-			continue
-		}
-
-		// Local address is typically field index 3 (State Recv-Q Send-Q Local)
-		// But for UDP UNCONN, layout might differ
-		localAddrIdx := 3
-		if fields[0] == "UNCONN" || fields[0] == "LISTEN" {
-			localAddrIdx = 3
-		}
-		if localAddrIdx >= len(fields) {
-			continue
-		}
-
-		localAddr := fields[localAddrIdx]
-		addr, port := parseAddress(localAddr)
-		if port == 0 {
-			continue
-		}
-
-		svc := models.ListeningService{
-			Protocol: models.Protocol(proto),
-			Address:  addr,
-			Port:     port,
-		}
-
-		// Determine if IPv6
-		svc.IsIPv6 = strings.Contains(addr, ":")
-
-		// Determine if wildcard
-		svc.IsWildcard = addr == "0.0.0.0" || addr == "::" || addr == "*"
-
-		// Parse process info if available
-		for _, f := range fields {
-			matches := processRe.FindStringSubmatch(f)
-			if len(matches) >= 3 {
-				svc.Process = matches[1]
-				svc.PID, _ = strconv.Atoi(matches[2])
-				break
-			}
-		}
-
-		services = append(services, svc)
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scanning ss output: %w", err)
-	}
-	return services, nil
+	return parseSSData(output, proto)
 }
 
 func parseAddress(addr string) (string, int) {
@@ -159,7 +101,7 @@ func parseAddress(addr string) (string, int) {
 	// Handle *:port
 	if strings.HasPrefix(addr, "*:") {
 		port, _ := strconv.Atoi(addr[2:])
-		return "0.0.0.0", port
+		return "*", port
 	}
 
 	// Handle IPv4 addr:port - split on last colon
@@ -186,14 +128,30 @@ func ParseSSFile(path string) ([]models.ListeningService, error) {
 // ParseSSData parses combined ss output provided as a string.
 // Detects TCP (LISTEN) and UDP (UNCONN) entries automatically.
 func ParseSSData(data string) ([]models.ListeningService, error) {
+	return parseSSData(data, "")
+}
+
+func parseSSData(data, forcedProto string) ([]models.ListeningService, error) {
 	var services []models.ListeningService
+	var parseErrs []error
+	recognized := false
 
 	scanner := bufio.NewScanner(strings.NewReader(data))
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	lineNum := 0
 	for scanner.Scan() {
+		lineNum++
 		line := scanner.Text()
 		fields := strings.Fields(line)
-		if len(fields) < 4 {
+		if len(fields) == 0 {
+			continue
+		}
+		if fields[0] == "State" || strings.Contains(line, "Local Address:Port") {
+			recognized = true
+			continue
+		}
+		if len(fields) < 5 {
+			parseErrs = append(parseErrs, fmt.Errorf("line %d: malformed ss row", lineNum))
 			continue
 		}
 
@@ -205,21 +163,29 @@ func ParseSSData(data string) ([]models.ListeningService, error) {
 		case "UNCONN":
 			proto = "udp"
 		default:
+			parseErrs = append(parseErrs, fmt.Errorf("line %d: unsupported ss state %q", lineNum, fields[0]))
 			continue
+		}
+		if forcedProto != "" {
+			proto = forcedProto
 		}
 
 		localAddr := fields[3]
 		addr, port := parseAddress(localAddr)
-		if port == 0 {
+		if port < 1 || port > 65535 {
+			parseErrs = append(parseErrs, fmt.Errorf("line %d: invalid local address %q", lineNum, localAddr))
 			continue
 		}
+		family := socketFamily(localAddr)
 
 		svc := models.ListeningService{
 			Protocol:   models.Protocol(proto),
 			Address:    addr,
 			Port:       port,
-			IsIPv6:     strings.Contains(addr, ":"),
+			IsIPv6:     family == models.SocketIPv6,
 			IsWildcard: addr == "0.0.0.0" || addr == "::" || addr == "*",
+			Family:     family,
+			Status:     models.ServiceNotAnalyzed,
 		}
 
 		// Parse process info if available
@@ -233,10 +199,24 @@ func ParseSSData(data string) ([]models.ListeningService, error) {
 		}
 
 		services = append(services, svc)
+		recognized = true
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scanning ss data: %w", err)
+		parseErrs = append(parseErrs, fmt.Errorf("scanning ss data: %w", err))
 	}
-	return services, nil
+	if !recognized {
+		parseErrs = append(parseErrs, errors.New("input contains no recognizable ss header or listener rows"))
+	}
+	return services, errors.Join(parseErrs...)
+}
+
+func socketFamily(localAddr string) models.SocketFamily {
+	if strings.HasPrefix(localAddr, "*:") {
+		return models.SocketDual
+	}
+	if strings.HasPrefix(localAddr, "[") || strings.Count(localAddr, ":") > 1 {
+		return models.SocketIPv6
+	}
+	return models.SocketIPv4
 }

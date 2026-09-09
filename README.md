@@ -15,17 +15,17 @@ A Go CLI tool for analyzing iptables/ip6tables firewall rules to find security i
 ## Features
 
 - **Rule Analysis**: Parses and displays iptables/ip6tables rules in readable tables
-- **Shadow Detection**: Finds rules that are covered by earlier rules and will never match, with match extension awareness (rate-limiting, ICMP type, recent module parameters)
+- **Shadow Detection**: Finds rules that are covered by earlier deterministic rules; stateful and probabilistic matches are kept out of definite shadow proofs
 - **Docker NAT Bypass Detection**: Detects the critical issue where INPUT chain blocks are ineffective because Docker DNAT rules in the nat table redirect traffic through FORWARD, completely bypassing INPUT
 - **Dead Rule Detection**: Identifies rules that come after a catch-all DROP and are unreachable, correctly handling conditional match extensions (e.g. `recent --update` is not a catch-all)
 - **Service Cross-Reference**: Matches firewall rules against actual listening services (`ss` output) to find exposed ports, following user-defined chain jumps (e.g. SSHBRUTE, ICMPFLOOD chains)
-- **Security Scoring**: 100-point security score (A-F grades) with breakdown by category:
+- **Security Scoring**: 100-point security score with A-F grades when every scored category was assessed, and an explicit `INCOMPLETE` grade otherwise:
   - Policy (default ACCEPT policies)
   - Exposure (listening services open to the network)
   - Shadows/Docker bypasses
   - Hygiene (best practices like conntrack, rate limiting)
   - IPv6 coverage
-- **Recommendations**: Specific, actionable security improvement suggestions with iptables commands
+- **Recommendations**: Suggestions that identify the exact table, chain, and rule; ready-to-run replacements are emitted only when the original restrictions can be preserved
 - **Dual Stack**: Full support for both IPv4 (iptables) and IPv6 (ip6tables)
 - **Flexible Input**: Analyze live system (requires root) or saved iptables-save output files
 - **Multiple Output Formats**: Colored CLI, JSON, score-only
@@ -40,9 +40,11 @@ This is sketchy, unsafe, don't do it at home, diry as Dirty Diana, omg what the 
 ```bash
 LATEST_VERSION=$(curl -s https://github.com/c0m4r/iptables-analyzer/releases | grep "releases/tag" | grep -o "<a href.*</a>" | head -n 1 | cut -f2 -d\> | cut -f1 -d\<)
 if [[ ! "$(echo ${LATEST_VERSION} | sed 's/\.//g;')" =~ ^[0-9]+$ ]]; then echo "wrong version :(" ; fi
-if [[ "$(uname -m)" == "x86_64" ]]; then ARCH="amd64" ; fi
-if [[ "$(uname -m | grep risc)" ]]; then ARCH="riscv64" ; fi
-if [[ "$(uname -m | grep arm)" ]]; then ARCH="arm64" ; fi
+case "$(uname -m)" in
+  x86_64) ARCH="amd64" ;;
+  aarch64|arm64) ARCH="arm64" ;;
+  riscv64) ARCH="riscv64" ;;
+esac
 if [[ "$ARCH" && "$LATEST_VERSION" ]]; then wget -nv -O iptables-analyzer https://github.com/c0m4r/iptables-analyzer/releases/download/${LATEST_VERSION}/iptables-analyzer-${LATEST_VERSION}-${ARCH} ; else echo "<sad pepe the frog meme>" ; fi
 ```
 
@@ -86,6 +88,11 @@ ss -ulnp >> /tmp/services.txt
 ./iptables-analyzer --file /tmp/rules.v4 --file6 /tmp/rules.v6 --services-file /tmp/services.txt
 ```
 
+Without `--services-file`, the report marks service exposure and the overall
+grade as `INCOMPLETE`. A missing or malformed explicitly requested services
+file is a fatal input error. A valid header-only `ss` capture represents an
+assessed host with no listeners.
+
 ### Other modes
 ```bash
 # Security score only
@@ -115,9 +122,13 @@ ss -ulnp >> /tmp/services.txt
 ## Understanding the Output
 
 ### Security Score
-Shows a 0-100 score with letter grade (A-F) and breakdown of deductions:
+Shows a 0-100 score with letter grade (A-F) and breakdown of deductions when
+all categories were assessed. The numeric subtotal remains visible with an
+`INCOMPLETE` grade and an `unassessed` list when service evidence or a firewall
+translation could not be evaluated:
+
 - **Policy**: -15 INPUT ACCEPT, -10 FORWARD ACCEPT (maximum -25); OUTPUT ACCEPT is advisory
-- **Exposure**: -5 per well-known port, -2 per high port exposed to world (maximum -25)
+- **Exposure**: -5 per well-known TCP/UDP port, -2 per high TCP/UDP port exposed to the world (maximum -25); a port reachable over both IPv4 and IPv6 is counted once
 - **Shadows/Bypasses**: -12 per critical Docker bypass, -5 per high-severity shadow (maximum -25)
 - **Hygiene**: -5 no conntrack ESTABLISHED, -5 no final DROP, -2 dead rules
 - **IPv6**: -10 when IPv6 is in scope but no IPv6 rules were loaded
@@ -131,7 +142,10 @@ Lists security issues grouped by severity:
 - **INFO**: Unused rules or minor findings
 
 ### Recommendations
-Numbered list of prioritized improvements with specific iptables commands.
+Numbered list of prioritized improvements. Commands cite the actual table,
+chain, and rule. The analyzer provides descriptive guidance instead of a
+replacement command when it cannot prove that the replacement preserves the
+original access restrictions and established-session behavior.
 
 ## Examples
 
@@ -201,11 +215,12 @@ sudo ./iptables-analyzer
 - Match extension awareness (rate-limiting, ICMP types, recent module parameters)
 
 **Docker Bypass Detection**:
-1. Collect all DNAT rules from nat/PREROUTING and nat/DOCKER
-2. Collect all DROP/REJECT rules from filter/INPUT
-3. For each DNAT port, check if there's a corresponding INPUT block
-4. Flag: Input block is ineffective because traffic goes PREROUTING (DNAT) → FORWARD, bypassing INPUT entirely
-5. Also flag DNAT ports with no FORWARD restriction
+
+1. Walk `nat/PREROUTING` in order through jumps, `goto`, and `RETURN`, carrying parent predicates and remaining source ranges
+2. Evaluate every port in each reachable DNAT range and preserve ports for address-only translations
+3. Retain original and translated tuples plus both connection state (`NEW`) and NAT status (`DNAT`)
+4. Evaluate the translated packet through `filter/FORWARD`, including `--ctorigdstport` restrictions
+5. Report a bypass only for externally reachable forwarded traffic; expose unsupported translations as assessment diagnostics
 
 **Cross-Reference Services**: Walk filter/INPUT rules in order, following user-defined jumps, goto, RETURN, and default policies. Source CIDRs are split symbolically so earlier terminal rules and partial allowlists are respected before comparing the result with listening services from `ss`.
 
@@ -217,7 +232,7 @@ make check        # Run vet, fmt, test
 ```
 
 Test fixtures in `testdata/`:
-- `basic.iptables-save`: Secure IPv4 baseline (score: A with `--ipv4-only`)
+- `basic.iptables-save`: IPv4 baseline (100-point subtotal but `INCOMPLETE` without services; B with the bundled service inventory)
 - `docker.iptables-save`: Docker with INPUT blocks on two DNAT ports (score: F, detects two bypasses)
 - `insecure.iptables-save`: Default ACCEPT policies with shadowed rules (score: F)
 
@@ -243,8 +258,11 @@ Only runtime dependencies:
 
 ## Limitations
 
-- Requires iptables-save format (supports most iptables rule syntax)
+- Requires `iptables-save`/`ip6tables-save` format. Native nftables rules, routing, policy routing, and host network configuration are outside the assessment scope
+- Exposure analysis covers `filter/INPUT`, and published-port analysis covers `nat/PREROUTING` plus `filter/FORWARD`; it does not establish every other Netfilter hook or table effect
 - Advanced match extensions that are not modeled are preserved and handled conservatively: they cannot prove shadow/dead-rule findings, while possible exposure paths remain visible
+- Stateful, probabilistic, and side-effecting matches such as `limit`, `statistic`, and `recent` do not establish definite shadowing
+- Saved `ss` wildcard sockets rendered as `*` are assessed for both IPv4 and IPv6 because the saved text does not establish an IPv6-only socket option
 - Does not track iptables rule counters/statistics
 
 ## Disclaimer

@@ -9,7 +9,8 @@ iptables\-analyzer \- analyze iptables/ip6tables firewall rules for security iss
 inspects iptables and ip6tables rules to identify security weaknesses, including
 shadowed or ineffective rules, Docker NAT bypasses that make INPUT rules useless,
 services exposed to the network, and missing best practices. It provides a
-security score and actionable recommendations.
+security score and actionable recommendations. The grade is marked INCOMPLETE
+when listening-service evidence or a firewall translation could not be assessed.
 .PP
 When run as root without any file arguments, it reads rules directly from the
 live system. Otherwise, provide saved rule files with \fB\-f\fR and \fB\-\-file6\fR.
@@ -34,15 +35,16 @@ Disable colored output.
 Output results as JSON.
 .TP
 .BR \-v ", " \-\-verbose
-Show all rules including empty chains.
+Show all rules including empty chains and the original raw rule text.
 .TP
 .BR \-\-services\-file " \fIFILE\fR"
 Path to saved
 .BR ss (8)
 output file (alternative to live service detection).
+An explicitly requested file that is missing or malformed is a fatal error.
 .TP
 .BR \-s ", " \-\-score\-only
-Only print the security score.
+Only print the security score. The output includes assessment completeness.
 .TP
 .BR \-V ", " \-\-version
 Print version and exit.

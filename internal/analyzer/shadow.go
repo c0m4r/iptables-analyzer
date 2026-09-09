@@ -44,6 +44,8 @@ func detectShadowsInChain(chain *models.Chain, tableName string, ipVer models.IP
 					sev = models.SeverityHigh
 				}
 				findings = append(findings, models.ShadowFinding{
+					Code:          models.FindingShadowedRule,
+					Certainty:     models.CertaintyDefinite,
 					ShadowingRule: rules[i],
 					ShadowedRule:  rules[j],
 					Reason: "Rule #" + strconv.Itoa(rules[j].RuleNum) + " in " +
@@ -66,6 +68,9 @@ func isSuperset(a, b *models.Rule, ipVer models.IPVersion) bool {
 
 	// Skip rules with negations - too complex to compare
 	if len(a.Negations) > 0 || len(b.Negations) > 0 {
+		return false
+	}
+	if a.Fragment || b.Fragment {
 		return false
 	}
 
@@ -276,6 +281,9 @@ func matchExtsCovers(aExts, bExts []models.MatchExt) bool {
 		}
 	}
 	for _, ext := range aExts {
+		if statefulMatchModule(ext.Module) {
+			return false
+		}
 		signature := matchConstraintSignature(ext)
 		if signature == "" {
 			continue
@@ -286,6 +294,15 @@ func matchExtsCovers(aExts, bExts []models.MatchExt) bool {
 		bSignatures[signature]--
 	}
 	return true
+}
+
+func statefulMatchModule(module string) bool {
+	switch module {
+	case "limit", "hashlimit", "statistic", "recent", "quota", "nth":
+		return true
+	default:
+		return false
+	}
 }
 
 // matchConstraintSignature returns a stable representation of match behavior

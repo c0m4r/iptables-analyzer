@@ -387,3 +387,320 @@ COMMIT
 		}
 	}
 }
+
+func TestFragmentRuleCannotHideReachableServiceOrProveShadow(t *testing.T) {
+	data := `*filter
+:INPUT DROP [0:0]
+-A INPUT -f -j DROP
+-A INPUT -p tcp --dport 8080 -j ACCEPT
+COMMIT
+`
+	rs, err := parser.Parse(data, models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := Analyze(rs, nil)
+	CrossReferenceServices(result, []models.ListeningService{testService()})
+	if len(result.ExposedServices) != 1 || result.ExposedServices[0].Certainty != models.CertaintyPossible {
+		t.Fatalf("fragment-only DROP hid reachable traffic: %+v", result.ExposedServices)
+	}
+	if len(result.ShadowedRules) != 0 {
+		t.Fatalf("fragment-only rule proved shadowing: %+v", result.ShadowedRules)
+	}
+	for _, finding := range result.EffectiveIssues {
+		if finding.Code == models.FindingDeadRule {
+			t.Fatalf("fragment-only rule made later rule dead: %+v", finding)
+		}
+	}
+}
+
+func TestDualStackWildcardIsEvaluatedForIPv6(t *testing.T) {
+	v4, err := parser.Parse("*filter\n:INPUT DROP [0:0]\nCOMMIT\n", models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v6, err := parser.Parse("*filter\n:INPUT ACCEPT [0:0]\nCOMMIT\n", models.IPv6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := Analyze(v4, v6)
+	CrossReferenceServices(result, []models.ListeningService{{
+		Protocol: models.ProtoTCP, Address: "*", Port: 22, IsWildcard: true, Family: models.SocketDual,
+	}})
+	if len(result.ExposedServices) != 1 || result.ExposedServices[0].IPVersion != models.IPv6 {
+		t.Fatalf("dual-stack wildcard did not reach IPv6 analysis: %+v", result.ExposedServices)
+	}
+}
+
+func TestCrossReferenceDeduplicatesRepeatedListeners(t *testing.T) {
+	v4, err := parser.Parse("*filter\n:INPUT ACCEPT [0:0]\nCOMMIT\n", models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v6, err := parser.Parse("*filter\n:INPUT ACCEPT [0:0]\nCOMMIT\n", models.IPv6)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	udp4 := models.ListeningService{
+		Protocol: models.ProtoUDP, Address: "0.0.0.0", Port: 5353,
+		Process: "kdeconnectd", PID: 1918, IsWildcard: true, Family: models.SocketIPv4,
+	}
+	udp6 := models.ListeningService{
+		Protocol: models.ProtoUDP, Address: "::", Port: 5353,
+		Process: "kdeconnectd", PID: 1918, IsIPv6: true, IsWildcard: true, Family: models.SocketIPv6,
+	}
+	result := Analyze(v4, v6)
+	CrossReferenceServices(result, []models.ListeningService{udp4, udp6, udp4, udp6, udp6})
+
+	if len(result.Services) != 2 {
+		t.Fatalf("expected one logical listener per address family, got %+v", result.Services)
+	}
+	if len(result.ExposedServices) != 2 {
+		t.Fatalf("expected one exposure finding per address family, got %+v", result.ExposedServices)
+	}
+	if result.ExposedServices[0].IPVersion != models.IPv4 || result.ExposedServices[1].IPVersion != models.IPv6 {
+		t.Fatalf("expected distinct IPv4 and IPv6 findings, got %+v", result.ExposedServices)
+	}
+}
+
+func TestCrossReferenceKeepsDifferentProcessesOnSharedListener(t *testing.T) {
+	v4, err := parser.Parse("*filter\n:INPUT ACCEPT [0:0]\nCOMMIT\n", models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := models.ListeningService{
+		Protocol: models.ProtoUDP, Address: "0.0.0.0", Port: 5353,
+		Process: "worker", PID: 100, IsWildcard: true, Family: models.SocketIPv4,
+	}
+	second := first
+	second.PID = 101
+
+	result := Analyze(v4, nil)
+	CrossReferenceServices(result, []models.ListeningService{first, second})
+
+	if len(result.Services) != 2 || len(result.ExposedServices) != 2 {
+		t.Fatalf("listeners owned by different processes were merged: services=%+v findings=%+v", result.Services, result.ExposedServices)
+	}
+}
+
+func TestAllowingRuleKeepsCustomChainIdentity(t *testing.T) {
+	data := `*filter
+:INPUT DROP [0:0]
+:SSH - [0:0]
+-A INPUT -i lo -j ACCEPT
+-A INPUT -p tcp --dport 8080 -j SSH
+-A SSH -p tcp --dport 8080 -j ACCEPT
+COMMIT
+`
+	rs, err := parser.Parse(data, models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := Analyze(rs, nil)
+	CrossReferenceServices(result, []models.ListeningService{testService()})
+	if len(result.ExposedServices) != 1 || result.ExposedServices[0].AllowingRule == nil {
+		t.Fatalf("missing exposure: %+v", result.ExposedServices)
+	}
+	rule := result.ExposedServices[0].AllowingRule
+	if rule.Chain != "SSH" || rule.RuleNum != 1 {
+		t.Fatalf("wrong allowing-rule identity: %+v", rule)
+	}
+}
+
+func TestDockerConntrackDNATStateAllowsNewTranslatedConnection(t *testing.T) {
+	data := `*nat
+:PREROUTING ACCEPT [0:0]
+-A PREROUTING -p tcp --dport 8080 -j DNAT --to-destination 172.17.0.2:80
+COMMIT
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+-A FORWARD -m conntrack --ctstate DNAT -j ACCEPT
+COMMIT
+`
+	rs, err := parser.Parse(data, models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findings := DetectDockerBypasses(rs); len(findings) != 1 || findings[0].ExposedPort != "8080" {
+		t.Fatalf("DNAT state was treated as excluding NEW: %+v", findings)
+	}
+}
+
+func TestDockerPortRangeEvaluatesEveryPublishedPort(t *testing.T) {
+	data := `*nat
+:PREROUTING ACCEPT [0:0]
+-A PREROUTING -p tcp --dport 8080:8081 -j DNAT --to-destination 172.17.0.2
+COMMIT
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+-A FORWARD -p tcp --dport 8080 -j DROP
+-A FORWARD -p tcp --dport 8081 -j ACCEPT
+COMMIT
+`
+	rs, err := parser.Parse(data, models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := DetectDockerBypasses(rs)
+	if len(findings) != 1 || findings[0].ExposedPort != "8081" {
+		t.Fatalf("later exposed port in range was missed: %+v", findings)
+	}
+}
+
+func TestParseDNATTargetDistinguishesBareIPv6(t *testing.T) {
+	if host, port := ParseDNATTarget("2001:db8::2"); host != "2001:db8::2" || port != 0 {
+		t.Fatalf("bare IPv6 address was split as a port: %q %d", host, port)
+	}
+	if host, port := ParseDNATTarget("[2001:db8::2]:80"); host != "2001:db8::2" || port != 80 {
+		t.Fatalf("bracketed IPv6 target was not parsed: %q %d", host, port)
+	}
+}
+
+func TestUnsupportedDNATProducesAssessmentDiagnostic(t *testing.T) {
+	rs, err := parser.Parse("*nat\n:PREROUTING ACCEPT [0:0]\n-A PREROUTING -j DNAT --to-destination 172.17.0.2\nCOMMIT\n", models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := Analyze(rs, nil)
+	if len(result.Diagnostics) != 1 || result.Diagnostics[0].Area != "docker" {
+		t.Fatalf("unsupported DNAT was silently omitted: %+v", result.Diagnostics)
+	}
+}
+
+func TestNATTraversalHonorsConditionalReturn(t *testing.T) {
+	data := `*nat
+:PREROUTING ACCEPT [0:0]
+:DOCKER - [0:0]
+-A PREROUTING -j DOCKER
+-A DOCKER -p tcp --dport 8080 -j RETURN
+-A DOCKER -p tcp --dport 8080 -j DNAT --to-destination 172.17.0.2:80
+COMMIT
+*filter
+:INPUT DROP [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+COMMIT
+`
+	rs, err := parser.Parse(data, models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findings := DetectDockerBypasses(rs); len(findings) != 0 {
+		t.Fatalf("unreachable DNAT after RETURN was reported: %+v", findings)
+	}
+}
+
+func TestNATTraversalHonorsParentPredicates(t *testing.T) {
+	data := `*nat
+:PREROUTING ACCEPT [0:0]
+:CUSTOM - [0:0]
+-A PREROUTING -p udp --dport 8080 -j CUSTOM
+-A CUSTOM -p tcp --dport 8080 -j DNAT --to-destination 172.17.0.2:80
+COMMIT
+*filter
+:INPUT DROP [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+COMMIT
+`
+	rs, err := parser.Parse(data, models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findings := DetectDockerBypasses(rs); len(findings) != 0 {
+		t.Fatalf("conflicting parent and child predicates were reported: %+v", findings)
+	}
+}
+
+func TestNATTraversalHonorsConflictingInterfaces(t *testing.T) {
+	data := `*nat
+:PREROUTING ACCEPT [0:0]
+:CUSTOM - [0:0]
+-A PREROUTING -i eth0 -j CUSTOM
+-A CUSTOM -i eth1 -p tcp --dport 8080 -j DNAT --to-destination 172.17.0.2:80
+COMMIT
+*filter
+:INPUT DROP [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+COMMIT
+`
+	rs, err := parser.Parse(data, models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findings := DetectDockerBypasses(rs); len(findings) != 0 {
+		t.Fatalf("conflicting interfaces were reported as reachable: %+v", findings)
+	}
+}
+
+func TestNATGotoReturnDoesNotResumeCaller(t *testing.T) {
+	data := `*nat
+:PREROUTING ACCEPT [0:0]
+:CUSTOM - [0:0]
+-A PREROUTING -p tcp --dport 8080 -g CUSTOM
+-A PREROUTING -p tcp --dport 8080 -j DNAT --to-destination 172.17.0.2:80
+-A CUSTOM -j RETURN
+COMMIT
+*filter
+:INPUT DROP [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+COMMIT
+`
+	rs, err := parser.Parse(data, models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findings := DetectDockerBypasses(rs); len(findings) != 0 {
+		t.Fatalf("goto RETURN incorrectly resumed the caller: %+v", findings)
+	}
+}
+
+func TestDockerOriginalPortProtectionIsRecognized(t *testing.T) {
+	data := `*nat
+:PREROUTING ACCEPT [0:0]
+-A PREROUTING -p tcp --dport 8080 -j DNAT --to-destination 172.17.0.2:80
+COMMIT
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+:DOCKER-USER - [0:0]
+:DOCKER - [0:0]
+-A FORWARD -j DOCKER-USER
+-A FORWARD -j DOCKER
+-A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8080 -j DROP
+-A DOCKER-USER -j RETURN
+-A DOCKER -p tcp --dport 80 -j ACCEPT
+COMMIT
+`
+	rs, err := parser.Parse(data, models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findings := DetectDockerBypasses(rs); len(findings) != 0 {
+		t.Fatalf("original-port protection was ignored: %+v", findings)
+	}
+}
+
+func TestStatefulMatchesDoNotProveShadowing(t *testing.T) {
+	for _, match := range []string{
+		"-m limit --limit 1/min --limit-burst 1",
+		"-m statistic --mode random --probability 0.5",
+	} {
+		data := "*filter\n:INPUT DROP [0:0]\n-A INPUT -p tcp --dport 80 " + match + " -j ACCEPT\n-A INPUT -p tcp --dport 80 " + match + " -j ACCEPT\nCOMMIT\n"
+		rs, err := parser.Parse(data, models.IPv4)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if findings := DetectShadowedRules(rs); len(findings) != 0 {
+			t.Fatalf("stateful match %q proved shadowing: %+v", match, findings)
+		}
+	}
+}

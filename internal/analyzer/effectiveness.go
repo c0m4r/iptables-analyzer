@@ -66,11 +66,13 @@ func checkPolicies(filterTable *models.Table) []models.EffectivenessFinding {
 		}
 		if chain.Policy == "ACCEPT" {
 			findings = append(findings, models.EffectivenessFinding{
-				Title:    c.chain + " default policy is ACCEPT",
-				Detail:   c.detail,
-				Severity: c.severity,
-				Chain:    c.chain,
-				Table:    "filter",
+				Code:      models.FindingPolicyAccept,
+				Certainty: models.CertaintyDefinite,
+				Title:     c.chain + " default policy is ACCEPT",
+				Detail:    c.detail,
+				Severity:  c.severity,
+				Chain:     c.chain,
+				Table:     "filter",
 			})
 		}
 	}
@@ -93,7 +95,9 @@ func checkDeadRules(chain *models.Chain, tableName string) []models.Effectivenes
 		for i := catchAllIdx + 1; i < len(chain.Rules); i++ {
 			rule := chain.Rules[i]
 			findings = append(findings, models.EffectivenessFinding{
-				Title: "Dead rule in " + tableName + "/" + chain.Name,
+				Code:      models.FindingDeadRule,
+				Certainty: models.CertaintyDefinite,
+				Title:     "Dead rule in " + tableName + "/" + chain.Name,
 				Detail: "Rule #" + strconv.Itoa(rule.RuleNum) + " (" + rule.Summary() +
 					") will never be reached because rule #" +
 					strconv.Itoa(chain.Rules[catchAllIdx].RuleNum) +
@@ -113,6 +117,9 @@ func checkDeadRules(chain *models.Chain, tableName string) []models.Effectivenes
 // dead-rule or policy conclusion.
 func IsCatchAll(rule *models.Rule) bool {
 	if len(rule.Negations) > 0 {
+		return false
+	}
+	if rule.Fragment {
 		return false
 	}
 	if rule.Protocol != "" && rule.Protocol != models.ProtoAll {
@@ -172,7 +179,9 @@ func checkConntrack(filterTable *models.Table) []models.EffectivenessFinding {
 
 	if !hasConntrack && len(input.Rules) > 0 {
 		findings = append(findings, models.EffectivenessFinding{
-			Title: "No conntrack ESTABLISHED,RELATED rule in INPUT",
+			Code:      models.FindingMissingConntrack,
+			Certainty: models.CertaintyDefinite,
+			Title:     "No conntrack ESTABLISHED,RELATED rule in INPUT",
 			Detail: "Adding '-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT' " +
 				"early in the INPUT chain significantly improves performance by allowing " +
 				"return traffic for established connections without checking all rules.",
@@ -183,7 +192,9 @@ func checkConntrack(filterTable *models.Table) []models.EffectivenessFinding {
 	} else if conntrackPos > 2 {
 		// Conntrack rule should be near the top (after loopback accept typically)
 		findings = append(findings, models.EffectivenessFinding{
-			Title: "Conntrack rule is not near the top of INPUT chain",
+			Code:      models.FindingLateConntrack,
+			Certainty: models.CertaintyDefinite,
+			Title:     "Conntrack rule is not near the top of INPUT chain",
 			Detail: "The ESTABLISHED,RELATED rule is at position " + strconv.Itoa(conntrackPos+1) +
 				" in INPUT. For optimal performance, place it within the first 2-3 rules " +
 				"(after loopback accept).",
@@ -209,7 +220,9 @@ func checkFinalDrop(filterTable *models.Table) []models.EffectivenessFinding {
 		lastRule := input.Rules[len(input.Rules)-1]
 		if !lastRule.IsBlock() || !IsCatchAll(&lastRule) {
 			findings = append(findings, models.EffectivenessFinding{
-				Title: "No explicit DROP at end of INPUT chain with ACCEPT policy",
+				Code:      models.FindingMissingFinalDrop,
+				Certainty: models.CertaintyDefinite,
+				Title:     "No explicit DROP at end of INPUT chain with ACCEPT policy",
 				Detail: "The INPUT chain has a default ACCEPT policy but no catch-all DROP rule at the end. " +
 					"Any traffic not matching explicit rules will be accepted. " +
 					"Either change the policy to DROP or add a final catch-all DROP rule.",

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Types of changes: Added, Changed, Deprecated, Removed, Fixed, Security
 
+## [Unreleased]
+
+### Added
+
+- stable finding codes, service-assessment status, per-socket family/status metadata, and incomplete-score diagnostics in JSON output
+- regression coverage for fragmented traffic, dual-stack listeners, nested-chain remediation, DNAT state and ranges, ordered NAT traversal, original-tuple matches, malformed inventories, policy validation, semantic rendering, and output failures
+
+### Changed
+
+- Docker analysis evaluates every published port with ordered PREROUTING traversal and retains original and translated conntrack tuples
+- service discovery distinguishes dual-stack, excluded, filtered, reachable, malformed, and valid empty inventories
+- verbose rule tables include raw rules and render negations, fragments, extension predicates, and goto control flow
+- the capture helper writes through temporary files and preserves prior captures when collection fails
+
+### Fixed
+
+- unsafe SSH replacements, wrong-chain exposure advice, discarded fragment predicates, IPv6 wildcard loss, DNAT-state false negatives, range sampling, bare IPv6 target parsing, original-port protection false positives, stateful shadow false positives, duplicate listener findings and dual-stack exposure deductions, successful incomplete scores, invalid policy acceptance, excluded-service labeling, and ignored output errors
+
 ## [0.4.0] - 2026-08-03
 
 ### Added

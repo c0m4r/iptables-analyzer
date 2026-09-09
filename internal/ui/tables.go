@@ -50,27 +50,35 @@ func renderRuleTable(w io.Writer, chain *models.Chain, tableName string, verbose
 	for _, rule := range chain.Rules {
 		num := strconv.Itoa(rule.RuleNum)
 		target := rule.Target
+		if rule.Goto {
+			target = "goto:" + target
+		}
 		proto := string(rule.Protocol)
 		if proto == "" {
 			proto = "all"
+		}
+		if rule.Negations["protocol"] {
+			proto = "!" + proto
 		}
 
 		src := rule.SrcAddr
 		if src == "" || src == "0.0.0.0/0" || src == "::/0" {
 			src = "*"
-		} else if rule.Negations["src"] {
+		}
+		if rule.Negations["src"] {
 			src = "!" + src
 		}
 
 		dst := rule.DstAddr
 		if dst == "" || dst == "0.0.0.0/0" || dst == "::/0" {
 			dst = "*"
-		} else if rule.Negations["dst"] {
+		}
+		if rule.Negations["dst"] {
 			dst = "!" + dst
 		}
 
 		port := formatPort(rule)
-		opts := formatOptions(rule)
+		opts := formatOptions(rule, verbose)
 
 		var targetStr string
 		switch target {
@@ -149,28 +157,51 @@ func renderServiceTable(w io.Writer, result *models.AnalysisResult) {
 }
 
 func getServiceStatus(svc models.ListeningService, result *models.AnalysisResult) string {
+	if svc.Status == models.ServiceLocalhost {
+		return styleSuccess.Render("LOCALHOST")
+	}
 	if !svc.IsWildcard {
 		if svc.Address == "127.0.0.1" || svc.Address == "::1" {
 			return styleSuccess.Render("LOCALHOST")
 		}
 	}
+	if svc.Status == models.ServiceNotAnalyzed {
+		return styleMuted.Render("NOT ANALYZED")
+	}
+	if svc.Status == models.ServiceFiltered {
+		return styleSuccess.Render("FILTERED")
+	}
 
+	best := models.AccessScope("")
 	for _, exposed := range result.ExposedServices {
 		if exposed.Service.Port == svc.Port &&
-			exposed.Service.Protocol == svc.Protocol &&
-			exposed.Service.Address == svc.Address {
-			switch exposed.Scope {
-			case models.ScopeLocalnet:
-				return styleWarning.Render("LOCALNET")
-			case models.ScopeWhitelisted:
-				return styleSuccess.Render("WHITELISTED")
-			default:
-				return styleDanger.Render("EXPOSED")
+			exposed.Service.Protocol == svc.Protocol && serviceAddressesMatch(svc, exposed.Service) {
+			if exposed.Scope == models.ScopeExposed {
+				best = models.ScopeExposed
+				break
+			}
+			if exposed.Scope == models.ScopeLocalnet || best == "" {
+				best = exposed.Scope
 			}
 		}
 	}
+	switch best {
+	case models.ScopeExposed:
+		return styleDanger.Render("EXPOSED")
+	case models.ScopeLocalnet:
+		return styleWarning.Render("LOCALNET")
+	case models.ScopeWhitelisted:
+		return styleSuccess.Render("WHITELISTED")
+	default:
+		return styleMuted.Render("NOT ANALYZED")
+	}
+}
 
-	return styleSuccess.Render("FILTERED")
+func serviceAddressesMatch(inventory, finding models.ListeningService) bool {
+	if inventory.Family == models.SocketDual {
+		return finding.IsWildcard
+	}
+	return inventory.Address == finding.Address
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -190,10 +221,18 @@ func indentBlock(s, prefix string) string {
 func formatPort(rule models.Rule) string {
 	parts := []string{}
 	if rule.DstPort != "" {
-		parts = append(parts, "dpt:"+rule.DstPort)
+		prefix := "dpt:"
+		if rule.Negations["dport"] {
+			prefix = "!dpt:"
+		}
+		parts = append(parts, prefix+rule.DstPort)
 	}
 	if rule.SrcPort != "" {
-		parts = append(parts, "spt:"+rule.SrcPort)
+		prefix := "spt:"
+		if rule.Negations["sport"] {
+			prefix = "!spt:"
+		}
+		parts = append(parts, prefix+rule.SrcPort)
 	}
 	if len(parts) > 0 {
 		return strings.Join(parts, " ")
@@ -201,7 +240,7 @@ func formatPort(rule models.Rule) string {
 	return ""
 }
 
-func formatOptions(rule models.Rule) string {
+func formatOptions(rule models.Rule, verbose bool) string {
 	var opts []string
 
 	if rule.InIface != "" {
@@ -219,7 +258,18 @@ func formatOptions(rule models.Rule) string {
 		opts = append(opts, prefix+rule.OutIface)
 	}
 	if len(rule.States) > 0 {
-		opts = append(opts, "state:"+strings.Join(rule.States, ","))
+		prefix := "state:"
+		if rule.Negations["state"] {
+			prefix = "!state:"
+		}
+		opts = append(opts, prefix+strings.Join(rule.States, ","))
+	}
+	if rule.Fragment {
+		fragment := "fragment"
+		if rule.Negations["fragment"] {
+			fragment = "!fragment"
+		}
+		opts = append(opts, fragment)
 	}
 	if rule.DNATTarget != "" {
 		opts = append(opts, "to:"+rule.DNATTarget)
@@ -227,6 +277,35 @@ func formatOptions(rule models.Rule) string {
 	if rule.Comment != "" {
 		opts = append(opts, "/* "+rule.Comment+" */")
 	}
+	for _, match := range rule.Matches {
+		if match.Module == "comment" || isDisplayDuplicate(match) {
+			continue
+		}
+		tokens := append([]string{"-m", match.Module}, match.RawTokens...)
+		if match.Module == "raw" {
+			tokens = append([]string{}, match.RawTokens...)
+		}
+		opts = append(opts, strings.Join(tokens, " "))
+	}
+	if verbose && rule.RawLine != "" {
+		opts = append(opts, "raw: "+rule.RawLine)
+	}
 
 	return strings.Join(opts, " ")
+}
+
+func isDisplayDuplicate(match models.MatchExt) bool {
+	for option := range match.Params {
+		switch option {
+		case "--dport", "--destination-port", "--sport", "--source-port", "--dports", "--destination-ports", "--sports", "--source-ports", "--ctstate", "--state", "--comment":
+		default:
+			return false
+		}
+	}
+	switch match.Module {
+	case "tcp", "udp", "multiport", "conntrack", "state":
+		return true
+	default:
+		return false
+	}
 }

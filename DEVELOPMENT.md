@@ -61,7 +61,7 @@ iptables-analyzer/
 │       ├── tables.go        # Table formatting (lipgloss/table)
 │       └── colors.go        # 256-color palette and style definitions
 └── testdata/
-    ├── basic.iptables-save      # Secure config (score: B)
+    ├── basic.iptables-save      # IPv4 baseline (B with bundled service evidence)
     ├── docker.iptables-save     # Docker with bypasses (score: F)
     └── insecure.iptables-save   # ACCEPT policies (score: F)
 ```
@@ -104,7 +104,7 @@ make test-coverage # Generates coverage.html
 3. Use existing fixtures in `testdata/` when possible
 
 ### Test fixtures
-- `basic.iptables-save`: Clean, secure IPv4 config. Expected with `--ipv4-only`: score A, no critical findings
+- `basic.iptables-save`: IPv4 baseline. Expected with `--ipv4-only`: 100-point subtotal and `INCOMPLETE` without services; B with `testdata/services.txt`
 - `docker.iptables-save`: Docker setup with two DNAT ports blocked in INPUT. Expected: score F, two Docker bypass findings
 - `insecure.iptables-save`: Default ACCEPT policies with shadowed rules. Expected: score F, multiple shadow findings
 

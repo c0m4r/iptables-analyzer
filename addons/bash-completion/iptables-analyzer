@@ -3,7 +3,7 @@
 # or source from ~/.bashrc
 
 _iptables_analyzer() {
-    local cur prev words cword
+    local cur prev
     _init_completion || return
 
     case "$prev" in
@@ -35,7 +35,7 @@ _iptables_analyzer() {
             -V --version
             -h --help
         "
-        COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+        mapfile -t COMPREPLY < <(compgen -W "$opts" -- "$cur")
         return
     fi
 }

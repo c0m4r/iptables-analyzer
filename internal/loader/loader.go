@@ -53,7 +53,7 @@ func loadOne(filePath string, live bool, command string, ver models.IPVersion) (
 		data = string(raw)
 	} else if live {
 		if os.Geteuid() != 0 {
-			return nil, fmt.Errorf("%s requires root privileges; use sudo or provide a file with --ipv4-file/--ipv6-file", command)
+			return nil, fmt.Errorf("%s requires root privileges; use sudo or provide files with --file/--file6", command)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

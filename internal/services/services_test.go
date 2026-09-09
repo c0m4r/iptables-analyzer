@@ -28,3 +28,23 @@ func TestParseAddressWithZone(t *testing.T) {
 		t.Fatalf("unexpected address %q:%d", addr, port)
 	}
 }
+
+func TestWildcardSocketRetainsDualStackFamily(t *testing.T) {
+	services, err := ParseSSData("State Recv-Q Send-Q Local Address:Port Peer Address:Port\nLISTEN 0 128 *:22 *:*\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(services) != 1 || services[0].Address != "*" || services[0].Family != "dual" || !services[0].IsWildcard {
+		t.Fatalf("wildcard family was lost: %+v", services)
+	}
+}
+
+func TestParseSSDataRejectsMalformedInventory(t *testing.T) {
+	if _, err := ParseSSData("this is not ss output\n"); err == nil {
+		t.Fatal("expected malformed inventory error")
+	}
+	services, err := ParseSSData("State Recv-Q Send-Q Local Address:Port Peer Address:Port\n")
+	if err != nil || len(services) != 0 {
+		t.Fatalf("valid empty inventory should succeed: services=%+v err=%v", services, err)
+	}
+}

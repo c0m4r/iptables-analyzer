@@ -248,3 +248,43 @@ func TestParseRuleCounters(t *testing.T) {
 		t.Fatalf("unexpected counter-prefixed rule: %+v", rule)
 	}
 }
+
+func TestParsePreservesFragmentPredicates(t *testing.T) {
+	data := "*filter\n:INPUT DROP [0:0]\n-A INPUT -f -j DROP\n-A INPUT ! --fragment -j ACCEPT\nCOMMIT\n"
+	rs, err := Parse(data, models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := rs.Tables["filter"].Chains["INPUT"].Rules
+	if !rules[0].Fragment || rules[0].Negations["fragment"] {
+		t.Fatalf("-f was not preserved: %+v", rules[0])
+	}
+	if !rules[1].Fragment || !rules[1].Negations["fragment"] {
+		t.Fatalf("negated --fragment was not preserved: %+v", rules[1])
+	}
+}
+
+func TestParsePreservesUnknownShortOption(t *testing.T) {
+	data := "*filter\n:INPUT DROP [0:0]\n-A INPUT -x value -j ACCEPT\nCOMMIT\n"
+	rs, err := Parse(data, models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matches := rs.Tables["filter"].Chains["INPUT"].Rules[0].Matches
+	if len(matches) != 1 || len(matches[0].RawTokens) != 2 || matches[0].RawTokens[0] != "-x" || matches[0].RawTokens[1] != "value" {
+		t.Fatalf("unknown short option was discarded: %+v", matches)
+	}
+}
+
+func TestParseRejectsInvalidChainPolicies(t *testing.T) {
+	tests := []string{
+		"*filter\n:INPUT DR0P [0:0]\nCOMMIT\n",
+		"*filter\n:CUSTOM ACCEPT [0:0]\nCOMMIT\n",
+		"*filter\n:INPUT - [0:0]\nCOMMIT\n",
+	}
+	for _, data := range tests {
+		if _, err := Parse(data, models.IPv4); err == nil {
+			t.Fatalf("expected invalid policy declaration to fail: %q", data)
+		}
+	}
+}

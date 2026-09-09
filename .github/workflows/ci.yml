@@ -18,7 +18,18 @@ jobs:
           cache: true
       - name: Formatting
         run: test -z "$(gofmt -l .)"
+      - name: Shell syntax
+        run: bash -n examples/save-rules.sh addons/build.sh addons/update-deps.sh addons/bash-completion/iptables-analyzer
+      - name: ShellCheck
+        run: shellcheck -s bash examples/save-rules.sh addons/build.sh addons/update-deps.sh addons/bash-completion/iptables-analyzer
+      - name: Verify modules
+        run: go mod verify
       - name: Vet
         run: go vet -mod=readonly ./...
       - name: Tests
         run: go test -mod=readonly -race -cover ./...
+      - name: Vulnerability scan
+        uses: golang/govulncheck-action@v1.1.0
+        with:
+          go-version-file: go.mod
+          repo-checkout: false

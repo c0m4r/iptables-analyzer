@@ -42,12 +42,15 @@ for PLATFORM in "${PLATFORM_PAIRS[@]}"; do
         -o "$OUTPUT_PATH" \
         .
 
-    SIZE=$(ls -lh "$OUTPUT_PATH" | awk '{print $5}')
+	SIZE=$(du -h "$OUTPUT_PATH" | cut -f1)
     echo "  ✓ Built ($SIZE)"
 done
 
 echo ""
 echo "=== Summary ==="
-ls -lh dist/ | tail -n +2 | awk '{printf "  %-40s %5s\n", $9, $5}'
+for OUTPUT_PATH in "dist/${BINARY_NAME}-${VERSION}-"*; do
+	SIZE=$(du -h "$OUTPUT_PATH" | cut -f1)
+	printf "  %-40s %5s\n" "$(basename "$OUTPUT_PATH")" "$SIZE"
+done
 echo ""
 echo "Binaries ready in dist/"

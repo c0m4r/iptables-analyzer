@@ -20,6 +20,65 @@ const (
 	IPv6 IPVersion = 6
 )
 
+// FindingCode is a stable machine-readable identifier for a finding.
+type FindingCode string
+
+const (
+	FindingPolicyAccept     FindingCode = "policy_accept"
+	FindingDeadRule         FindingCode = "dead_rule"
+	FindingMissingConntrack FindingCode = "missing_conntrack"
+	FindingLateConntrack    FindingCode = "late_conntrack"
+	FindingMissingFinalDrop FindingCode = "missing_final_drop"
+	FindingShadowedRule     FindingCode = "shadowed_rule"
+	FindingDockerBypass     FindingCode = "docker_bypass"
+	FindingExposedService   FindingCode = "exposed_service"
+	FindingUnusedRule       FindingCode = "unused_rule"
+)
+
+// Certainty distinguishes proven outcomes from paths that depend on an
+// unsupported or otherwise indeterminate predicate.
+type Certainty string
+
+const (
+	CertaintyDefinite Certainty = "DEFINITE"
+	CertaintyPossible Certainty = "POSSIBLE"
+)
+
+// AssessmentStatus records whether an input-dependent part of the report was assessed.
+type AssessmentStatus string
+
+const (
+	AssessmentNotRequested AssessmentStatus = "NOT_REQUESTED"
+	AssessmentComplete     AssessmentStatus = "COMPLETE"
+	AssessmentFailed       AssessmentStatus = "FAILED"
+)
+
+// AssessmentDiagnostic explains a portion of the analysis that was incomplete.
+type AssessmentDiagnostic struct {
+	Area    string
+	Message string
+}
+
+// ServiceStatus records the result of assessing one listening socket.
+type ServiceStatus string
+
+const (
+	ServiceNotAnalyzed ServiceStatus = "NOT_ANALYZED"
+	ServiceFiltered    ServiceStatus = "FILTERED"
+	ServiceReachable   ServiceStatus = "REACHABLE"
+	ServiceLocalhost   ServiceStatus = "LOCALHOST"
+)
+
+// SocketFamily retains the family information conveyed by ss. A wildcard
+// rendered as "*" can accept both IPv4 and IPv6 and must remain dual-stack.
+type SocketFamily string
+
+const (
+	SocketIPv4 SocketFamily = "ipv4"
+	SocketIPv6 SocketFamily = "ipv6"
+	SocketDual SocketFamily = "dual"
+)
+
 // Severity levels for findings
 type Severity int
 
@@ -67,6 +126,7 @@ type Rule struct {
 	Comment    string
 	Negations  map[string]bool // which fields are negated
 	Goto       bool            // true for --goto/-g; false for --jump/-j
+	Fragment   bool            // rule includes -f/--fragment
 	RawLine    string
 	IPVersion  IPVersion
 }
@@ -150,26 +210,32 @@ type ListeningService struct {
 	PID        int
 	IsIPv6     bool
 	IsWildcard bool // bound to 0.0.0.0 or ::
+	Family     SocketFamily
+	Status     ServiceStatus
 }
 
 // AnalysisResult aggregates all findings
 type AnalysisResult struct {
-	IPv4Rules       *Ruleset
-	IPv6Rules       *Ruleset
-	IPv4Only        bool // set when -4 flag is used; IPv6 stack was not analyzed
-	IPv6Only        bool // set when -6 flag is used; IPv4 stack was not analyzed
-	Services        []ListeningService
-	ShadowedRules   []ShadowFinding
-	DockerBypasses  []DockerBypassFinding
-	ExposedServices []ExposedServiceFinding
-	UnusedRules     []UnusedRuleFinding
-	EffectiveIssues []EffectivenessFinding
-	Recommendations []Recommendation
-	Score           ScoreResult
+	IPv4Rules         *Ruleset
+	IPv6Rules         *Ruleset
+	IPv4Only          bool // set when -4 flag is used; IPv6 stack was not analyzed
+	IPv6Only          bool // set when -6 flag is used; IPv4 stack was not analyzed
+	ServiceAssessment AssessmentStatus
+	Diagnostics       []AssessmentDiagnostic
+	Services          []ListeningService
+	ShadowedRules     []ShadowFinding
+	DockerBypasses    []DockerBypassFinding
+	ExposedServices   []ExposedServiceFinding
+	UnusedRules       []UnusedRuleFinding
+	EffectiveIssues   []EffectivenessFinding
+	Recommendations   []Recommendation
+	Score             ScoreResult
 }
 
 // ShadowFinding represents a rule shadowed by an earlier rule
 type ShadowFinding struct {
+	Code          FindingCode
+	Certainty     Certainty
 	ShadowedRule  Rule
 	ShadowingRule Rule
 	Reason        string
@@ -178,6 +244,8 @@ type ShadowFinding struct {
 
 // DockerBypassFinding represents an INPUT rule bypassed by Docker NAT
 type DockerBypassFinding struct {
+	Code          FindingCode
+	Certainty     Certainty
 	InputRule     Rule
 	NATRule       Rule
 	ExposedPort   string
@@ -197,6 +265,9 @@ const (
 
 // ExposedServiceFinding represents a service accessible through the firewall
 type ExposedServiceFinding struct {
+	Code         FindingCode
+	Certainty    Certainty
+	IPVersion    IPVersion
 	Service      ListeningService
 	AllowingRule *Rule
 	Severity     Severity
@@ -206,12 +277,16 @@ type ExposedServiceFinding struct {
 
 // UnusedRuleFinding represents a firewall rule with no matching service
 type UnusedRuleFinding struct {
-	Rule   Rule
-	Reason string
+	Code      FindingCode
+	Certainty Certainty
+	Rule      Rule
+	Reason    string
 }
 
 // EffectivenessFinding represents a general effectiveness issue
 type EffectivenessFinding struct {
+	Code      FindingCode
+	Certainty Certainty
 	Title     string
 	Detail    string
 	Severity  Severity
@@ -230,7 +305,9 @@ type Recommendation struct {
 
 // ScoreResult is the security score
 type ScoreResult struct {
-	Total     int
-	Breakdown map[string]int
-	Grade     string
+	Total      int
+	Breakdown  map[string]int
+	Grade      string
+	Complete   bool
+	Unassessed []string
 }

@@ -27,41 +27,66 @@ type RenderOptions struct {
 	IPv4Only bool
 	IPv6Only bool
 	Version  string
+	Writer   io.Writer
 }
 
 // Render outputs the full analysis to stdout
-func Render(result *models.AnalysisResult, opts RenderOptions) {
+func Render(result *models.AnalysisResult, opts RenderOptions) error {
+	w := opts.Writer
+	if w == nil {
+		w = os.Stdout
+	}
 	if opts.JSON {
-		renderJSON(result)
-		return
+		return renderJSON(w, result)
 	}
+	tracked := &trackingWriter{writer: w}
 
-	w := os.Stdout
-
-	renderBanner(w, opts.Version)
-	renderHeader(w, opts)
-	renderOverview(w, result)
-	renderRules(w, result, opts.Verbose)
-	renderFindingsAndRecommendations(w, result)
+	renderBanner(tracked, opts.Version)
+	renderHeader(tracked, opts)
+	renderOverview(tracked, result)
+	renderRules(tracked, result, opts.Verbose)
+	renderFindingsAndRecommendations(tracked, result)
 	if len(result.Services) > 0 {
-		renderServiceTable(w, result)
+		renderServiceTable(tracked, result)
 	}
-	renderScore(w, result.Score)
+	renderScore(tracked, result.Score)
+	return tracked.err
 }
 
 // RenderScoreOnly prints just the score
-func RenderScoreOnly(result *models.AnalysisResult, opts RenderOptions) {
-	if opts.JSON {
-		renderJSON(result.Score)
-		return
+func RenderScoreOnly(result *models.AnalysisResult, opts RenderOptions) error {
+	w := opts.Writer
+	if w == nil {
+		w = os.Stdout
 	}
-	renderScore(os.Stdout, result.Score)
+	if opts.JSON {
+		return renderJSON(w, result.Score)
+	}
+	tracked := &trackingWriter{writer: w}
+	renderScore(tracked, result.Score)
+	return tracked.err
 }
 
-func renderJSON(v interface{}) {
-	enc := json.NewEncoder(os.Stdout)
+func renderJSON(w io.Writer, v interface{}) error {
+	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	enc.Encode(v)
+	return enc.Encode(v)
+}
+
+type trackingWriter struct {
+	writer io.Writer
+	err    error
+}
+
+func (w *trackingWriter) Write(p []byte) (int, error) {
+	if w.err != nil {
+		return 0, w.err
+	}
+	n, err := w.writer.Write(p)
+	if err != nil {
+		w.err = err
+	}
+	return n, err
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -168,6 +193,10 @@ func renderOverview(w io.Writer, result *models.AnalysisResult) {
 	}
 
 	fmt.Fprintf(w, "  Recommendations: %s\n", styleMuted.Render(strconv.Itoa(len(result.Recommendations))))
+	fmt.Fprintf(w, "  Service exposure: %s\n", styleMuted.Render(string(result.ServiceAssessment)))
+	for _, diagnostic := range result.Diagnostics {
+		fmt.Fprintf(w, "  Assessment note (%s): %s\n", diagnostic.Area, styleWarning.Render(diagnostic.Message))
+	}
 	fmt.Fprintln(w)
 }
 
@@ -360,6 +389,9 @@ func renderScore(w io.Writer, score models.ScoreResult) {
 		)
 
 	fmt.Fprintln(w, lipgloss.JoinHorizontal(lipgloss.Center, catsBlock, "  ", gradeCard))
+	if !score.Complete && len(score.Unassessed) > 0 {
+		fmt.Fprintln(w, styleWarning.Render("  Assessment incomplete: "+strings.Join(score.Unassessed, ", ")))
+	}
 	fmt.Fprintln(w)
 }
 

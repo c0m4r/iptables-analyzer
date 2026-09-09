@@ -62,7 +62,7 @@ func Parse(data string, ipVersion models.IPVersion) (*models.Ruleset, error) {
 				parseErrs = append(parseErrs, fmt.Errorf("line %d: chain declaration outside a table", lineNum))
 				continue
 			}
-			chain, err := parseChainDecl(normalizedLine)
+			chain, err := parseChainDecl(normalizedLine, currentTable.Name)
 			if err != nil {
 				parseErrs = append(parseErrs, fmt.Errorf("line %d: %w", lineNum, err))
 				continue
@@ -137,7 +137,7 @@ func stripRuleCounters(line string) (string, error) {
 	return strings.TrimSpace(line[end+1:]), nil
 }
 
-func parseChainDecl(line string) (*models.Chain, error) {
+func parseChainDecl(line, tableName string) (*models.Chain, error) {
 	// :INPUT ACCEPT [123:456]
 	// :DOCKER - [0:0]
 	line = strings.TrimPrefix(line, ":")
@@ -153,7 +153,15 @@ func parseChainDecl(line string) (*models.Chain, error) {
 
 	policy := parts[1]
 	if policy != "-" {
+		if policy != "ACCEPT" && policy != "DROP" {
+			return nil, fmt.Errorf("invalid policy %q for chain %s", policy, chain.Name)
+		}
+		if !isBuiltinChain(tableName, chain.Name) {
+			return nil, fmt.Errorf("user-defined chain %s cannot have policy %s", chain.Name, policy)
+		}
 		chain.Policy = policy
+	} else if isBuiltinChain(tableName, chain.Name) {
+		return nil, fmt.Errorf("built-in chain %s must declare an ACCEPT or DROP policy", chain.Name)
 	}
 
 	// Parse counters [packets:bytes]
@@ -175,6 +183,17 @@ func parseChainDecl(line string) (*models.Chain, error) {
 	}
 
 	return chain, nil
+}
+
+func isBuiltinChain(tableName, chainName string) bool {
+	builtins := map[string]map[string]bool{
+		"filter":   {"INPUT": true, "FORWARD": true, "OUTPUT": true},
+		"nat":      {"PREROUTING": true, "INPUT": true, "OUTPUT": true, "POSTROUTING": true},
+		"mangle":   {"PREROUTING": true, "INPUT": true, "FORWARD": true, "OUTPUT": true, "POSTROUTING": true},
+		"raw":      {"PREROUTING": true, "OUTPUT": true},
+		"security": {"INPUT": true, "FORWARD": true, "OUTPUT": true},
+	}
+	return builtins[tableName][chainName]
 }
 
 func parseRule(line string, tableName string, ipVersion models.IPVersion) (models.Rule, error) {
@@ -462,9 +481,21 @@ func parseRule(line string, tableName string, ipVersion models.IPVersion) (model
 				return rule, fmt.Errorf("%s requires a value", tok)
 			}
 
+		case "-f", "--fragment":
+			rule.Fragment = true
+			if negateNext {
+				rule.Negations["fragment"] = true
+				negateNext = false
+			}
+			i++
+
 		default:
-			if strings.HasPrefix(tok, "--") && !isTargetOption(tok) {
-				ext := models.MatchExt{Module: "raw", Params: map[string]string{}, Negations: map[string]bool{}, RawTokens: []string{tok}}
+			if strings.HasPrefix(tok, "-") && !isTargetOption(tok) {
+				rawTokens := []string{tok}
+				if negateNext {
+					rawTokens = []string{"!", tok}
+				}
+				ext := models.MatchExt{Module: "raw", Params: map[string]string{}, Negations: map[string]bool{}, RawTokens: rawTokens}
 				val := ""
 				if i+1 < len(tokens) && !strings.HasPrefix(tokens[i+1], "-") && tokens[i+1] != "!" {
 					val = tokens[i+1]
@@ -493,7 +524,8 @@ func moduleParamRequiresValue(param string) bool {
 		"--dports", "--destination-ports", "--sports", "--source-ports", "--comment",
 		"--to-destination", "--to-source", "--seconds", "--hitcount", "--limit",
 		"--limit-burst", "--icmp-type", "--icmpv6-type", "--dst-type", "--src-type",
-		"--mark", "--match-set", "--probability", "--every", "--mode":
+		"--mark", "--match-set", "--probability", "--every", "--mode",
+		"--ctorigdstport", "--ctorigdst", "--ctdir":
 		return true
 	default:
 		return false
@@ -518,6 +550,7 @@ func isMainFlag(tok string) bool {
 	case "-p", "--protocol", "-s", "--source", "-d", "--destination",
 		"-i", "--in-interface", "-o", "--out-interface",
 		"-j", "--jump", "-g", "--goto", "-m", "--match",
+		"-f", "--fragment",
 		"-A", "-I", "-D", "-R", "-N", "-X", "-P", "-F", "-Z", "-L":
 		return true
 	}

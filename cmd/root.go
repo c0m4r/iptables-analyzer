@@ -6,6 +6,7 @@ import (
 
 	"github.com/c0m4r/iptables-analyzer/internal/analyzer"
 	"github.com/c0m4r/iptables-analyzer/internal/loader"
+	"github.com/c0m4r/iptables-analyzer/internal/models"
 	"github.com/c0m4r/iptables-analyzer/internal/recommender"
 	"github.com/c0m4r/iptables-analyzer/internal/scorer"
 	"github.com/c0m4r/iptables-analyzer/internal/services"
@@ -15,10 +16,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Version is set by main via go:embed VERSION
+// Version is set by main via go:embed VERSION.
 var Version = "dev"
 
-var (
+type commandOptions struct {
 	ipv4File     string
 	ipv6File     string
 	ipv4Only     bool
@@ -29,32 +30,58 @@ var (
 	servicesFile string
 	scoreOnly    bool
 	showVersion  bool
-)
-
-// rootCmd is the base command
-var rootCmd = &cobra.Command{
-	Use:                "iptables-analyzer",
-	Short:              "Analyze iptables/ip6tables firewall rules for security issues",
-	DisableFlagParsing: false,
-	SilenceUsage:       true,
-	Args:               cobra.NoArgs,
-	RunE:               runAnalysis,
 }
 
-func init() {
-	rootCmd.Flags().StringVarP(&ipv4File, "file", "f", "", "Path to iptables-save output file")
-	rootCmd.Flags().StringVar(&ipv6File, "file6", "", "Path to ip6tables-save output file")
-	rootCmd.Flags().BoolVarP(&ipv4Only, "ipv4-only", "4", false, "Analyze only IPv4 rules")
-	rootCmd.Flags().BoolVarP(&ipv6Only, "ipv6-only", "6", false, "Analyze only IPv6 rules")
-	rootCmd.Flags().BoolVar(&noColor, "no-color", false, "Disable colored output")
-	rootCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output results as JSON")
-	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show all rules including empty chains")
-	rootCmd.Flags().StringVar(&servicesFile, "services-file", "", "Path to saved ss output file (alternative to live ss)")
-	rootCmd.Flags().BoolVarP(&scoreOnly, "score-only", "s", false, "Only print the security score")
-	rootCmd.Flags().BoolVarP(&showVersion, "version", "V", false, "Print version and exit")
+type commandDependencies struct {
+	loadRules     func(loader.Config) (*models.Ruleset, *models.Ruleset, error)
+	parseServices func(string) ([]models.ListeningService, error)
+	getServices   func() ([]models.ListeningService, error)
+	isRoot        func() bool
 }
 
-// Execute runs the root command
+func defaultCommandDependencies() commandDependencies {
+	return commandDependencies{
+		loadRules:     loader.Load,
+		parseServices: services.ParseSSFile,
+		getServices:   services.GetListening,
+		isRoot:        loader.IsRoot,
+	}
+}
+
+// NewRootCommand constructs an isolated command with its own flag state.
+func NewRootCommand() *cobra.Command {
+	return newRootCommand(defaultCommandDependencies())
+}
+
+func newRootCommand(deps commandDependencies) *cobra.Command {
+	opts := &commandOptions{}
+	cmd := &cobra.Command{
+		Use:                "iptables-analyzer",
+		Short:              "Analyze iptables/ip6tables firewall rules for security issues",
+		Long:               fmt.Sprintf("iptables-analyzer v%s - Analyze iptables/ip6tables firewall rules for security issues", Version),
+		DisableFlagParsing: false,
+		SilenceUsage:       true,
+		Args:               cobra.NoArgs,
+	}
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		return runAnalysis(cmd, opts, deps)
+	}
+	cmd.Flags().StringVarP(&opts.ipv4File, "file", "f", "", "Path to iptables-save output file")
+	cmd.Flags().StringVar(&opts.ipv6File, "file6", "", "Path to ip6tables-save output file")
+	cmd.Flags().BoolVarP(&opts.ipv4Only, "ipv4-only", "4", false, "Analyze only IPv4 rules")
+	cmd.Flags().BoolVarP(&opts.ipv6Only, "ipv6-only", "6", false, "Analyze only IPv6 rules")
+	cmd.Flags().BoolVar(&opts.noColor, "no-color", false, "Disable colored output")
+	cmd.Flags().BoolVar(&opts.jsonOutput, "json", false, "Output results as JSON")
+	cmd.Flags().BoolVarP(&opts.verbose, "verbose", "v", false, "Show all rules, empty chains, and raw rule text")
+	cmd.Flags().StringVar(&opts.servicesFile, "services-file", "", "Path to saved ss output file (alternative to live ss)")
+	cmd.Flags().BoolVarP(&opts.scoreOnly, "score-only", "s", false, "Only print the security score")
+	cmd.Flags().BoolVarP(&opts.showVersion, "version", "V", false, "Print version and exit")
+	return cmd
+}
+
+var rootCmd = NewRootCommand()
+
+// Execute runs the root command.
 func Execute() {
 	rootCmd.Long = fmt.Sprintf("iptables-analyzer v%s - Analyze iptables/ip6tables firewall rules for security issues", Version)
 	if err := rootCmd.Execute(); err != nil {
@@ -62,108 +89,104 @@ func Execute() {
 	}
 }
 
-func runAnalysis(cmd *cobra.Command, args []string) error {
-	if showVersion {
-		fmt.Printf("iptables-analyzer v%s\nhttps://github.com/c0m4r/iptables-analyzer\n", Version)
-		return nil
+func runAnalysis(cmd *cobra.Command, opts *commandOptions, deps commandDependencies) error {
+	if opts.showVersion {
+		_, err := fmt.Fprintf(cmd.OutOrStdout(), "iptables-analyzer v%s\nhttps://github.com/c0m4r/iptables-analyzer\n", Version)
+		return err
 	}
 
-	if noColor {
+	if opts.noColor {
 		lipgloss.DefaultRenderer().SetColorProfile(termenv.Ascii)
 	}
-	if ipv4Only && ipv6Only {
+	if opts.ipv4Only && opts.ipv6Only {
 		return fmt.Errorf("--ipv4-only and --ipv6-only cannot be used together")
 	}
-	if ipv4Only && ipv6File != "" {
+	if opts.ipv4Only && opts.ipv6File != "" {
 		return fmt.Errorf("--file6 cannot be used with --ipv4-only")
 	}
-	if ipv6Only && ipv4File != "" {
+	if opts.ipv6Only && opts.ipv4File != "" {
 		return fmt.Errorf("--file cannot be used with --ipv6-only")
 	}
 
-	// Determine mode
-	hasFiles := ipv4File != "" || ipv6File != ""
+	hasFiles := opts.ipv4File != "" || opts.ipv6File != ""
 	live := false
 	if !hasFiles {
-		// Auto-detect: if root, use live; otherwise show help
-		if loader.IsRoot() {
+		if deps.isRoot() {
 			live = true
 		} else {
-			fmt.Fprintln(os.Stderr, "No input specified. Provide rule files or run as root for live analysis.")
-			fmt.Fprintln(os.Stderr, "")
-			fmt.Fprintln(os.Stderr, "Examples:")
-			fmt.Fprintln(os.Stderr, "  sudo iptables-analyzer")
-			fmt.Fprintln(os.Stderr, "  iptables-analyzer -f rules.v4 --file6 rules.v6")
-			fmt.Fprintln(os.Stderr, "")
-			fmt.Fprintln(os.Stderr, "To save rules for offline analysis:")
-			fmt.Fprintln(os.Stderr, "  sudo iptables-save > rules.v4")
-			fmt.Fprintln(os.Stderr, "  sudo ip6tables-save > rules.v6")
+			stderr := cmd.ErrOrStderr()
+			fmt.Fprintln(stderr, "No input specified. Provide rule files or run as root for live analysis.")
+			fmt.Fprintln(stderr)
+			fmt.Fprintln(stderr, "Examples:")
+			fmt.Fprintln(stderr, "  sudo iptables-analyzer")
+			fmt.Fprintln(stderr, "  iptables-analyzer -f rules.v4 --file6 rules.v6")
+			fmt.Fprintln(stderr)
+			fmt.Fprintln(stderr, "To save rules for offline analysis:")
+			fmt.Fprintln(stderr, "  sudo iptables-save > rules.v4")
+			fmt.Fprintln(stderr, "  sudo ip6tables-save > rules.v6")
 			return fmt.Errorf("no input specified")
 		}
 	}
 
-	// Load rulesets
 	cfg := loader.Config{
-		IPv4File: ipv4File,
-		IPv6File: ipv6File,
+		IPv4File: opts.ipv4File,
+		IPv6File: opts.ipv6File,
 		Live:     live,
-		IPv4Only: ipv4Only,
-		IPv6Only: ipv6Only,
+		IPv4Only: opts.ipv4Only,
+		IPv6Only: opts.ipv6Only,
 	}
-
-	ipv4Rules, ipv6Rules, err := loader.Load(cfg)
+	ipv4Rules, ipv6Rules, err := deps.loadRules(cfg)
 	if err != nil {
 		return fmt.Errorf("loading rules: %w", err)
 	}
 
-	// Run analysis
 	result := analyzer.Analyze(ipv4Rules, ipv6Rules)
-	result.IPv4Only = ipv4Only
-	result.IPv6Only = ipv6Only
-
-	// Cross-reference with listening services
-	if servicesFile != "" {
-		svcs, err := services.ParseSSFile(servicesFile)
+	result.IPv4Only = opts.ipv4Only
+	result.IPv6Only = opts.ipv6Only
+	if opts.servicesFile != "" {
+		svcs, err := deps.parseServices(opts.servicesFile)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not parse services file: %v\n", err)
-		} else {
-			analyzer.CrossReferenceServices(result, svcs)
+			return fmt.Errorf("loading services file: %w", err)
 		}
+		analyzer.CrossReferenceServices(result, svcs)
 	} else if live {
-		svcs, err := services.GetListening()
-		if err != nil {
-			if live {
-				fmt.Fprintf(os.Stderr, "Warning: could not get listening services: %v\n", err)
-				fmt.Fprintf(os.Stderr, "  Tip: save ss output with: ss -tlnp > services.txt && ss -ulnp >> services.txt\n")
-				fmt.Fprintf(os.Stderr, "  Then use: --services-file services.txt\n")
-			}
-		} else {
+		svcs, err := deps.getServices()
+		if len(svcs) > 0 {
 			analyzer.CrossReferenceServices(result, svcs)
+		}
+		if err != nil {
+			result.ServiceAssessment = models.AssessmentFailed
+			result.Diagnostics = append(result.Diagnostics, models.AssessmentDiagnostic{
+				Area: "services", Message: "listening-service discovery was incomplete: " + err.Error(),
+			})
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: listening-service discovery was incomplete: %v\n", err)
+			fmt.Fprintln(cmd.ErrOrStderr(), "  Tip: save ss output with: ss -tlnp > services.txt && ss -ulnp >> services.txt")
+			fmt.Fprintln(cmd.ErrOrStderr(), "  Then use: --services-file services.txt")
+		} else if len(svcs) == 0 {
+			analyzer.CrossReferenceServices(result, nil)
 		}
 	}
 
-	// Generate recommendations
 	result.Recommendations = recommender.Generate(result)
-
-	// Calculate score
 	result.Score = scorer.Calculate(result)
-
-	// Render output
-	opts := ui.RenderOptions{
-		NoColor:  noColor,
-		Verbose:  verbose,
-		JSON:     jsonOutput,
+	renderOpts := ui.RenderOptions{
+		NoColor:  opts.noColor,
+		Verbose:  opts.verbose,
+		JSON:     opts.jsonOutput,
 		LiveMode: live,
-		IPv4Only: ipv4Only,
-		IPv6Only: ipv6Only,
+		IPv4Only: opts.ipv4Only,
+		IPv6Only: opts.ipv6Only,
 		Version:  Version,
+		Writer:   cmd.OutOrStdout(),
 	}
-
-	if scoreOnly {
-		ui.RenderScoreOnly(result, opts)
-	} else {
-		ui.Render(result, opts)
+	if opts.scoreOnly {
+		if err := ui.RenderScoreOnly(result, renderOpts); err != nil {
+			return fmt.Errorf("writing score: %w", err)
+		}
+		return nil
 	}
-
+	if err := ui.Render(result, renderOpts); err != nil {
+		return fmt.Errorf("writing report: %w", err)
+	}
 	return nil
 }
