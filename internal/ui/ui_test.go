@@ -60,3 +60,48 @@ func TestRuleTableRendersNegationsExtensionsGotoAndRawRule(t *testing.T) {
 		}
 	}
 }
+
+func TestIncompleteGradeIsNotWrapped(t *testing.T) {
+	var output bytes.Buffer
+	renderScore(&output, models.ScoreResult{Total: 60, Grade: "INCOMPLETE", Breakdown: map[string]int{}})
+	if !strings.Contains(output.String(), "INCOMPLETE") {
+		t.Fatalf("grade card wrapped INCOMPLETE: %q", output.String())
+	}
+}
+
+func TestReportRendersDockerSectionsAndBaseline(t *testing.T) {
+	result := &models.AnalysisResult{
+		Score: models.ScoreResult{Breakdown: map[string]int{}},
+		PublishedPorts: []models.PublishedPort{{
+			IPVersion: models.IPv6, Protocol: models.ProtoTCP, HostPort: 8443, ContainerAddr: "fd00::2", ContainerPort: 443,
+			Bridge: "br-0123456789ab", ForwardScope: models.ScopeExposed, Certainty: models.CertaintyDefinite,
+		}},
+		DockerBypasses: []models.DockerBypassFinding{{
+			Code: models.FindingDockerIneffectiveRule, Severity: models.SeverityHigh, Reason: "rule never matches", Fix: "use --ctorigdstport",
+		}},
+		Baseline: models.Baseline{IPv4: "*filter\nCOMMIT\n", IPv6: "*filter\nCOMMIT\n", Notes: []string{"note"}},
+	}
+	var output bytes.Buffer
+	if err := Render(result, RenderOptions{Writer: &output}); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{"Docker Published Ports", "[fd00::2]:443", "Docker: Ineffective Firewall Rules", "use --ctorigdstport",
+		"Recommended Baseline (IPv4 + IPv6)", "baseline.v4", "baseline.v6"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("report is missing %q", want)
+		}
+	}
+}
+
+func TestServiceTableShowsDockerPublishedStatus(t *testing.T) {
+	result := &models.AnalysisResult{
+		Services:       []models.ListeningService{{Protocol: models.ProtoTCP, Address: "0.0.0.0", Port: 8080, Process: "docker-proxy", IsWildcard: true, Status: models.ServiceDocker}},
+		PublishedPorts: []models.PublishedPort{{IPVersion: models.IPv4, Protocol: models.ProtoTCP, HostPort: 8080, ForwardScope: models.ScopeExposed}},
+	}
+	var output bytes.Buffer
+	renderServiceTable(&output, result)
+	if !strings.Contains(output.String(), "DOCKER: EXPOSED") {
+		t.Fatalf("published listener status missing: %s", output.String())
+	}
+}

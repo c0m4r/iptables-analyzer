@@ -288,3 +288,28 @@ func TestParseRejectsInvalidChainPolicies(t *testing.T) {
 		}
 	}
 }
+
+func TestParseRestoreFlushLines(t *testing.T) {
+	rs, err := Parse("*filter\n:INPUT DROP [0:0]\n:DOCKER-USER - [0:0]\n-A INPUT -j ACCEPT\n-F INPUT\n-A INPUT -i lo -j ACCEPT\nCOMMIT\n", models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := rs.Tables["filter"].Chains["INPUT"].Rules
+	if len(rules) != 1 || rules[0].InIface != "lo" || rules[0].RuleNum != 1 {
+		t.Fatalf("-F must clear the chain before later rules: %+v", rules)
+	}
+	if _, err := Parse("*filter\n:INPUT DROP [0:0]\n-F MISSING\nCOMMIT\n", models.IPv4); err == nil {
+		t.Fatal("flushing an undeclared chain must be an error")
+	}
+}
+
+func TestParseKeepsTargetOptionsOutOfMatches(t *testing.T) {
+	rs, err := Parse("*raw\n:PREROUTING ACCEPT [0:0]\n-A PREROUTING -p udp --dport 53 -j CT --notrack\nCOMMIT\n", models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := rs.Tables["raw"].Chains["PREROUTING"].Rules[0]
+	if len(rule.Matches) != 0 || len(rule.TargetArgs) != 1 || rule.TargetArgs[0] != "--notrack" {
+		t.Fatalf("target options parsed as matches: matches=%+v args=%+v", rule.Matches, rule.TargetArgs)
+	}
+}

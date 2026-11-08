@@ -8,8 +8,11 @@ iptables\-analyzer \- analyze iptables/ip6tables firewall rules for security iss
 .B iptables\-analyzer
 inspects iptables and ip6tables rules to identify security weaknesses, including
 shadowed or ineffective rules, Docker NAT bypasses that make INPUT rules useless,
-services exposed to the network, and missing best practices. It provides a
-security score and actionable recommendations. The grade is marked INCOMPLETE
+DOCKER\-USER and FORWARD rules that never match published traffic, containers
+reachable by direct routing, services exposed to the network, blocked IPv6
+neighbor discovery, and missing best practices. It provides a security score,
+actionable recommendations, and a recommended baseline firewall that is always
+generated for both IPv4 and IPv6. The grade is marked INCOMPLETE
 when listening-service evidence or a firewall translation could not be assessed.
 .PP
 When run as root without any file arguments, it reads rules directly from the
@@ -45,6 +48,15 @@ An explicitly requested file that is missing or malformed is a fatal error.
 .TP
 .BR \-s ", " \-\-score\-only
 Only print the security score. The output includes assessment completeness.
+.TP
+.BR \-\-baseline "[=\fIFAMILY\fR]"
+Print only the recommended baseline firewall in iptables\-restore format and
+exit. \fIFAMILY\fR is \fB4\fR, \fB6\fR or \fBall\fR (the default). A single
+family is printed alone so it can be redirected into a rules file. The value
+must be attached with \fB=\fR. Without rule files and without root the baseline
+is generic; otherwise it keeps the detected SSH port, lists other listeners as
+commented rules and, on Docker hosts, adds DOCKER\-USER rules for published ports.
+Apply it with \fBiptables\-restore \-\-noflush\fR, which keeps Docker's chains.
 .TP
 .BR \-V ", " \-\-version
 Print version and exit.
@@ -84,6 +96,15 @@ sudo iptables\-analyzer \-s
 .EE
 .RE
 .PP
+Write the recommended baselines to files:
+.PP
+.RS 4
+.EX
+sudo iptables\-analyzer \-\-baseline=4 > baseline.v4
+sudo iptables\-analyzer \-\-baseline=6 > baseline.v6
+.EE
+.RE
+.PP
 Save rules for offline analysis:
 .PP
 .RS 4
@@ -97,8 +118,7 @@ Save listening services for offline analysis:
 .PP
 .RS 4
 .EX
-ss \-tlnp > services.txt
-ss \-ulnp >> services.txt
+ss \-tulnp > services.txt
 .EE
 .RE
 .SH SEE ALSO

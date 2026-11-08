@@ -3,6 +3,7 @@ package loader
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"time"
@@ -75,4 +76,26 @@ func loadOne(filePath string, live bool, command string, ver models.IPVersion) (
 // IsRoot returns true if the process is running as root
 func IsRoot() bool {
 	return os.Geteuid() == 0
+}
+
+// Host returns the interfaces and addresses of the running system. They let
+// live analysis evaluate interface and local-address predicates exactly.
+func Host() (*models.HostContext, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, fmt.Errorf("listing network interfaces: %w", err)
+	}
+	host := &models.HostContext{}
+	for _, iface := range interfaces {
+		entry := models.HostInterface{Name: iface.Name, Up: iface.Flags&net.FlagUp != 0}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			return nil, fmt.Errorf("listing addresses of %s: %w", iface.Name, err)
+		}
+		for _, addr := range addrs {
+			entry.Addrs = append(entry.Addrs, addr.String())
+		}
+		host.Interfaces = append(host.Interfaces, entry)
+	}
+	return host, nil
 }

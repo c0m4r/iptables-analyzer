@@ -1,0 +1,56 @@
+# Captured from Docker 29.9.3 (iptables v1.8.11, nf_tables backend) on Raspberry Pi OS (Linux 6.18).
+# Containers (busybox httpd):
+#   -p 8080:80, -p 127.0.0.1:8081:80, -p 192.168.88.217:8082:80, -p 9053:53/udp, -p 9000-9002:9000-9002 (default bridge)
+#   network --ipv6 fd00:dead:beef::/64 (172.30.0.0/24): -p 8443:443
+#   network gateway_mode_ipv4=routed (172.31.0.0/24): -p 8090:80
+#   network gateway_mode_ipv4=nat-unprotected (172.29.0.0/24): -p 8091:80
+#   --internal network (172.28.0.0/24)
+*raw
+:PREROUTING ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+-A PREROUTING -d fd00:dead:beef::2/128 ! -i br-7a3442937ee6 -j DROP
+COMMIT
+*mangle
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+COMMIT
+*nat
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+:DOCKER - [0:0]
+-A PREROUTING -m addrtype --dst-type LOCAL -j DOCKER
+-A OUTPUT ! -d ::1/128 -m addrtype --dst-type LOCAL -j DOCKER
+-A POSTROUTING -s fd00:dead:beef::/64 ! -o br-7a3442937ee6 -j MASQUERADE
+-A DOCKER ! -s fe80::/10 ! -i br-7a3442937ee6 -p tcp -m tcp --dport 8443 -j DNAT --to-destination [fd00:dead:beef::2]:443
+COMMIT
+*filter
+:INPUT ACCEPT [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+:DOCKER - [0:0]
+:DOCKER-BRIDGE - [0:0]
+:DOCKER-CT - [0:0]
+:DOCKER-FORWARD - [0:0]
+:DOCKER-INTERNAL - [0:0]
+:DOCKER-USER - [0:0]
+-A FORWARD -j DOCKER-USER
+-A FORWARD -j DOCKER-FORWARD
+-A DOCKER -d fd00:dead:beef::2/128 ! -i br-7a3442937ee6 -o br-7a3442937ee6 -p tcp -m tcp --dport 443 -j ACCEPT
+-A DOCKER ! -i br-7a3442937ee6 -o br-7a3442937ee6 -j DROP
+-A DOCKER-BRIDGE -o br-7a3442937ee6 -j DOCKER
+-A DOCKER-CT -o br-7a3442937ee6 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A DOCKER-FORWARD -j DOCKER-CT
+-A DOCKER-FORWARD -j DOCKER-INTERNAL
+-A DOCKER-FORWARD -j DOCKER-BRIDGE
+-A DOCKER-FORWARD -i br-7a3442937ee6 -j ACCEPT
+COMMIT
+*security
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+COMMIT

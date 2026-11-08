@@ -285,8 +285,14 @@ COMMIT
 	if err != nil {
 		t.Fatal(err)
 	}
-	if findings := DetectDockerBypasses(rs); len(findings) != 0 {
-		t.Fatalf("source-whitelisted DNAT must not be reported as unrestricted: %+v", findings)
+	findings := DetectDockerBypasses(rs)
+	if published := withCodes(findings, models.FindingDockerBypass, models.FindingDockerPublished); len(published) != 0 {
+		t.Fatalf("source-whitelisted DNAT must not be reported as unrestricted: %+v", published)
+	}
+	// FORWARD ACCEPT without raw/PREROUTING protection still forwards packets
+	// routed straight to the container address.
+	if direct := withCodes(findings, models.FindingDockerDirectRoute); len(direct) != 1 || direct[0].Certainty != models.CertaintyPossible {
+		t.Fatalf("expected a possible direct-routing finding, got %+v", findings)
 	}
 }
 
@@ -401,7 +407,8 @@ COMMIT
 	}
 	result := Analyze(rs, nil)
 	CrossReferenceServices(result, []models.ListeningService{testService()})
-	if len(result.ExposedServices) != 1 || result.ExposedServices[0].Certainty != models.CertaintyPossible {
+	// Unfragmented packets never match -f, so the ACCEPT path is definite.
+	if len(result.ExposedServices) != 1 || result.ExposedServices[0].Certainty != models.CertaintyDefinite {
 		t.Fatalf("fragment-only DROP hid reachable traffic: %+v", result.ExposedServices)
 	}
 	if len(result.ShadowedRules) != 0 {
@@ -684,9 +691,27 @@ COMMIT
 	if err != nil {
 		t.Fatal(err)
 	}
-	if findings := DetectDockerBypasses(rs); len(findings) != 0 {
-		t.Fatalf("original-port protection was ignored: %+v", findings)
+	findings := DetectDockerBypasses(rs)
+	if published := withCodes(findings, models.FindingDockerBypass, models.FindingDockerPublished); len(published) != 0 {
+		t.Fatalf("original-port protection was ignored: %+v", published)
 	}
+	// --ctorigdstport does not see packets routed directly to 172.17.0.2:80.
+	direct := withCodes(findings, models.FindingDockerDirectRoute)
+	if len(direct) != 1 || direct[0].Severity != models.SeverityHigh || direct[0].ContainerDest != "172.17.0.2:80" {
+		t.Fatalf("expected direct routing to bypass the original-port restriction, got %+v", findings)
+	}
+}
+
+func withCodes(findings []models.DockerBypassFinding, codes ...models.FindingCode) []models.DockerBypassFinding {
+	var selected []models.DockerBypassFinding
+	for _, finding := range findings {
+		for _, code := range codes {
+			if finding.Code == code {
+				selected = append(selected, finding)
+			}
+		}
+	}
+	return selected
 }
 
 func TestStatefulMatchesDoNotProveShadowing(t *testing.T) {
@@ -702,5 +727,189 @@ func TestStatefulMatchesDoNotProveShadowing(t *testing.T) {
 		if findings := DetectShadowedRules(rs); len(findings) != 0 {
 			t.Fatalf("stateful match %q proved shadowing: %+v", match, findings)
 		}
+	}
+}
+
+func TestPolicyAcceptedPrivateSourcesAreLocalnet(t *testing.T) {
+	rs := parseRules(t, "*filter\n:INPUT ACCEPT [0:0]\n-A INPUT ! -s 10.0.0.0/8 -j DROP\nCOMMIT\n", models.IPv4)
+	result := Analyze(rs, nil)
+	CrossReferenceServices(result, []models.ListeningService{testService()})
+	if len(result.ExposedServices) != 1 || result.ExposedServices[0].Scope != models.ScopeLocalnet {
+		t.Fatalf("sources accepted by the chain policy must keep their scope: %+v", result.ExposedServices)
+	}
+}
+
+func TestRateLimitDropDoesNotMakeExposurePossible(t *testing.T) {
+	rs := parseRules(t, `*filter
+:INPUT DROP [0:0]
+-A INPUT -p tcp -m tcp --dport 8080 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-mode srcip --hashlimit-name web -j DROP
+-A INPUT -p tcp -m tcp --dport 8080 -m conntrack --ctstate NEW -j ACCEPT
+COMMIT
+`, models.IPv4)
+	result := Analyze(rs, nil)
+	CrossReferenceServices(result, []models.ListeningService{testService()})
+	if len(result.ExposedServices) != 1 || result.ExposedServices[0].Certainty != models.CertaintyDefinite {
+		t.Fatalf("traffic under the limit is definitely accepted: %+v", result.ExposedServices)
+	}
+}
+
+func TestUndecidableAcceptIsPossible(t *testing.T) {
+	rs := parseRules(t, "*filter\n:INPUT DROP [0:0]\n-A INPUT -p tcp --dport 8080 -m set --match-set admins src -j ACCEPT\nCOMMIT\n", models.IPv4)
+	result := Analyze(rs, nil)
+	CrossReferenceServices(result, []models.ListeningService{testService()})
+	if len(result.ExposedServices) != 1 || result.ExposedServices[0].Certainty != models.CertaintyPossible {
+		t.Fatalf("an ipset-dependent accept is only possible: %+v", result.ExposedServices)
+	}
+}
+
+func TestInterfaceRestrictedServiceIsDefinite(t *testing.T) {
+	rs := parseRules(t, "*filter\n:INPUT DROP [0:0]\n-A INPUT -i eth0 -p tcp --dport 8080 -j ACCEPT\nCOMMIT\n", models.IPv4)
+	result := Analyze(rs, nil)
+	CrossReferenceServices(result, []models.ListeningService{testService()})
+	if len(result.ExposedServices) != 1 {
+		t.Fatalf("expected an exposure via eth0, got %+v", result.ExposedServices)
+	}
+	finding := result.ExposedServices[0]
+	if finding.Certainty != models.CertaintyDefinite || len(finding.Interfaces) != 1 || finding.Interfaces[0] != "eth0" {
+		t.Fatalf("exposure should be definite and limited to eth0: %+v", finding)
+	}
+}
+
+func TestInterfaceBlockLeavesOtherInterfacesPossible(t *testing.T) {
+	rs := parseRules(t, "*filter\n:INPUT ACCEPT [0:0]\n-A INPUT -i eth0 -p tcp --dport 8080 -j DROP\nCOMMIT\n", models.IPv4)
+	result := Analyze(rs, nil)
+	CrossReferenceServices(result, []models.ListeningService{testService()})
+	if len(result.ExposedServices) != 1 || result.ExposedServices[0].Certainty != models.CertaintyPossible {
+		t.Fatalf("other interfaces may exist in saved rules: %+v", result.ExposedServices)
+	}
+	live := AnalyzeHost(rs, nil, &models.HostContext{Interfaces: []models.HostInterface{{Name: "lo"}, {Name: "eth0"}}})
+	CrossReferenceServices(live, []models.ListeningService{testService()})
+	if len(live.ExposedServices) != 0 {
+		t.Fatalf("eth0 is the only external interface of the live host: %+v", live.ExposedServices)
+	}
+}
+
+func TestLoopbackDestinationRuleDoesNotAdmitExternalTraffic(t *testing.T) {
+	rs := parseRules(t, "*filter\n:INPUT DROP [0:0]\n-A INPUT -d 127.0.0.1/32 -j ACCEPT\nCOMMIT\n", models.IPv4)
+	result := Analyze(rs, nil)
+	CrossReferenceServices(result, []models.ListeningService{testService()})
+	if len(result.ExposedServices) != 0 {
+		t.Fatalf("external packets cannot be addressed to loopback: %+v", result.ExposedServices)
+	}
+}
+
+func TestBlockedLoopbackIsReported(t *testing.T) {
+	rs := parseRules(t, "*filter\n:INPUT DROP [0:0]\n-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\nCOMMIT\n", models.IPv4)
+	if !hasEffectiveness(CheckEffectiveness(rs), models.FindingMissingLoopback) {
+		t.Fatal("expected the dropped loopback interface to be reported")
+	}
+	rs = parseRules(t, "*filter\n:INPUT DROP [0:0]\n-A INPUT -i lo -j ACCEPT\nCOMMIT\n", models.IPv4)
+	if hasEffectiveness(CheckEffectiveness(rs), models.FindingMissingLoopback) {
+		t.Fatal("loopback accept was not recognized")
+	}
+}
+
+func TestMissingConntrackWithDefaultDenyIsHigh(t *testing.T) {
+	rs := parseRules(t, "*filter\n:INPUT DROP [0:0]\n-A INPUT -i lo -j ACCEPT\nCOMMIT\n", models.IPv4)
+	for _, finding := range CheckEffectiveness(rs) {
+		if finding.Code == models.FindingMissingConntrack && finding.Severity != models.SeverityHigh {
+			t.Fatalf("default deny without ESTABLISHED drops replies: %+v", finding)
+		}
+	}
+}
+
+func TestIPv6NeighborDiscoveryBlocked(t *testing.T) {
+	blocked := parseRules(t, `*filter
+:INPUT DROP [0:0]
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A INPUT -p ipv6-icmp -m conntrack --ctstate NEW -j ACCEPT
+COMMIT
+`, models.IPv6)
+	if !hasEffectiveness(CheckEffectiveness(blocked), models.FindingIPv6NDPBlocked) {
+		t.Fatal("untracked neighbor discovery is not admitted by NEW or ESTABLISHED rules")
+	}
+	allowed := parseRules(t, `*filter
+:INPUT DROP [0:0]
+-A INPUT -p ipv6-icmp -j ACCEPT
+COMMIT
+`, models.IPv6)
+	if hasEffectiveness(CheckEffectiveness(allowed), models.FindingIPv6NDPBlocked) {
+		t.Fatal("a blanket ICMPv6 accept admits neighbor discovery")
+	}
+	typed := parseRules(t, `*filter
+:INPUT DROP [0:0]
+-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type neighbour-solicitation -m hl --hl-eq 255 -j ACCEPT
+-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 136 -m hl --hl-eq 255 -j ACCEPT
+-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 134 -m hl --hl-eq 255 -j ACCEPT
+COMMIT
+`, models.IPv6)
+	if hasEffectiveness(CheckEffectiveness(typed), models.FindingIPv6NDPBlocked) {
+		t.Fatalf("typed neighbor discovery accepts were not recognized: %+v", CheckEffectiveness(typed))
+	}
+}
+
+func TestMultipleConntrackMatchesAreAllEvaluated(t *testing.T) {
+	rule := parseRules(t, "*filter\n:FORWARD DROP [0:0]\n-A FORWARD -m conntrack --ctstate NEW -m conntrack ! --ctstate DNAT -j DROP\nCOMMIT\n", models.IPv4).Tables["filter"].Chains["FORWARD"].Rules[0]
+	if got := ruleMatchesQuery(&rule, packetQuery{Protocol: "tcp", State: "NEW", NATState: "DNAT"}); got != matchNo {
+		t.Fatalf("DNATed connection matched ! --ctstate DNAT: %v", got)
+	}
+	if got := ruleMatchesQuery(&rule, packetQuery{Protocol: "tcp", State: "NEW", NATState: noNAT}); got != matchYes {
+		t.Fatalf("untranslated NEW connection did not match: %v", got)
+	}
+	if got := ruleMatchesQuery(&rule, packetQuery{Protocol: "tcp", State: "ESTABLISHED", NATState: noNAT}); got != matchNo {
+		t.Fatalf("ESTABLISHED matched --ctstate NEW: %v", got)
+	}
+}
+
+func TestTargetOptionsDoNotCreateUncertainty(t *testing.T) {
+	rs := parseRules(t, `*mangle
+:FORWARD ACCEPT [0:0]
+-A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+COMMIT
+*filter
+:INPUT DROP [0:0]
+-A INPUT -p tcp --dport 8080 -j LOG --log-prefix "in: "
+-A INPUT -p tcp --dport 8080 -j ACCEPT
+COMMIT
+`, models.IPv4)
+	result := Analyze(rs, nil)
+	CrossReferenceServices(result, []models.ListeningService{testService()})
+	if len(result.ExposedServices) != 1 || result.ExposedServices[0].Certainty != models.CertaintyDefinite {
+		t.Fatalf("non-verdict targets must not add uncertainty: %+v", result.ExposedServices)
+	}
+}
+
+func hasEffectiveness(findings []models.EffectivenessFinding, code models.FindingCode) bool {
+	for _, finding := range findings {
+		if finding.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+func TestQueueVerdictIsPossibleExposure(t *testing.T) {
+	rs := parseRules(t, "*filter\n:INPUT DROP [0:0]\n-A INPUT -p tcp --dport 8080 -j NFQUEUE --queue-num 1\nCOMMIT\n", models.IPv4)
+	result := Analyze(rs, nil)
+	CrossReferenceServices(result, []models.ListeningService{testService()})
+	if len(result.ExposedServices) != 1 || result.ExposedServices[0].Certainty != models.CertaintyPossible {
+		t.Fatalf("userspace verdicts can accept: %+v", result.ExposedServices)
+	}
+}
+
+func TestNotrackMakesStatefulChecksUncertain(t *testing.T) {
+	rs := parseRules(t, `*raw
+:PREROUTING ACCEPT [0:0]
+-A PREROUTING -j CT --notrack
+COMMIT
+*filter
+:INPUT DROP [0:0]
+COMMIT
+`, models.IPv6)
+	// Untracked packets change conntrack state; a definite "dropped" claim is
+	// not possible, so no neighbor-discovery finding may be produced.
+	if hasEffectiveness(CheckEffectiveness(rs), models.FindingIPv6NDPBlocked) {
+		t.Fatal("NOTRACK must make state-dependent conclusions uncertain")
 	}
 }

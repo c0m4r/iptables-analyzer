@@ -171,6 +171,18 @@ func getServiceStatus(svc models.ListeningService, result *models.AnalysisResult
 	if svc.Status == models.ServiceFiltered {
 		return styleSuccess.Render("FILTERED")
 	}
+	if svc.Status == models.ServiceDocker {
+		best := models.AccessScope("")
+		for _, mapping := range result.PublishedPorts {
+			if mapping.Protocol == svc.Protocol && mapping.HostPort == svc.Port && scopeRankUI(mapping.ForwardScope) > scopeRankUI(best) {
+				best = mapping.ForwardScope
+			}
+		}
+		if best == "" {
+			return styleSuccess.Render("DOCKER: BLOCKED")
+		}
+		return styleDanger.Render("DOCKER: " + string(best))
+	}
 
 	best := models.AccessScope("")
 	for _, exposed := range result.ExposedServices {
@@ -308,4 +320,16 @@ func isDisplayDuplicate(match models.MatchExt) bool {
 	default:
 		return false
 	}
+}
+
+func scopeRankUI(scope models.AccessScope) int {
+	switch scope {
+	case models.ScopeExposed:
+		return 3
+	case models.ScopeLocalnet:
+		return 2
+	case models.ScopeWhitelisted:
+		return 1
+	}
+	return 0
 }

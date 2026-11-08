@@ -21,6 +21,11 @@ _iptables_analyzer() {
             ;;
     esac
 
+    if [[ "$cur" == --baseline=* ]]; then
+        mapfile -t COMPREPLY < <(compgen -W "--baseline=4 --baseline=6 --baseline=all" -- "$cur")
+        return
+    fi
+
     if [[ "$cur" == -* ]]; then
         local opts="
             -f --file
@@ -32,6 +37,7 @@ _iptables_analyzer() {
             -v --verbose
             --services-file
             -s --score-only
+            --baseline --baseline=4 --baseline=6 --baseline=all
             -V --version
             -h --help
         "

@@ -1,0 +1,96 @@
+# Captured from Docker 29.9.3 (iptables v1.8.11, nf_tables backend) on Raspberry Pi OS (Linux 6.18).
+# Containers (busybox httpd):
+#   -p 8080:80, -p 127.0.0.1:8081:80, -p 192.168.88.217:8082:80, -p 9053:53/udp, -p 9000-9002:9000-9002 (default bridge)
+#   network --ipv6 fd00:dead:beef::/64 (172.30.0.0/24): -p 8443:443
+#   network gateway_mode_ipv4=routed (172.31.0.0/24): -p 8090:80
+#   network gateway_mode_ipv4=nat-unprotected (172.29.0.0/24): -p 8091:80
+#   --internal network (172.28.0.0/24)
+*raw
+:PREROUTING ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+-A PREROUTING -d 172.17.0.2/32 ! -i docker0 -j DROP
+-A PREROUTING -d 172.17.0.3/32 ! -i docker0 -j DROP
+-A PREROUTING -d 127.0.0.1/32 ! -i lo -p tcp -m tcp --dport 8081 -j DROP
+-A PREROUTING -d 172.17.0.4/32 ! -i docker0 -j DROP
+-A PREROUTING -d 172.17.0.5/32 ! -i docker0 -j DROP
+-A PREROUTING -d 172.17.0.6/32 ! -i docker0 -j DROP
+-A PREROUTING -d 172.30.0.2/32 ! -i br-7a3442937ee6 -j DROP
+COMMIT
+*mangle
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+COMMIT
+*nat
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+:DOCKER - [0:0]
+-A PREROUTING -m addrtype --dst-type LOCAL -j DOCKER
+-A OUTPUT ! -d 127.0.0.0/8 -m addrtype --dst-type LOCAL -j DOCKER
+-A POSTROUTING -s 172.29.0.0/24 ! -o br-982052ef0162 -j MASQUERADE
+-A POSTROUTING -s 172.30.0.0/24 ! -o br-7a3442937ee6 -j MASQUERADE
+-A POSTROUTING -s 172.17.0.0/16 ! -o docker0 -j MASQUERADE
+-A DOCKER ! -i docker0 -p tcp -m tcp --dport 8080 -j DNAT --to-destination 172.17.0.2:80
+-A DOCKER -d 127.0.0.1/32 ! -i docker0 -p tcp -m tcp --dport 8081 -j DNAT --to-destination 172.17.0.3:80
+-A DOCKER -d 192.168.88.217/32 ! -i docker0 -p tcp -m tcp --dport 8082 -j DNAT --to-destination 172.17.0.4:80
+-A DOCKER ! -i docker0 -p udp -m udp --dport 9053 -j DNAT --to-destination 172.17.0.5:53
+-A DOCKER ! -i docker0 -p tcp -m tcp --dport 9000 -j DNAT --to-destination 172.17.0.6:9000
+-A DOCKER ! -i docker0 -p tcp -m tcp --dport 9001 -j DNAT --to-destination 172.17.0.6:9001
+-A DOCKER ! -i docker0 -p tcp -m tcp --dport 9002 -j DNAT --to-destination 172.17.0.6:9002
+-A DOCKER ! -i br-7a3442937ee6 -p tcp -m tcp --dport 8443 -j DNAT --to-destination 172.30.0.2:443
+-A DOCKER ! -i br-982052ef0162 -p tcp -m tcp --dport 8091 -j DNAT --to-destination 172.29.0.2:80
+COMMIT
+*filter
+:INPUT ACCEPT [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+:DOCKER - [0:0]
+:DOCKER-BRIDGE - [0:0]
+:DOCKER-CT - [0:0]
+:DOCKER-FORWARD - [0:0]
+:DOCKER-INTERNAL - [0:0]
+:DOCKER-USER - [0:0]
+-A FORWARD -j DOCKER-USER
+-A FORWARD -j DOCKER-FORWARD
+-A DOCKER -d 172.31.0.2/32 ! -i br-84b7b034b576 -o br-84b7b034b576 -p tcp -m tcp --dport 80 -j ACCEPT
+-A DOCKER -d 172.30.0.2/32 ! -i br-7a3442937ee6 -o br-7a3442937ee6 -p tcp -m tcp --dport 443 -j ACCEPT
+-A DOCKER -d 172.17.0.6/32 ! -i docker0 -o docker0 -p tcp -m tcp --dport 9002 -j ACCEPT
+-A DOCKER -d 172.17.0.6/32 ! -i docker0 -o docker0 -p tcp -m tcp --dport 9001 -j ACCEPT
+-A DOCKER -d 172.17.0.6/32 ! -i docker0 -o docker0 -p tcp -m tcp --dport 9000 -j ACCEPT
+-A DOCKER -d 172.17.0.5/32 ! -i docker0 -o docker0 -p udp -m udp --dport 53 -j ACCEPT
+-A DOCKER -d 172.17.0.4/32 ! -i docker0 -o docker0 -p tcp -m tcp --dport 80 -j ACCEPT
+-A DOCKER -d 172.17.0.3/32 ! -i docker0 -o docker0 -p tcp -m tcp --dport 80 -j ACCEPT
+-A DOCKER -d 172.17.0.2/32 ! -i docker0 -o docker0 -p tcp -m tcp --dport 80 -j ACCEPT
+-A DOCKER ! -i docker0 -o docker0 -j DROP
+-A DOCKER ! -i br-7a3442937ee6 -o br-7a3442937ee6 -j DROP
+-A DOCKER -o br-84b7b034b576 -p icmp -j ACCEPT
+-A DOCKER ! -i br-84b7b034b576 -o br-84b7b034b576 -j DROP
+-A DOCKER ! -i br-982052ef0162 -o br-982052ef0162 -j ACCEPT
+-A DOCKER-BRIDGE -o docker0 -j DOCKER
+-A DOCKER-BRIDGE -o br-7a3442937ee6 -j DOCKER
+-A DOCKER-BRIDGE -o br-84b7b034b576 -j DOCKER
+-A DOCKER-BRIDGE -o br-982052ef0162 -j DOCKER
+-A DOCKER-CT -o docker0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A DOCKER-CT -o br-7a3442937ee6 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A DOCKER-CT -o br-84b7b034b576 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A DOCKER-CT -o br-982052ef0162 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A DOCKER-FORWARD -j DOCKER-CT
+-A DOCKER-FORWARD -j DOCKER-INTERNAL
+-A DOCKER-FORWARD -j DOCKER-BRIDGE
+-A DOCKER-FORWARD -i docker0 -j ACCEPT
+-A DOCKER-FORWARD -i br-7a3442937ee6 -j ACCEPT
+-A DOCKER-FORWARD -i br-84b7b034b576 -j ACCEPT
+-A DOCKER-FORWARD -i br-982052ef0162 -j ACCEPT
+-A DOCKER-FORWARD -i br-1843f3e4f373 -o br-1843f3e4f373 -j ACCEPT
+-A DOCKER-INTERNAL ! -s 172.28.0.0/24 -o br-1843f3e4f373 -j DROP
+-A DOCKER-INTERNAL ! -d 172.28.0.0/24 -i br-1843f3e4f373 -j DROP
+COMMIT
+*security
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+COMMIT

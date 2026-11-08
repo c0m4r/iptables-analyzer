@@ -31,10 +31,15 @@ func DetectShadowedRules(rs *models.Ruleset) []models.ShadowFinding {
 func detectShadowsInChain(chain *models.Chain, tableName string, ipVer models.IPVersion) []models.ShadowFinding {
 	var findings []models.ShadowFinding
 	rules := chain.Rules
+	terminal := make([]bool, len(rules))
+	for i := range rules {
+		terminal[i] = rules[i].IsTerminal()
+	}
+	index := newChainIndex(chain)
 
 	for j := 1; j < len(rules); j++ {
-		for i := 0; i < j; i++ {
-			if !rules[i].IsTerminal() {
+		for _, i := range shadowCandidates(index, &rules[j], j) {
+			if !terminal[i] {
 				continue
 			}
 			if isSuperset(&rules[i], &rules[j], ipVer) {
@@ -60,6 +65,35 @@ func detectShadowsInChain(chain *models.Chain, tableName string, ipVer models.IP
 	}
 
 	return findings
+}
+
+// shadowCandidates returns, in chain order, the rules before position j that
+// can cover rule b. A rule with a destination-port predicate only covers rules
+// whose ports it contains, so indexed rules are looked up by b's first port.
+func shadowCandidates(index *chainIndex, b *models.Rule, j int) []int {
+	var indexed []int
+	if ranges := cachedPortRanges(b.DstPort); b.DstPort != "" && !b.Negations["dport"] && len(ranges) > 0 {
+		indexed = index.byPort[ranges[0][0]]
+	}
+	candidates := make([]int, 0, len(index.always)+len(indexed))
+	x, y := 0, 0
+	for {
+		var next int
+		switch {
+		case x < len(index.always) && (y >= len(indexed) || index.always[x] < indexed[y]):
+			next = index.always[x]
+			x++
+		case y < len(indexed):
+			next = indexed[y]
+			y++
+		default:
+			return candidates
+		}
+		if next >= j {
+			return candidates
+		}
+		candidates = append(candidates, next)
+	}
 }
 
 // isSuperset returns true if rule A matches every packet that rule B matches
@@ -189,8 +223,8 @@ func portCovers(a, b string) bool {
 		return false // a is specific, b is any
 	}
 
-	aPorts := expandPorts(a)
-	bPorts := expandPorts(b)
+	aPorts := cachedPortRanges(a)
+	bPorts := cachedPortRanges(b)
 
 	// All ports in b must be in a
 	for _, bp := range bPorts {

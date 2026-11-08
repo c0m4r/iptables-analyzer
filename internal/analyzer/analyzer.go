@@ -10,9 +10,16 @@ import (
 
 // Analyze runs all analysis on the rulesets
 func Analyze(ipv4, ipv6 *models.Ruleset) *models.AnalysisResult {
+	return AnalyzeHost(ipv4, ipv6, nil)
+}
+
+// AnalyzeHost runs all analysis on the rulesets. host carries live facts such
+// as the interface list; nil means they are unknown (saved rulesets).
+func AnalyzeHost(ipv4, ipv6 *models.Ruleset, host *models.HostContext) *models.AnalysisResult {
 	result := &models.AnalysisResult{
 		IPv4Rules:         ipv4,
 		IPv6Rules:         ipv6,
+		Host:              host,
 		ServiceAssessment: models.AssessmentNotRequested,
 	}
 
@@ -20,11 +27,14 @@ func Analyze(ipv4, ipv6 *models.Ruleset) *models.AnalysisResult {
 	result.ShadowedRules = append(result.ShadowedRules, DetectShadowedRules(ipv4)...)
 	result.ShadowedRules = append(result.ShadowedRules, DetectShadowedRules(ipv6)...)
 
-	// Docker NAT bypass detection
-	result.DockerBypasses = append(result.DockerBypasses, DetectDockerBypasses(ipv4)...)
-	result.DockerBypasses = append(result.DockerBypasses, DetectDockerBypasses(ipv6)...)
-	result.Diagnostics = append(result.Diagnostics, DockerAssessmentDiagnostics(ipv4)...)
-	result.Diagnostics = append(result.Diagnostics, DockerAssessmentDiagnostics(ipv6)...)
+	// Docker packet-path analysis
+	for _, rs := range []*models.Ruleset{ipv4, ipv6} {
+		docker := AnalyzeDocker(rs, host)
+		result.DockerBypasses = append(result.DockerBypasses, docker.Findings...)
+		result.PublishedPorts = append(result.PublishedPorts, docker.PublishedPorts...)
+		result.Diagnostics = append(result.Diagnostics, DockerAssessmentDiagnostics(rs)...)
+	}
+	result.DockerBypasses = append(result.DockerBypasses, DockerIPv6Gaps(ipv4, ipv6)...)
 
 	// Effectiveness checks
 	result.EffectiveIssues = append(result.EffectiveIssues, CheckEffectiveness(ipv4)...)
@@ -37,6 +47,7 @@ func Analyze(ipv4, ipv6 *models.Ruleset) *models.AnalysisResult {
 func CrossReferenceServices(result *models.AnalysisResult, services []models.ListeningService) {
 	result.Services = deduplicateServices(services)
 	result.ServiceAssessment = models.AssessmentComplete
+	evaluators := map[*models.Ruleset]*inputEvaluator{}
 
 	for i := range result.Services {
 		svc := result.Services[i]
@@ -63,17 +74,22 @@ func CrossReferenceServices(result *models.AnalysisResult, services []models.Lis
 		}
 		assessed := false
 		reachable := false
+		published := false
 		for _, family := range families {
 			rs := result.IPv4Rules
 			label := "IPv4"
 			evaluated := svc
-			evaluated.Address = "0.0.0.0"
+			if svc.IsWildcard || svc.Family == models.SocketDual {
+				evaluated.Address = "0.0.0.0"
+			}
 			evaluated.IsIPv6 = false
 			evaluated.Family = models.SocketIPv4
 			if family == models.IPv6 {
 				rs = result.IPv6Rules
 				label = "IPv6"
-				evaluated.Address = "::"
+				if svc.IsWildcard || svc.Family == models.SocketDual {
+					evaluated.Address = "::"
+				}
 				evaluated.IsIPv6 = true
 				evaluated.Family = models.SocketIPv6
 			}
@@ -81,23 +97,56 @@ func CrossReferenceServices(result *models.AnalysisResult, services []models.Lis
 				continue
 			}
 			assessed = true
-			scope, allowRule, certainty := classifyPortScope(rs, evaluated)
-			if scope != "" {
+			if mapping := publishedMapping(result.PublishedPorts, family, evaluated); mapping != nil {
+				// nat/PREROUTING translates this port before INPUT; the listener
+				// (typically docker-proxy) is not what external clients reach.
+				published = true
+				if mapping.ForwardScope != "" {
+					reachable = true
+				}
+				continue
+			}
+			evaluator := evaluators[rs]
+			if evaluator == nil {
+				evaluator = newInputEvaluator(rs, result.Host)
+				evaluators[rs] = evaluator
+			}
+			exposure := evaluator.classify(evaluated)
+			if exposure.scope != "" {
 				reachable = true
-				addServiceFinding(result, evaluated, allowRule, scope, label, family, certainty)
+				addServiceFinding(result, evaluated, exposure, label, family)
 			}
 		}
-		if !assessed {
+		switch {
+		case !assessed:
 			result.Services[i].Status = models.ServiceNotAnalyzed
-		} else if reachable {
+		case published:
+			result.Services[i].Status = models.ServiceDocker
+		case reachable:
 			result.Services[i].Status = models.ServiceReachable
-		} else {
+		default:
 			result.Services[i].Status = models.ServiceFiltered
 		}
 	}
 
 	// Find unused rules (rules for ports with no listening service)
 	findUnusedRules(result)
+}
+
+// publishedMapping returns the Docker mapping that intercepts traffic for the
+// listener before INPUT, if any. A mapping bound to one host address only
+// intercepts a listener bound to that same address.
+func publishedMapping(mappings []models.PublishedPort, family models.IPVersion, svc models.ListeningService) *models.PublishedPort {
+	for i := range mappings {
+		mapping := &mappings[i]
+		if mapping.IPVersion != family || mapping.Protocol != svc.Protocol || mapping.HostPort != svc.Port {
+			continue
+		}
+		if mapping.HostAddr == "" || mapping.HostAddr == svc.Address {
+			return mapping
+		}
+	}
+	return nil
 }
 
 // deduplicateServices collapses repeated socket rows without merging distinct
@@ -139,52 +188,117 @@ func deduplicateServices(services []models.ListeningService) []models.ListeningS
 }
 
 // addServiceFinding builds and appends an ExposedServiceFinding.
-func addServiceFinding(result *models.AnalysisResult, svc models.ListeningService, allowRule *models.Rule, scope models.AccessScope, ipLabel string, ipVersion models.IPVersion, certainty models.Certainty) {
+func addServiceFinding(result *models.AnalysisResult, svc models.ListeningService, exposure serviceExposure, ipLabel string, ipVersion models.IPVersion) {
 	sev := models.SeverityHigh
 	if svc.Port >= 1024 {
 		sev = models.SeverityMedium
 	}
-	if scope != models.ScopeExposed {
+	if exposure.scope != models.ScopeExposed {
 		sev = models.SeverityLow
 	}
 
 	reachability := "is accessible"
-	if certainty == models.CertaintyPossible {
+	if exposure.certainty == models.CertaintyPossible {
 		reachability = "may be accessible"
 	}
-	reason := "Service " + svc.Process + " listening on port " +
+	process := svc.Process
+	if process == "" {
+		process = "(unknown process)"
+	}
+	reason := "Service " + process + " listening on port " +
 		strconv.Itoa(svc.Port) + "/" + string(svc.Protocol) +
 		" (" + ipLabel + ") " + reachability + " from the network"
-	if allowRule != nil {
-		reason += " (allowed by rule #" + strconv.Itoa(allowRule.RuleNum) + " in " +
-			allowRule.Table + "/" + allowRule.Chain + ")"
+	if len(exposure.interfaces) > 0 {
+		reason += " via " + strings.Join(exposure.interfaces, ", ")
+	}
+	if svc.Process == "docker-proxy" {
+		reason += "; docker-proxy relays it to a container, so unlike DNATed traffic this path is filtered by INPUT"
+	}
+	if exposure.allowRule != nil {
+		reason += " (allowed by rule #" + strconv.Itoa(exposure.allowRule.RuleNum) + " in " +
+			exposure.allowRule.Table + "/" + exposure.allowRule.Chain + ")"
 	} else {
 		reason += " (allowed by default ACCEPT policy)"
 	}
 
 	result.ExposedServices = append(result.ExposedServices, models.ExposedServiceFinding{
 		Code:         models.FindingExposedService,
-		Certainty:    certainty,
+		Certainty:    exposure.certainty,
 		IPVersion:    ipVersion,
 		Service:      svc,
-		AllowingRule: allowRule,
+		AllowingRule: exposure.allowRule,
 		Severity:     sev,
-		Scope:        scope,
+		Scope:        exposure.scope,
+		Interfaces:   exposure.interfaces,
 		Reason:       reason,
 	})
 }
 
-// classifyPortScope evaluates filter/INPUT in rule order, including jumps and
-// RETURN behavior. Returns ("", nil) when no source can reach the service.
-func classifyPortScope(rs *models.Ruleset, svc models.ListeningService) (models.AccessScope, *models.Rule, models.Certainty) {
-	scope, allowRule, _, certainty := evaluateAccessDetailed(rs, "INPUT", packetQuery{
-		Protocol: svc.Protocol,
-		DstPort:  svc.Port,
-		DstAddr:  svc.Address,
-		State:    "NEW",
-		External: true,
-	})
-	return scope, allowRule, certainty
+type serviceExposure struct {
+	scope      models.AccessScope
+	allowRule  *models.Rule
+	certainty  models.Certainty
+	interfaces []string
+}
+
+// inputEvaluator evaluates the local-delivery path (raw/PREROUTING through
+// security/INPUT) of one ruleset for every candidate ingress interface.
+type inputEvaluator struct {
+	rs         *models.Ruleset
+	ctx        *evalContext
+	candidates []ingressCandidate
+}
+
+func newInputEvaluator(rs *models.Ruleset, host *models.HostContext) *inputEvaluator {
+	ctx := newEvalContext(rs, inferDockerTopology(rs), host)
+	return &inputEvaluator{rs: rs, ctx: ctx, candidates: ingressCandidates(rs, ctx, host)}
+}
+
+func (e *inputEvaluator) classify(svc models.ListeningService) serviceExposure {
+	root := []netip.Prefix{rootPrefix(e.rs.IPVersion)}
+	var best serviceExposure
+	var selected []ingressCandidate
+	uncertain := false
+	for _, candidate := range e.candidates {
+		query := packetQuery{
+			Protocol:        svc.Protocol,
+			DstPort:         svc.Port,
+			DstAddr:         svc.Address,
+			DstType:         "LOCAL",
+			InIface:         candidate.name,
+			State:           "NEW",
+			NATState:        noNAT,
+			OriginalDstAddr: svc.Address,
+			OriginalDstPort: svc.Port,
+			Direction:       "ORIGINAL",
+			External:        true,
+			Ctx:             e.ctx,
+		}
+		path := evaluatePath(e.rs, inputPath(query), root)
+		scope, rule, certainty := path.classify()
+		if scope == "" {
+			continue
+		}
+		possible := certainty == models.CertaintyPossible
+		switch {
+		case scopeRank(scope) > scopeRank(best.scope):
+			best = serviceExposure{scope: scope, allowRule: rule}
+			selected = []ingressCandidate{candidate}
+			uncertain = possible
+		case scope == best.scope:
+			selected = append(selected, candidate)
+			uncertain = uncertain && possible
+		}
+	}
+	if best.scope == "" {
+		return best
+	}
+	best.certainty = models.CertaintyDefinite
+	if uncertain || onlyAssumed(selected) {
+		best.certainty = models.CertaintyPossible
+	}
+	best.interfaces = candidateLabels(selected, e.candidates)
+	return best
 }
 
 func portMatches(rulePort, servicePort string) bool {

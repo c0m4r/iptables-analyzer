@@ -10,8 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/c0m4r/iptables-analyzer/internal/analyzer"
 	"github.com/c0m4r/iptables-analyzer/internal/models"
 	"github.com/charmbracelet/lipgloss"
+	lgtable "github.com/charmbracelet/lipgloss/table"
 )
 
 // ──────────────────────────────────────────────────────────────
@@ -45,10 +47,12 @@ func Render(result *models.AnalysisResult, opts RenderOptions) error {
 	renderHeader(tracked, opts)
 	renderOverview(tracked, result)
 	renderRules(tracked, result, opts.Verbose)
+	renderPublishedPorts(tracked, result)
 	renderFindingsAndRecommendations(tracked, result)
 	if len(result.Services) > 0 {
 		renderServiceTable(tracked, result)
 	}
+	renderBaseline(tracked, result.Baseline)
 	renderScore(tracked, result.Score)
 	return tracked.err
 }
@@ -173,7 +177,7 @@ func renderOverview(w io.Writer, result *models.AnalysisResult) {
 	} else {
 		parts := []string{}
 		if n := len(result.DockerBypasses); n > 0 {
-			parts = append(parts, styleDanger.Render(fmt.Sprintf("%d docker bypasses", n)))
+			parts = append(parts, styleDanger.Render(fmt.Sprintf("%d docker", n)))
 		}
 		if n := len(result.ShadowedRules); n > 0 {
 			parts = append(parts, styleWarning.Render(fmt.Sprintf("%d shadowed rules", n)))
@@ -194,6 +198,24 @@ func renderOverview(w io.Writer, result *models.AnalysisResult) {
 
 	fmt.Fprintf(w, "  Recommendations: %s\n", styleMuted.Render(strconv.Itoa(len(result.Recommendations))))
 	fmt.Fprintf(w, "  Service exposure: %s\n", styleMuted.Render(string(result.ServiceAssessment)))
+	if n := len(result.PublishedPorts); n > 0 {
+		fmt.Fprintf(w, "  Docker published: %s\n", styleMuted.Render(fmt.Sprintf("%d port mapping%s", n, pluralS(n))))
+	}
+	if result.Host != nil {
+		var names []string
+		veth := 0
+		for _, iface := range result.Host.Interfaces {
+			if strings.HasPrefix(iface.Name, "veth") {
+				veth++
+				continue
+			}
+			names = append(names, iface.Name)
+		}
+		if veth > 0 {
+			names = append(names, fmt.Sprintf("(+%d container veth)", veth))
+		}
+		fmt.Fprintf(w, "  Interfaces:      %s\n", styleMuted.Render(strings.Join(names, " ")))
+	}
 	for _, diagnostic := range result.Diagnostics {
 		fmt.Fprintf(w, "  Assessment note (%s): %s\n", diagnostic.Area, styleWarning.Render(diagnostic.Message))
 	}
@@ -382,7 +404,7 @@ func renderScore(w io.Writer, score models.ScoreResult) {
 		BorderForeground(gc).
 		Padding(0, 2).
 		AlignHorizontal(lipgloss.Center).
-		Width(12).
+		Width(16).
 		Render(
 			gs.Render(score.Grade) + "\n" +
 				styleMuted.Render(strconv.Itoa(score.Total)+"/100"),
@@ -517,11 +539,22 @@ func renderFindingsAndRecommendations(w io.Writer, result *models.AnalysisResult
 
 	renderSectionHeader(w, "Issues & Recommendations")
 
-	// Docker bypasses
-	if len(result.DockerBypasses) > 0 {
-		renderSubSection(w, "Docker NAT Bypasses", len(result.DockerBypasses))
+	// Docker findings, grouped by kind
+	for _, group := range dockerFindingGroups {
+		var findings []models.DockerBypassFinding
 		for _, f := range result.DockerBypasses {
-			renderFindingRow(w, f.Severity.String(), f.Reason, "")
+			for _, code := range group.codes {
+				if f.Code == code {
+					findings = append(findings, f)
+				}
+			}
+		}
+		if len(findings) == 0 {
+			continue
+		}
+		renderSubSection(w, group.title, len(findings))
+		for _, f := range findings {
+			renderFindingRow(w, f.Severity.String(), f.Reason, f.Fix)
 		}
 		fmt.Fprintln(w)
 	}
@@ -596,6 +629,116 @@ func renderFindingsAndRecommendations(w io.Writer, result *models.AnalysisResult
 			fmt.Fprintln(w)
 		}
 	}
+}
+
+var dockerFindingGroups = []struct {
+	title string
+	codes []models.FindingCode
+}{
+	{"Docker: INPUT Bypassed by Published Ports", []models.FindingCode{models.FindingDockerBypass}},
+	{"Docker: Ineffective Firewall Rules", []models.FindingCode{models.FindingDockerIneffectiveRule, models.FindingDockerShadowedRule, models.FindingDockerFragileRule}},
+	{"Docker: Direct Routing to Containers", []models.FindingCode{models.FindingDockerDirectRoute}},
+	{"Docker: Published Ports Open to Any Source", []models.FindingCode{models.FindingDockerPublished}},
+	{"Docker: IPv6", []models.FindingCode{models.FindingDockerIPv6Unfiltered}},
+}
+
+// renderPublishedPorts lists every port Docker DNATs, with the verdict of the
+// forwarded path and what filter/INPUT would have decided.
+func renderPublishedPorts(w io.Writer, result *models.AnalysisResult) {
+	if len(result.PublishedPorts) == 0 {
+		return
+	}
+	renderSectionHeader(w, "Docker Published Ports")
+	groups := analyzer.GroupPublishedPorts(result.PublishedPorts)
+	rows := make([][]string, 0, len(groups))
+	for _, p := range groups {
+		host := p.HostAddr
+		if host == "" {
+			host = "*"
+		}
+		if strings.Contains(host, ":") {
+			host = "[" + host + "]"
+		}
+		container := p.ContainerAddr
+		if strings.Contains(container, ":") {
+			container = "[" + container + "]"
+		}
+		bridge := p.Bridge
+		if bridge == "" {
+			bridge = "-"
+		}
+		hostPorts, containerPorts := strconv.Itoa(p.HostPort), strconv.Itoa(p.ContainerPort)
+		if p.HostPortEnd > p.HostPort {
+			hostPorts += "-" + strconv.Itoa(p.HostPortEnd)
+			containerPorts += "-" + strconv.Itoa(p.ContainerPortEnd)
+		}
+		rows = append(rows, []string{
+			"IPv" + strconv.Itoa(int(p.IPVersion)),
+			host + ":" + hostPorts + "/" + string(p.Protocol),
+			container + ":" + containerPorts,
+			bridge,
+			renderScope(p.ForwardScope, p.Certainty),
+			renderScope(p.InputScope, models.CertaintyDefinite),
+		})
+	}
+	t := lgtable.New().
+		Border(lipgloss.RoundedBorder()).
+		BorderStyle(styleTableBorder).
+		BorderRow(false).
+		StyleFunc(func(row, col int) lipgloss.Style {
+			if row == lgtable.HeaderRow {
+				return lipgloss.NewStyle().Foreground(muted).Bold(true).Padding(0, 1)
+			}
+			return lipgloss.NewStyle().Foreground(text).Padding(0, 1)
+		}).
+		Headers("STACK", "PUBLISHED", "CONTAINER", "BRIDGE", "REACHABLE VIA FORWARD", "INPUT WOULD").
+		Rows(rows...)
+	fmt.Fprintln(w, indentBlock(t.String(), "  "))
+	fmt.Fprintln(w, styleMuted.Render("  Published ports are DNATed in nat/PREROUTING and never traverse filter/INPUT."))
+	fmt.Fprintln(w)
+}
+
+func renderScope(scope models.AccessScope, certainty models.Certainty) string {
+	suffix := ""
+	if certainty == models.CertaintyPossible {
+		suffix = "?"
+	}
+	switch scope {
+	case models.ScopeExposed:
+		return styleDanger.Render("ANY SOURCE" + suffix)
+	case models.ScopeLocalnet:
+		return styleWarning.Render("PRIVATE NETS" + suffix)
+	case models.ScopeWhitelisted:
+		return styleSuccess.Render("SINGLE HOSTS" + suffix)
+	}
+	return styleSuccess.Render("BLOCKED" + suffix)
+}
+
+// renderBaseline prints the recommended IPv4 and IPv6 default firewall. It is
+// always rendered for both families, whichever stack the host uses.
+func renderBaseline(w io.Writer, baseline models.Baseline) {
+	if baseline.IPv4 == "" && baseline.IPv6 == "" {
+		return
+	}
+	renderSectionHeader(w, "Recommended Baseline (IPv4 + IPv6)")
+	for _, part := range []struct{ label, body string }{
+		{"IPv4 — save as baseline.v4", baseline.IPv4},
+		{"IPv6 — save as baseline.v6", baseline.IPv6},
+	} {
+		fmt.Fprintf(w, "  %s\n", styleSubHeader.Render(part.label))
+		for _, line := range strings.Split(strings.TrimRight(part.body, "\n"), "\n") {
+			style := styleText
+			if strings.HasPrefix(line, "#") {
+				style = styleMuted
+			}
+			fmt.Fprintf(w, "    %s\n", style.Render(line))
+		}
+		fmt.Fprintln(w)
+	}
+	for _, note := range baseline.Notes {
+		fmt.Fprintf(w, "  %s\n", styleMuted.Render(note))
+	}
+	fmt.Fprintf(w, "  %s\n\n", styleMuted.Render("Print only the files with --baseline=4, --baseline=6 or --baseline."))
 }
 
 func renderSubSection(w io.Writer, title string, count int) {

@@ -4,9 +4,18 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/c0m4r/iptables-analyzer/internal/models"
 )
+
+// otherInterface stands for an ingress interface that no rule names. Rules
+// that name an interface are evaluated with that interface as a separate
+// candidate, so an exact name never matches this placeholder.
+const otherInterface = "\x00other"
+
+// noNAT marks a connection that is known not to have been translated.
+const noNAT = "NONE"
 
 // packetQuery fixes the packet attributes known to an analysis. Empty interface
 // and destination fields mean that multiple values are possible.
@@ -15,6 +24,7 @@ type packetQuery struct {
 	SrcPort         int
 	DstPort         int
 	DstAddr         string
+	DstType         string // addrtype of the destination: LOCAL, UNICAST or "" when unknown
 	InIface         string
 	OutIface        string
 	State           string
@@ -23,8 +33,84 @@ type packetQuery struct {
 	OriginalDstPort int
 	Direction       string
 	External        bool
+	ICMPType        string // numeric ICMP/ICMPv6 type, "" when unknown
+	HopLimit        int    // IPv6 hop limit, 0 when unknown
+	Ctx             *evalContext
 	Chain           string
 	Hook            string
+}
+
+// evalContext carries ruleset-wide knowledge that individual predicates need,
+// such as which interfaces Docker manages and which addresses are local.
+type evalContext struct {
+	bridges        map[string]bool
+	containerAddrs map[netip.Addr]bool
+	localAddrs     []netip.Addr
+	localKnown     bool
+	indexes        map[*models.Chain]*chainIndex
+}
+
+// chainIndex lists, per destination port, the rules of a chain that can match
+// it. Docker emits one rule per published port, so large chains are common and
+// a linear scan per evaluated packet would be quadratic.
+type chainIndex struct {
+	always []int         // rules without a positive, valid destination-port predicate
+	byPort map[int][]int // rules whose destination-port predicate covers the port
+}
+
+func newChainIndex(chain *models.Chain) *chainIndex {
+	index := &chainIndex{byPort: map[int][]int{}}
+	for i := range chain.Rules {
+		rule := &chain.Rules[i]
+		ranges := cachedPortRanges(rule.DstPort)
+		span := 0
+		for _, r := range ranges {
+			span += r[1] - r[0] + 1
+		}
+		if rule.DstPort == "" || rule.Negations["dport"] || len(ranges) == 0 || span > 1024 {
+			index.always = append(index.always, i)
+			continue
+		}
+		for _, r := range ranges {
+			for port := r[0]; port <= r[1]; port++ {
+				index.byPort[port] = append(index.byPort[port], i)
+			}
+		}
+	}
+	return index
+}
+
+// ruleOrder returns the indices of the rules of chain to evaluate for query,
+// in chain order. Rules left out cannot match the query's destination port.
+func ruleOrder(chain *models.Chain, query packetQuery) []int {
+	if query.Ctx == nil || len(chain.Rules) < 32 || query.DstPort < 0 || query.DstPort > 65535 {
+		order := make([]int, len(chain.Rules))
+		for i := range order {
+			order[i] = i
+		}
+		return order
+	}
+	if query.Ctx.indexes == nil {
+		query.Ctx.indexes = map[*models.Chain]*chainIndex{}
+	}
+	index := query.Ctx.indexes[chain]
+	if index == nil {
+		index = newChainIndex(chain)
+		query.Ctx.indexes[chain] = index
+	}
+	ports := index.byPort[query.DstPort]
+	order := make([]int, 0, len(index.always)+len(ports))
+	i, j := 0, 0
+	for i < len(index.always) || j < len(ports) {
+		if j >= len(ports) || (i < len(index.always) && index.always[i] < ports[j]) {
+			order = append(order, index.always[i])
+			i++
+		} else {
+			order = append(order, ports[j])
+			j++
+		}
+	}
+	return order
 }
 
 type matchCertainty uint8
@@ -35,9 +121,21 @@ const (
 	matchYes
 )
 
+func certaintyOf(matched bool) matchCertainty {
+	if matched {
+		return matchYes
+	}
+	return matchNo
+}
+
+// decisionSegment is a verdict for a source prefix. Possible marks a verdict
+// that depends on a predicate the analysis cannot decide (for example a rate
+// limit or an ipset) having matched; the branch where such a predicate does not
+// match is evaluated as definite.
 type decisionSegment struct {
-	Prefix netip.Prefix
-	Rule   *models.Rule
+	Prefix   netip.Prefix
+	Rule     *models.Rule
+	Possible bool
 }
 
 type chainEvaluation struct {
@@ -47,54 +145,163 @@ type chainEvaluation struct {
 	Uncertain bool
 }
 
-func evaluateAccess(rs *models.Ruleset, chainName string, query packetQuery) (models.AccessScope, *models.Rule, *models.Rule) {
-	return evaluateAccessFrom(rs, chainName, query, nil)
+func rootPrefix(version models.IPVersion) netip.Prefix {
+	if version == models.IPv6 {
+		return netip.MustParsePrefix("::/0")
+	}
+	return netip.MustParsePrefix("0.0.0.0/0")
 }
 
-func evaluateAccessDetailed(rs *models.Ruleset, chainName string, query packetQuery) (models.AccessScope, *models.Rule, *models.Rule, models.Certainty) {
-	return evaluateAccessFromDetailed(rs, chainName, query, nil)
+// pathStage is one Netfilter hook traversal of a packet path. Stages are
+// evaluated in order and only accepted sources continue to the next stage.
+type pathStage struct {
+	Table string
+	Chain string
+	Query packetQuery
 }
 
-func evaluateAccessFrom(rs *models.Ruleset, chainName string, query packetQuery, sources []netip.Prefix) (models.AccessScope, *models.Rule, *models.Rule) {
-	scope, allow, drop, _ := evaluateAccessFromDetailed(rs, chainName, query, sources)
-	return scope, allow, drop
+type pathResult struct {
+	Accepted  []decisionSegment
+	Dropped   []decisionSegment
+	Uncertain bool
 }
 
-func evaluateAccessFromDetailed(rs *models.Ruleset, chainName string, query packetQuery, sources []netip.Prefix) (models.AccessScope, *models.Rule, *models.Rule, models.Certainty) {
-	if rs == nil {
-		return models.ScopeExposed, nil, nil, models.CertaintyDefinite
+func (r pathResult) acceptedPrefixes() []netip.Prefix {
+	prefixes := make([]netip.Prefix, 0, len(r.Accepted))
+	for _, segment := range r.Accepted {
+		prefixes = append(prefixes, segment.Prefix)
 	}
-	filter, ok := rs.Tables["filter"]
-	if !ok {
-		return models.ScopeExposed, nil, nil, models.CertaintyDefinite
-	}
-	if _, ok := filter.Chains[chainName]; !ok {
-		return models.ScopeExposed, nil, nil, models.CertaintyDefinite
-	}
-
-	query.Chain = chainName
-	query.Hook = chainName
-	root := netip.MustParsePrefix("0.0.0.0/0")
-	if rs.IPVersion == models.IPv6 {
-		root = netip.MustParsePrefix("::/0")
-	}
-	if len(sources) == 0 {
-		sources = []netip.Prefix{root}
-	}
-	result := evaluateChain(filter, chainName, sources, query, map[string]bool{})
-	scope, allowRule := classifyAcceptedSources(result.Accepted)
-	var dropRule *models.Rule
-	if len(result.Dropped) > 0 {
-		dropRule = result.Dropped[0].Rule
-	}
-	certainty := models.CertaintyDefinite
-	if result.Uncertain {
-		certainty = models.CertaintyPossible
-	}
-	return scope, allowRule, dropRule, certainty
+	return normalizePrefixes(prefixes)
 }
 
-func evaluateChain(table *models.Table, chainName string, input []netip.Prefix, query packetQuery, path map[string]bool) chainEvaluation {
+// definitePrefixes returns the sources accepted without relying on any
+// undecidable predicate having matched.
+func (r pathResult) definitePrefixes() []netip.Prefix {
+	prefixes := make([]netip.Prefix, 0, len(r.Accepted))
+	for _, segment := range r.Accepted {
+		if !segment.Possible {
+			prefixes = append(prefixes, segment.Prefix)
+		}
+	}
+	return normalizePrefixes(prefixes)
+}
+
+// classify returns the access scope of the accepted sources and whether that
+// scope is established without relying on undecidable predicates.
+func (r pathResult) classify() (models.AccessScope, *models.Rule, models.Certainty) {
+	scope, rule := classifyAcceptedSources(r.Accepted)
+	var definite []decisionSegment
+	for _, segment := range r.Accepted {
+		if !segment.Possible {
+			definite = append(definite, segment)
+		}
+	}
+	definiteScope, definiteRule := classifyAcceptedSources(definite)
+	if definiteScope == scope {
+		if definiteRule != nil || rule == nil {
+			rule = definiteRule
+		}
+		return scope, rule, models.CertaintyDefinite
+	}
+	return scope, rule, models.CertaintyPossible
+}
+
+// evaluatePath evaluates a sequence of hook traversals. Absent tables and
+// chains pass traffic unchanged, which matches the kernel when a table is not
+// loaded. Accepted segments keep the most specific accepting rule seen.
+func evaluatePath(rs *models.Ruleset, stages []pathStage, sources []netip.Prefix) pathResult {
+	remaining := normalizePrefixes(sources)
+	accepted := segmentsFor(remaining, nil)
+	var result pathResult
+	for _, stage := range stages {
+		if len(remaining) == 0 {
+			break
+		}
+		table := rs.Tables[stage.Table]
+		if table == nil || table.Chains[stage.Chain] == nil {
+			continue
+		}
+		query := stage.Query
+		query.Chain = stage.Chain
+		query.Hook = stage.Chain
+		evaluation := evaluateChain(table, stage.Chain, remaining, query, map[string]bool{}, false)
+		result.Uncertain = result.Uncertain || evaluation.Uncertain
+		result.Dropped = append(result.Dropped, evaluation.Dropped...)
+		// Built-in chains always end in a policy; anything returned from an
+		// incomplete chain continues like an ACCEPT policy would.
+		next := append(evaluation.Accepted, segmentsFor(evaluation.Returned, nil)...)
+		accepted = inheritAttribution(next, accepted)
+		remaining = make([]netip.Prefix, 0, len(accepted))
+		for _, segment := range accepted {
+			remaining = append(remaining, segment.Prefix)
+		}
+		remaining = normalizePrefixes(remaining)
+	}
+	result.Accepted = accepted
+	return result
+}
+
+// inheritAttribution carries the accepting rule and the certainty of earlier
+// stages into the segments of a later stage. A later acceptance is only
+// definite when the source was definitely accepted before.
+func inheritAttribution(next, previous []decisionSegment) []decisionSegment {
+	for i := range next {
+		containedDefinitely := false
+		var rule *models.Rule
+		for _, earlier := range previous {
+			if earlier.Prefix.Bits() > next[i].Prefix.Bits() || !earlier.Prefix.Contains(next[i].Prefix.Addr()) {
+				continue
+			}
+			if !earlier.Possible {
+				containedDefinitely = true
+			}
+			if rule == nil && earlier.Rule != nil {
+				rule = earlier.Rule
+			}
+		}
+		if !containedDefinitely {
+			next[i].Possible = true
+		}
+		if next[i].Rule == nil {
+			next[i].Rule = rule
+		}
+	}
+	return next
+}
+
+// inputPath returns the hook sequence of a packet delivered to a local socket.
+func inputPath(query packetQuery) []pathStage {
+	raw := query
+	raw.State = "" // conntrack has not run yet in raw/PREROUTING
+	return []pathStage{
+		{Table: "raw", Chain: "PREROUTING", Query: raw},
+		{Table: "mangle", Chain: "PREROUTING", Query: query},
+		{Table: "mangle", Chain: "INPUT", Query: query},
+		{Table: "filter", Chain: "INPUT", Query: query},
+		{Table: "security", Chain: "INPUT", Query: query},
+	}
+}
+
+// preroutingPath returns the hooks that see a packet before nat/PREROUTING.
+func preroutingPath(query packetQuery) []pathStage {
+	raw := query
+	raw.State = ""
+	return []pathStage{
+		{Table: "raw", Chain: "PREROUTING", Query: raw},
+		{Table: "mangle", Chain: "PREROUTING", Query: query},
+	}
+}
+
+// forwardPath returns the hooks that see a routed packet after nat/PREROUTING.
+func forwardPath(query packetQuery) []pathStage {
+	return []pathStage{
+		{Table: "mangle", Chain: "FORWARD", Query: query},
+		{Table: "filter", Chain: "FORWARD", Query: query},
+		{Table: "security", Chain: "FORWARD", Query: query},
+	}
+}
+
+func evaluateChain(table *models.Table, chainName string, input []netip.Prefix, query packetQuery, path map[string]bool, possible bool) chainEvaluation {
 	chain, ok := table.Chains[chainName]
 	if !ok {
 		return chainEvaluation{Returned: input}
@@ -103,45 +310,55 @@ func evaluateChain(table *models.Table, chainName string, input []netip.Prefix, 
 		// Kernel rule insertion normally prevents loops. If one is nevertheless
 		// present in saved input, keep both outcomes possible instead of claiming
 		// that traffic is filtered.
-		return chainEvaluation{Accepted: segmentsFor(input, nil), Returned: input, Uncertain: true}
+		return chainEvaluation{Accepted: possibleSegments(input, nil), Returned: input, Uncertain: true}
 	}
 	path[chainName] = true
 	defer delete(path, chainName)
 
 	remaining := normalizePrefixes(input)
 	var result chainEvaluation
-	for i := range chain.Rules {
+	for _, i := range ruleOrder(chain, query) {
 		if len(remaining) == 0 {
 			break
 		}
 		rule := &chain.Rules[i]
-		matched, unmatched, sourceKnown := splitBySource(remaining, rule)
-		if len(matched) == 0 {
-			continue
-		}
-
+		// Non-source predicates are cheap and reject most rules of large
+		// chains (one rule per published port), so test them first.
 		certainty := ruleMatchesQuery(rule, query)
 		if certainty == matchNo {
 			continue
 		}
+		matched, unmatched, sourceKnown := splitBySource(remaining, rule, query)
+		if len(matched) == 0 {
+			continue
+		}
+		branchPossible := possible
 		if certainty == matchMaybe || !sourceKnown {
 			// The predicate can match some packets and miss others. Preserve the
 			// non-matching branch while evaluating the matching branch as possible.
 			unmatched = append(unmatched, matched...)
 			result.Uncertain = true
+			branchPossible = true
 		}
 		remaining = normalizePrefixes(unmatched)
+		verdict := func(prefixes []netip.Prefix, rule *models.Rule) []decisionSegment {
+			segments := segmentsFor(prefixes, rule)
+			for i := range segments {
+				segments[i].Possible = branchPossible
+			}
+			return segments
+		}
 
 		switch rule.Target {
 		case "ACCEPT":
-			result.Accepted = append(result.Accepted, segmentsFor(matched, rule)...)
+			result.Accepted = append(result.Accepted, verdict(matched, rule)...)
 		case "DROP", "REJECT":
-			result.Dropped = append(result.Dropped, segmentsFor(matched, rule)...)
+			result.Dropped = append(result.Dropped, verdict(matched, rule)...)
 		case "RETURN":
 			if chain.Policy == "ACCEPT" {
-				result.Accepted = append(result.Accepted, segmentsFor(matched, nil)...)
+				result.Accepted = append(result.Accepted, verdict(matched, nil)...)
 			} else if chain.Policy == "DROP" {
-				result.Dropped = append(result.Dropped, segmentsFor(matched, nil)...)
+				result.Dropped = append(result.Dropped, verdict(matched, nil)...)
 			} else {
 				result.Returned = append(result.Returned, matched...)
 			}
@@ -149,15 +366,15 @@ func evaluateChain(table *models.Table, chainName string, input []netip.Prefix, 
 			if _, isChain := table.Chains[rule.Target]; isChain {
 				childQuery := query
 				childQuery.Chain = rule.Target
-				child := evaluateChain(table, rule.Target, matched, childQuery, path)
+				child := evaluateChain(table, rule.Target, matched, childQuery, path, branchPossible)
 				result.Accepted = append(result.Accepted, child.Accepted...)
 				result.Dropped = append(result.Dropped, child.Dropped...)
 				result.Uncertain = result.Uncertain || child.Uncertain
 				if rule.Goto {
 					if chain.Policy == "ACCEPT" {
-						result.Accepted = append(result.Accepted, segmentsFor(child.Returned, nil)...)
+						result.Accepted = append(result.Accepted, verdict(child.Returned, nil)...)
 					} else if chain.Policy == "DROP" {
-						result.Dropped = append(result.Dropped, segmentsFor(child.Returned, nil)...)
+						result.Dropped = append(result.Dropped, verdict(child.Returned, nil)...)
 					} else {
 						result.Returned = append(result.Returned, child.Returned...)
 					}
@@ -166,24 +383,41 @@ func evaluateChain(table *models.Table, chainName string, input []netip.Prefix, 
 				}
 			} else if rule.Target == "QUEUE" || rule.Target == "NFQUEUE" {
 				// Userspace decides the verdict. An ACCEPT outcome is possible.
-				result.Accepted = append(result.Accepted, segmentsFor(matched, rule)...)
+				result.Accepted = append(result.Accepted, possibleSegments(matched, rule)...)
 				remaining = normalizePrefixes(append(remaining, matched...))
 			} else {
+				if rule.Target == "NOTRACK" || (rule.Target == "CT" && containsToken(rule.TargetArgs, "--notrack")) {
+					// Untracked packets no longer carry the NEW state assumed by
+					// later conntrack predicates.
+					result.Uncertain = true
+				}
 				// LOG, MARK and other non-verdict targets continue in this chain.
 				remaining = normalizePrefixes(append(remaining, matched...))
 			}
 		}
 	}
 
+	final := segmentsFor(remaining, nil)
+	for i := range final {
+		final[i].Possible = possible
+	}
 	if chain.Policy == "ACCEPT" {
-		result.Accepted = append(result.Accepted, segmentsFor(remaining, nil)...)
+		result.Accepted = append(result.Accepted, final...)
 	} else if chain.Policy == "DROP" {
-		result.Dropped = append(result.Dropped, segmentsFor(remaining, nil)...)
+		result.Dropped = append(result.Dropped, final...)
 	} else {
 		result.Returned = append(result.Returned, remaining...)
 	}
 	result.Returned = normalizePrefixes(result.Returned)
 	return result
+}
+
+func possibleSegments(prefixes []netip.Prefix, rule *models.Rule) []decisionSegment {
+	segments := segmentsFor(prefixes, rule)
+	for i := range segments {
+		segments[i].Possible = true
+	}
+	return segments
 }
 
 func segmentsFor(prefixes []netip.Prefix, rule *models.Rule) []decisionSegment {
@@ -194,6 +428,26 @@ func segmentsFor(prefixes []netip.Prefix, rule *models.Rule) []decisionSegment {
 	return segments
 }
 
+func normalizeProtocol(protocol models.Protocol) models.Protocol {
+	switch protocol {
+	case models.ProtoTCP, models.ProtoUDP, models.ProtoICMP, models.ProtoAll, "", "ipv6-icmp":
+		return protocol
+	}
+	switch strings.ToLower(string(protocol)) {
+	case "6":
+		return models.ProtoTCP
+	case "17":
+		return models.ProtoUDP
+	case "1":
+		return models.ProtoICMP
+	case "58", "icmpv6", "ipv6-icmp":
+		return "ipv6-icmp"
+	case "0":
+		return models.ProtoAll
+	}
+	return models.Protocol(strings.ToLower(string(protocol)))
+}
+
 func ruleMatchesQuery(rule *models.Rule, query packetQuery) matchCertainty {
 	certainty := matchYes
 	combine := func(next matchCertainty) {
@@ -202,12 +456,13 @@ func ruleMatchesQuery(rule *models.Rule, query packetQuery) matchCertainty {
 		}
 	}
 
-	if rule.Protocol == "" || rule.Protocol == models.ProtoAll {
+	protocol := normalizeProtocol(rule.Protocol)
+	if protocol == "" || protocol == models.ProtoAll {
 		if rule.Negations["protocol"] {
 			return matchNo
 		}
 	} else {
-		matched := rule.Protocol == query.Protocol
+		matched := protocol == normalizeProtocol(query.Protocol)
 		if rule.Negations["protocol"] {
 			matched = !matched
 		}
@@ -217,11 +472,11 @@ func ruleMatchesQuery(rule *models.Rule, query packetQuery) matchCertainty {
 	}
 
 	if rule.DstPort != "" {
-		ranges := expandPorts(rule.DstPort)
+		ranges := cachedPortRanges(rule.DstPort)
 		if len(ranges) == 0 || query.DstPort < 0 || query.DstPort > 65535 {
 			combine(matchMaybe)
 		} else {
-			matched := portMatches(rule.DstPort, strconv.Itoa(query.DstPort))
+			matched := portInSpec(rule.DstPort, query.DstPort)
 			if rule.Negations["dport"] {
 				matched = !matched
 			}
@@ -234,7 +489,7 @@ func ruleMatchesQuery(rule *models.Rule, query packetQuery) matchCertainty {
 		if query.SrcPort < 1 || query.SrcPort > 65535 {
 			combine(matchMaybe)
 		} else {
-			matched := portMatches(rule.SrcPort, strconv.Itoa(query.SrcPort))
+			matched := portInSpec(rule.SrcPort, query.SrcPort)
 			if rule.Negations["sport"] {
 				matched = !matched
 			}
@@ -249,36 +504,22 @@ func ruleMatchesQuery(rule *models.Rule, query packetQuery) matchCertainty {
 		combine(matchMaybe)
 	}
 
-	combine(addressMatch(rule.DstAddr, query.DstAddr, rule.Negations["dst"]))
+	combine(addressMatch(rule.DstAddr, query.DstAddr, rule.Negations["dst"], query))
 	if certainty == matchNo {
 		return matchNo
 	}
-	combine(interfaceMatch(rule.InIface, query.InIface, rule.Negations["in-iface"], query.External))
+	combine(interfaceMatch(rule.InIface, query, rule.Negations["in-iface"], true))
 	if certainty == matchNo {
 		return matchNo
 	}
-	combine(interfaceMatch(rule.OutIface, query.OutIface, rule.Negations["out-iface"], false))
+	combine(interfaceMatch(rule.OutIface, query, rule.Negations["out-iface"], false))
 	if certainty == matchNo {
 		return matchNo
 	}
 
-	if len(rule.States) > 0 {
-		matched := false
-		known := false
-		for _, state := range []string{query.State, query.NATState} {
-			if state != "" {
-				known = true
-				matched = matched || containsState(rule.States, state)
-			}
-		}
-		if !known {
-			combine(matchMaybe)
-			matched = true
-		}
-		if rule.Negations["state"] {
-			matched = !matched
-		}
-		if !matched {
+	if len(rule.States) > 0 && !hasStateExtension(rule.Matches) {
+		combine(stateMatch(rule.States, rule.Negations["state"], query))
+		if certainty == matchNo {
 			return matchNo
 		}
 	}
@@ -292,94 +533,293 @@ func ruleMatchesQuery(rule *models.Rule, query packetQuery) matchCertainty {
 	return certainty
 }
 
-func addressMatch(ruleAddr, queryAddr string, negated bool) matchCertainty {
+func hasStateExtension(matches []models.MatchExt) bool {
+	for _, ext := range matches {
+		if _, ok := ext.Params["--ctstate"]; ok {
+			return true
+		}
+		if _, ok := ext.Params["--state"]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// stateMatch evaluates a conntrack state list. A packet carries its
+// connection state and, when translated, the virtual DNAT/SNAT states.
+func stateMatch(states []string, negated bool, query packetQuery) matchCertainty {
+	matched := false
+	known := false
+	for _, state := range []string{query.State, query.NATState} {
+		if state != "" {
+			known = true
+			matched = matched || containsState(states, state)
+		}
+	}
+	if !known {
+		return matchMaybe
+	}
+	if negated {
+		matched = !matched
+	}
+	return certaintyOf(matched)
+}
+
+func addressMatch(ruleAddr, queryAddr string, negated bool, query packetQuery) matchCertainty {
 	if ruleAddr == "" || ruleAddr == "0.0.0.0/0" || ruleAddr == "::/0" {
 		if negated {
 			return matchNo
 		}
 		return matchYes
 	}
-	if queryAddr == "" || queryAddr == "0.0.0.0" || queryAddr == "::" || queryAddr == "*" {
-		return matchMaybe
-	}
 	prefix, ok := parsePrefix(ruleAddr)
-	addr, err := netip.ParseAddr(strings.Split(queryAddr, "%")[0])
-	if !ok || err != nil || prefix.Addr().Is4() != addr.Is4() {
+	if !ok {
 		return matchMaybe
 	}
-	matched := prefix.Contains(addr)
-	if negated {
-		matched = !matched
-	}
-	if matched {
-		return matchYes
-	}
-	return matchNo
-}
-
-func interfaceMatch(ruleIface, queryIface string, negated, external bool) matchCertainty {
-	if ruleIface == "" {
-		return matchYes
-	}
-	if queryIface == "" {
-		if external && ruleIface == "lo" {
-			if negated {
-				return matchYes
-			}
-			return matchNo
+	if queryAddr == "" || queryAddr == "0.0.0.0" || queryAddr == "::" || queryAddr == "*" {
+		if query.DstType == "LOCAL" {
+			return applyNegation(localAddressMatch(prefix, query.Ctx), negated)
 		}
 		return matchMaybe
 	}
-	matched := ifaceCovers(ruleIface, queryIface)
-	if negated {
-		matched = !matched
+	addr, err := netip.ParseAddr(strings.Split(queryAddr, "%")[0])
+	if err != nil || prefix.Addr().Is4() != addr.Is4() {
+		return matchMaybe
 	}
-	if matched {
+	return applyNegation(certaintyOf(prefix.Contains(addr)), negated)
+}
+
+// localAddressMatch decides whether some local address falls in prefix when
+// the exact local destination is unknown.
+func localAddressMatch(prefix netip.Prefix, ctx *evalContext) matchCertainty {
+	if ctx == nil {
+		return matchMaybe
+	}
+	if ctx.localKnown {
+		inside, outside := 0, 0
+		for _, addr := range ctx.localAddrs {
+			if addr.Is4() != prefix.Addr().Is4() {
+				continue
+			}
+			if prefix.Contains(addr) {
+				inside++
+			} else {
+				outside++
+			}
+		}
+		switch {
+		case inside == 0:
+			return matchNo
+		case outside == 0:
+			return matchYes
+		}
+		return matchMaybe
+	}
+	if prefix.IsSingleIP() && ctx.containerAddrs[prefix.Addr()] {
+		// A container address is routed to a bridge and is never local.
+		return matchNo
+	}
+	if prefix.Addr().IsLoopback() && prefix.Bits() >= 8 {
+		// Externally received packets addressed to loopback are martians.
+		return matchNo
+	}
+	return matchMaybe
+}
+
+func containsToken(tokens []string, wanted string) bool {
+	for _, token := range tokens {
+		if token == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func applyNegation(certainty matchCertainty, negated bool) matchCertainty {
+	if !negated || certainty == matchMaybe {
+		return certainty
+	}
+	if certainty == matchYes {
+		return matchNo
+	}
+	return matchYes
+}
+
+// interfaceMatch evaluates -i/-o. Externally received packets never arrive on
+// loopback or on a Docker-managed bridge.
+func interfaceMatch(ruleIface string, query packetQuery, negated, inbound bool) matchCertainty {
+	if ruleIface == "" {
 		return matchYes
 	}
-	return matchNo
+	queryIface := query.OutIface
+	if inbound {
+		queryIface = query.InIface
+	}
+	if queryIface == "" || queryIface == otherInterface {
+		if inbound && query.External {
+			if ruleIface == "lo" || isBridgeInterface(ruleIface, query.Ctx) {
+				return applyNegation(matchNo, negated)
+			}
+			if queryIface == otherInterface && !strings.HasSuffix(ruleIface, "+") {
+				return applyNegation(matchNo, negated)
+			}
+		}
+		return matchMaybe
+	}
+	return applyNegation(certaintyOf(ifaceCovers(ruleIface, queryIface)), negated)
+}
+
+// isBridgeInterface reports whether name (or every interface a wildcard name
+// covers) is a Docker-managed bridge or container veth.
+func isBridgeInterface(name string, ctx *evalContext) bool {
+	if ctx != nil && ctx.bridges[name] {
+		return true
+	}
+	return dockerInterfaceName(name)
+}
+
+func dockerInterfaceName(name string) bool {
+	switch name {
+	case "docker0", "docker_gwbridge", "docker+", "br-+", "veth+":
+		return true
+	}
+	if strings.HasPrefix(name, "veth") {
+		return true
+	}
+	if strings.HasPrefix(name, "br-") && len(name) == 15 {
+		for _, ch := range name[3:] {
+			if !strings.ContainsRune("0123456789abcdef", ch) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+var icmpTypeNames = map[string]string{
+	"echo-reply": "0", "pong": "0", "destination-unreachable": "3", "source-quench": "4",
+	"redirect": "5", "echo-request": "8", "ping": "8", "router-advertisement": "9",
+	"router-solicitation": "10", "time-exceeded": "11", "ttl-exceeded": "11",
+	"parameter-problem": "12", "timestamp-request": "13", "timestamp-reply": "14",
+}
+
+var icmpv6TypeNames = map[string]string{
+	"destination-unreachable": "1", "no-route": "1", "packet-too-big": "2",
+	"time-exceeded": "3", "ttl-exceeded": "3", "parameter-problem": "4",
+	"echo-request": "128", "ping": "128", "echo-reply": "129", "pong": "129",
+	"router-solicitation": "133", "router-advertisement": "134",
+	"neighbour-solicitation": "135", "neighbor-solicitation": "135",
+	"neighbour-advertisement": "136", "neighbor-advertisement": "136", "redirect": "137",
+}
+
+func icmpTypeMatch(spec string, names map[string]string, query packetQuery, negated bool) matchCertainty {
+	spec = strings.ToLower(strings.TrimSpace(spec))
+	if spec == "any" {
+		return applyNegation(matchYes, negated)
+	}
+	if query.ICMPType == "" {
+		return matchMaybe
+	}
+	if mapped, ok := names[spec]; ok {
+		spec = mapped
+	}
+	typeText, code, hasCode := strings.Cut(spec, "/")
+	if _, err := strconv.Atoi(typeText); err != nil {
+		return matchMaybe
+	}
+	if hasCode && code != "" {
+		// Codes are not part of the query; a matching type may still differ.
+		if typeText != query.ICMPType {
+			return applyNegation(matchNo, negated)
+		}
+		return matchMaybe
+	}
+	return applyNegation(certaintyOf(typeText == query.ICMPType), negated)
+}
+
+func addrTypeMatch(spec, actual string, negated bool) matchCertainty {
+	if actual == "" {
+		return matchMaybe
+	}
+	matched := false
+	for _, value := range strings.Split(spec, ",") {
+		if strings.EqualFold(strings.TrimSpace(value), actual) {
+			matched = true
+		}
+	}
+	return applyNegation(certaintyOf(matched), negated)
 }
 
 func extensionCertainty(ext models.MatchExt, query packetQuery) matchCertainty {
-	modeled := map[string]bool{}
+	modeled := modeledParams{}
 	certainty := matchYes
+	combine := func(next matchCertainty) bool {
+		if next == matchNo {
+			return false
+		}
+		if next == matchMaybe {
+			certainty = matchMaybe
+		}
+		return true
+	}
 	switch ext.Module {
 	case "comment":
 		return matchYes
 	case "tcp", "udp":
-		modeled["--dport"] = true
-		modeled["--destination-port"] = true
-		modeled["--sport"] = true
-		modeled["--source-port"] = true
-	case "multiport":
-		modeled["--dports"] = true
-		modeled["--destination-ports"] = true
-		modeled["--sports"] = true
-		modeled["--source-ports"] = true
-	case "conntrack", "state":
-		modeled["--ctstate"] = true
-		modeled["--state"] = true
-		if value, ok := ext.Params["--ctorigdstport"]; ok {
-			modeled["--ctorigdstport"] = true
-			expected, err := strconv.Atoi(value)
-			if err != nil || query.OriginalDstPort == 0 {
+		modeled.add("--dport")
+		modeled.add("--destination-port")
+		modeled.add("--sport")
+		modeled.add("--source-port")
+		if _, ok := ext.Params["--syn"]; ok && ext.Module == "tcp" {
+			modeled.add("--syn")
+			if query.State == "NEW" && normalizeProtocol(query.Protocol) == models.ProtoTCP {
+				if !combine(applyNegation(matchYes, ext.Negations["--syn"])) {
+					return matchNo
+				}
+			} else {
 				certainty = matchMaybe
-			} else if (expected == query.OriginalDstPort) == ext.Negations["--ctorigdstport"] {
+			}
+		}
+	case "multiport":
+		modeled.add("--dports")
+		modeled.add("--destination-ports")
+		modeled.add("--sports")
+		modeled.add("--source-ports")
+	case "conntrack", "state":
+		for _, key := range []string{"--ctstate", "--state"} {
+			if value, ok := ext.Params[key]; ok {
+				modeled.add(key)
+				if !combine(stateMatch(strings.Split(value, ","), ext.Negations[key], query)) {
+					return matchNo
+				}
+			}
+		}
+		if value, ok := ext.Params["--ctorigdstport"]; ok {
+			modeled.add("--ctorigdstport")
+			if len(cachedPortRanges(value)) == 0 || query.OriginalDstPort == 0 {
+				certainty = matchMaybe
+			} else if !combine(applyNegation(certaintyOf(portInSpec(value, query.OriginalDstPort)), ext.Negations["--ctorigdstport"])) {
 				return matchNo
 			}
 		}
 		if value, ok := ext.Params["--ctorigdst"]; ok {
-			modeled["--ctorigdst"] = true
-			result := addressMatch(value, query.OriginalDstAddr, ext.Negations["--ctorigdst"])
-			if result == matchNo {
+			modeled.add("--ctorigdst")
+			original := query
+			if query.NATState == "DNAT" {
+				// The original destination of a DNATed connection was local.
+				original.DstType = "LOCAL"
+			}
+			if !combine(addressMatch(value, query.OriginalDstAddr, ext.Negations["--ctorigdst"], original)) {
 				return matchNo
 			}
-			if result == matchMaybe {
-				certainty = matchMaybe
-			}
+		}
+		if _, ok := ext.Params["--ctorigsrc"]; ok && query.External && query.Direction == "ORIGINAL" {
+			// Evaluated together with -s by splitBySource.
+			modeled.add("--ctorigsrc")
 		}
 		if value, ok := ext.Params["--ctdir"]; ok {
-			modeled["--ctdir"] = true
+			modeled.add("--ctdir")
 			if query.Direction == "" {
 				certainty = matchMaybe
 			} else if strings.EqualFold(value, query.Direction) == ext.Negations["--ctdir"] {
@@ -387,8 +827,53 @@ func extensionCertainty(ext models.MatchExt, query packetQuery) matchCertainty {
 			}
 		}
 	case "addrtype":
-		if dstType, ok := ext.Params["--dst-type"]; ok && strings.EqualFold(dstType, "LOCAL") && query.Hook == "INPUT" && !ext.Negations["--dst-type"] {
-			modeled["--dst-type"] = true
+		if value, ok := ext.Params["--dst-type"]; ok {
+			modeled.add("--dst-type")
+			if !combine(addrTypeMatch(value, query.DstType, ext.Negations["--dst-type"])) {
+				return matchNo
+			}
+		}
+		if value, ok := ext.Params["--src-type"]; ok {
+			modeled.add("--src-type")
+			actual := ""
+			if query.External {
+				actual = "UNICAST"
+			}
+			if !combine(addrTypeMatch(value, actual, ext.Negations["--src-type"])) {
+				return matchNo
+			}
+		}
+	case "icmp":
+		if value, ok := ext.Params["--icmp-type"]; ok {
+			modeled.add("--icmp-type")
+			if !combine(icmpTypeMatch(value, icmpTypeNames, query, ext.Negations["--icmp-type"])) {
+				return matchNo
+			}
+		}
+	case "icmp6", "icmpv6":
+		if value, ok := ext.Params["--icmpv6-type"]; ok {
+			modeled.add("--icmpv6-type")
+			if !combine(icmpTypeMatch(value, icmpv6TypeNames, query, ext.Negations["--icmpv6-type"])) {
+				return matchNo
+			}
+		}
+	case "hl":
+		for key, compare := range map[string]func(int, int) bool{
+			"--hl-eq": func(a, b int) bool { return a == b },
+			"--hl-lt": func(a, b int) bool { return a < b },
+			"--hl-gt": func(a, b int) bool { return a > b },
+		} {
+			value, ok := ext.Params[key]
+			if !ok {
+				continue
+			}
+			modeled.add(key)
+			expected, err := strconv.Atoi(value)
+			if err != nil || query.HopLimit == 0 {
+				certainty = matchMaybe
+			} else if !combine(applyNegation(certaintyOf(compare(query.HopLimit, expected)), ext.Negations[key])) {
+				return matchNo
+			}
 		}
 	default:
 		// Module presence may itself constrain a match (for example socket), so
@@ -397,17 +882,101 @@ func extensionCertainty(ext models.MatchExt, query packetQuery) matchCertainty {
 	}
 
 	for param := range ext.Params {
-		if !modeled[param] {
+		if !modeled.has(param) {
 			return matchMaybe
 		}
 	}
 	return certainty
 }
 
-func splitBySource(input []netip.Prefix, rule *models.Rule) (matched, unmatched []netip.Prefix, known bool) {
-	source := rule.SrcAddr
+// modeledParams is a small allocation-free set of the options of one match
+// extension that the evaluator understands.
+type modeledParams struct {
+	keys [8]string
+	n    int
+}
+
+func (m *modeledParams) add(key string) {
+	if m.n < len(m.keys) {
+		m.keys[m.n] = key
+		m.n++
+	}
+}
+
+func (m *modeledParams) has(key string) bool {
+	for i := 0; i < m.n; i++ {
+		if m.keys[i] == key {
+			return true
+		}
+	}
+	return false
+}
+
+var portRangeCache sync.Map // port specification -> [][2]int
+
+// cachedPortRanges memoizes expandPorts; rule specifications repeat for every
+// evaluated packet.
+func cachedPortRanges(spec string) [][2]int {
+	if cached, ok := portRangeCache.Load(spec); ok {
+		return cached.([][2]int)
+	}
+	ranges := expandPorts(spec)
+	portRangeCache.Store(spec, ranges)
+	return ranges
+}
+
+// portInSpec reports whether port lies in an iptables port specification.
+func portInSpec(spec string, port int) bool {
+	if port < 1 {
+		return false
+	}
+	for _, r := range cachedPortRanges(spec) {
+		if port >= r[0] && port <= r[1] {
+			return true
+		}
+	}
+	return false
+}
+
+// sourcePredicate is one source-address restriction of a rule: -s or the
+// conntrack original source, which equals -s for externally received packets.
+type sourcePredicate struct {
+	value   string
+	negated bool
+}
+
+func sourcePredicates(rule *models.Rule, query packetQuery) []sourcePredicate {
+	predicates := []sourcePredicate{{value: rule.SrcAddr, negated: rule.Negations["src"]}}
+	if query.External && query.Direction == "ORIGINAL" {
+		for _, ext := range rule.Matches {
+			if ext.Module != "conntrack" {
+				continue
+			}
+			if value, ok := ext.Params["--ctorigsrc"]; ok {
+				predicates = append(predicates, sourcePredicate{value: value, negated: ext.Negations["--ctorigsrc"]})
+			}
+		}
+	}
+	return predicates
+}
+
+func splitBySource(input []netip.Prefix, rule *models.Rule, query packetQuery) (matched, unmatched []netip.Prefix, known bool) {
+	matched = input
+	known = true
+	for _, predicate := range sourcePredicates(rule, query) {
+		inside, outside, ok := splitByPrefix(matched, predicate.value, predicate.negated)
+		if !ok {
+			return input, input, false
+		}
+		matched = inside
+		unmatched = append(unmatched, outside...)
+	}
+	return normalizePrefixes(matched), normalizePrefixes(unmatched), known
+}
+
+func splitByPrefix(input []netip.Prefix, source string, negated bool) (matched, unmatched []netip.Prefix, known bool) {
 	if source == "" || source == "0.0.0.0/0" || source == "::/0" {
-		if rule.Negations["src"] {
+		if negated {
 			return nil, input, true
 		}
 		return input, nil, true
@@ -425,7 +994,7 @@ func splitBySource(input []netip.Prefix, rule *models.Rule) (matched, unmatched 
 			unmatched = append(unmatched, base)
 		}
 	}
-	if rule.Negations["src"] {
+	if negated {
 		matched, unmatched = unmatched, matched
 	}
 	return normalizePrefixes(matched), normalizePrefixes(unmatched), true
@@ -468,6 +1037,19 @@ func subtractPrefix(base, remove netip.Prefix) []netip.Prefix {
 	left, right := prefixChildren(base)
 	result := subtractPrefix(left, remove)
 	result = append(result, subtractPrefix(right, remove)...)
+	return result
+}
+
+// subtractPrefixes returns the part of a that is not covered by b.
+func subtractPrefixes(a, b []netip.Prefix) []netip.Prefix {
+	result := normalizePrefixes(a)
+	for _, remove := range b {
+		var next []netip.Prefix
+		for _, base := range result {
+			next = append(next, subtractPrefix(base, remove)...)
+		}
+		result = normalizePrefixes(next)
+	}
 	return result
 }
 
@@ -517,40 +1099,41 @@ func classifyAcceptedSources(accepted []decisionSegment) (models.AccessScope, *m
 	if len(accepted) == 0 {
 		return "", nil
 	}
+	// Track presence separately from attribution: segments accepted by a
+	// chain policy have no rule.
 	var whitelistRule, localRule, exposedRule *models.Rule
+	local, exposed := false, false
 	for _, segment := range accepted {
 		prefix := segment.Prefix
-		if prefix.Bits() == prefix.Addr().BitLen() {
+		switch {
+		case prefix.Bits() == prefix.Addr().BitLen():
 			if whitelistRule == nil {
 				whitelistRule = segment.Rule
 			}
-			continue
-		}
-		if prefixIsRestricted(prefix) {
+		case prefixIsRestricted(prefix):
+			local = true
 			if localRule == nil {
 				localRule = segment.Rule
 			}
-			continue
+		default:
+			if !exposed || exposedRule == nil {
+				exposedRule = segment.Rule
+			}
+			exposed = true
 		}
-		exposedRule = segment.Rule
-		break
 	}
-	if exposedRule != nil || hasExposedDefaultSegment(accepted) {
+	if exposed {
 		return models.ScopeExposed, exposedRule
 	}
-	if localRule != nil {
+	if local {
 		return models.ScopeLocalnet, localRule
 	}
 	return models.ScopeWhitelisted, whitelistRule
 }
 
-func hasExposedDefaultSegment(accepted []decisionSegment) bool {
-	for _, segment := range accepted {
-		if segment.Prefix.Bits() < segment.Prefix.Addr().BitLen() && !prefixIsRestricted(segment.Prefix) {
-			return true
-		}
-	}
-	return false
+func classifyPrefixes(prefixes []netip.Prefix) models.AccessScope {
+	scope, _ := classifyAcceptedSources(segmentsFor(prefixes, nil))
+	return scope
 }
 
 func prefixIsRestricted(prefix netip.Prefix) bool {
@@ -561,4 +1144,17 @@ func prefixIsRestricted(prefix netip.Prefix) bool {
 		}
 	}
 	return false
+}
+
+// scopeRank orders access scopes from unreachable to unrestricted.
+func scopeRank(scope models.AccessScope) int {
+	switch scope {
+	case models.ScopeExposed:
+		return 3
+	case models.ScopeLocalnet:
+		return 2
+	case models.ScopeWhitelisted:
+		return 1
+	}
+	return 0
 }

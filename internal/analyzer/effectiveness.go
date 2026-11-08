@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"net/netip"
 	"strconv"
 
 	"github.com/c0m4r/iptables-analyzer/internal/models"
@@ -33,6 +34,12 @@ func CheckEffectiveness(rs *models.Ruleset) []models.EffectivenessFinding {
 
 	// Check for missing explicit final DROP in INPUT
 	findings = append(findings, checkFinalDrop(filterTable)...)
+
+	// Check that traffic the host itself depends on is not dropped
+	findings = append(findings, checkLoopback(rs)...)
+	if rs.IPVersion == models.IPv6 {
+		findings = append(findings, checkNeighborDiscovery(rs)...)
+	}
 	for i := range findings {
 		findings[i].IPVersion = rs.IPVersion
 	}
@@ -178,7 +185,7 @@ func checkConntrack(filterTable *models.Table) []models.EffectivenessFinding {
 	}
 
 	if !hasConntrack && len(input.Rules) > 0 {
-		findings = append(findings, models.EffectivenessFinding{
+		finding := models.EffectivenessFinding{
 			Code:      models.FindingMissingConntrack,
 			Certainty: models.CertaintyDefinite,
 			Title:     "No conntrack ESTABLISHED,RELATED rule in INPUT",
@@ -188,7 +195,15 @@ func checkConntrack(filterTable *models.Table) []models.EffectivenessFinding {
 			Severity: models.SeverityMedium,
 			Chain:    "INPUT",
 			Table:    "filter",
-		})
+		}
+		if defaultDeny(input) {
+			finding.Severity = models.SeverityHigh
+			finding.Detail = "INPUT denies by default but never accepts ESTABLISHED,RELATED traffic, so replies to the " +
+				"host's own outbound connections (DNS, package updates, NTP) and related ICMP errors such as " +
+				"fragmentation-needed are dropped unless individual rules allow them. Add " +
+				"'-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT' near the top of INPUT."
+		}
+		findings = append(findings, finding)
 	} else if conntrackPos > 2 {
 		// Conntrack rule should be near the top (after loopback accept typically)
 		findings = append(findings, models.EffectivenessFinding{
@@ -233,6 +248,96 @@ func checkFinalDrop(filterTable *models.Table) []models.EffectivenessFinding {
 		}
 	}
 
+	return findings
+}
+
+// defaultDeny reports whether a built-in chain refuses unmatched traffic.
+func defaultDeny(chain *models.Chain) bool {
+	if chain.Policy == "DROP" {
+		return true
+	}
+	if n := len(chain.Rules); n > 0 {
+		last := chain.Rules[n-1]
+		return last.IsBlock() && IsCatchAll(&last)
+	}
+	return false
+}
+
+// checkLoopback reports an INPUT path that definitely drops traffic on lo.
+func checkLoopback(rs *models.Ruleset) []models.EffectivenessFinding {
+	source := netip.MustParsePrefix("127.0.0.0/8")
+	if rs.IPVersion == models.IPv6 {
+		source = netip.MustParsePrefix("::1/128")
+	}
+	query := packetQuery{
+		Protocol: models.ProtoTCP, DstPort: unlistedPort(rs), DstAddr: source.Addr().String(), DstType: "LOCAL",
+		InIface: "lo", State: "NEW", NATState: noNAT, Direction: "ORIGINAL",
+		OriginalDstAddr: source.Addr().String(), OriginalDstPort: unlistedPort(rs),
+	}
+	path := evaluatePath(rs, inputPath(query), []netip.Prefix{source})
+	if len(path.Accepted) > 0 || path.Uncertain {
+		return nil
+	}
+	return []models.EffectivenessFinding{{
+		Code:      models.FindingMissingLoopback,
+		Certainty: models.CertaintyDefinite,
+		Title:     "Loopback traffic is dropped by INPUT",
+		Detail: "New connections on the lo interface are refused. Local services that talk to each other over " +
+			source.Addr().String() + " (databases, DNS stub resolvers, Docker's userland proxy) will fail. " +
+			"Add '-A INPUT -i lo -j ACCEPT' as the first INPUT rule.",
+		Severity: models.SeverityMedium,
+		Chain:    "INPUT",
+		Table:    "filter",
+	}}
+}
+
+// checkNeighborDiscovery reports an IPv6 INPUT path that definitely drops
+// Neighbor Discovery. ND messages are never conntrack-tracked (their state is
+// UNTRACKED), so ESTABLISHED,RELATED and NEW rules do not admit them.
+func checkNeighborDiscovery(rs *models.Ruleset) []models.EffectivenessFinding {
+	ctx := newEvalContext(rs, inferDockerTopology(rs), nil)
+	candidates := ingressCandidates(rs, ctx, nil)
+	blocked := func(icmpType string) bool {
+		for _, candidate := range candidates {
+			query := packetQuery{
+				Protocol: "ipv6-icmp", ICMPType: icmpType, HopLimit: 255, InIface: candidate.name,
+				State: "UNTRACKED", NATState: noNAT, External: true, Ctx: ctx,
+			}
+			path := evaluatePath(rs, inputPath(query), []netip.Prefix{rootPrefix(models.IPv6)})
+			if len(path.Accepted) > 0 || path.Uncertain {
+				return false
+			}
+		}
+		return true
+	}
+	var findings []models.EffectivenessFinding
+	if blocked("135") || blocked("136") {
+		findings = append(findings, models.EffectivenessFinding{
+			Code:      models.FindingIPv6NDPBlocked,
+			Certainty: models.CertaintyDefinite,
+			Title:     "IPv6 Neighbor Discovery is dropped by INPUT",
+			Detail: "ICMPv6 neighbor solicitations/advertisements (types 135/136) are refused. They are untracked by " +
+				"conntrack, so ESTABLISHED,RELATED rules do not admit them, and without them the host cannot resolve " +
+				"IPv6 neighbors: IPv6 connectivity breaks. Allow them explicitly, e.g. " +
+				"'-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 135 -m hl --hl-eq 255 -j ACCEPT' (and 136).",
+			Severity: models.SeverityHigh,
+			Chain:    "INPUT",
+			Table:    "filter",
+		})
+	}
+	if blocked("134") {
+		findings = append(findings, models.EffectivenessFinding{
+			Code:      models.FindingIPv6NDPBlocked,
+			Certainty: models.CertaintyDefinite,
+			Title:     "IPv6 Router Advertisements are dropped by INPUT",
+			Detail: "ICMPv6 router advertisements (type 134) are refused. A host that configures IPv6 with SLAAC " +
+				"loses its addresses and default route when they expire. Allow them with " +
+				"'-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 134 -m hl --hl-eq 255 -j ACCEPT' unless addressing is static.",
+			Severity: models.SeverityMedium,
+			Chain:    "INPUT",
+			Table:    "filter",
+		})
+	}
 	return findings
 }
 

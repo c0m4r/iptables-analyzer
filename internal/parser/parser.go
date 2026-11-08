@@ -92,6 +92,30 @@ func Parse(data string, ipVersion models.IPVersion) (*models.Ruleset, error) {
 				parseErrs = append(parseErrs, fmt.Errorf("line %d: rule references undeclared chain %q", lineNum, rule.Chain))
 			}
 
+		case normalizedLine == "-F" || strings.HasPrefix(normalizedLine, "-F ") || strings.HasPrefix(normalizedLine, "--flush"):
+			// iptables-restore files (not iptables-save output) may flush a
+			// chain before re-adding its rules, e.g. for --noflush restores.
+			if currentTable == nil {
+				parseErrs = append(parseErrs, fmt.Errorf("line %d: flush outside a table", lineNum))
+				continue
+			}
+			fields := strings.Fields(normalizedLine)
+			switch len(fields) {
+			case 1:
+				for _, chain := range currentTable.Chains {
+					chain.Rules = nil
+				}
+			case 2:
+				chain, ok := currentTable.Chains[fields[1]]
+				if !ok {
+					parseErrs = append(parseErrs, fmt.Errorf("line %d: flush of undeclared chain %q", lineNum, fields[1]))
+					continue
+				}
+				chain.Rules = nil
+			default:
+				parseErrs = append(parseErrs, fmt.Errorf("line %d: invalid flush command %q", lineNum, line))
+			}
+
 		case normalizedLine == "COMMIT":
 			if currentTable == nil {
 				parseErrs = append(parseErrs, fmt.Errorf("line %d: COMMIT outside a table", lineNum))
@@ -490,6 +514,17 @@ func parseRule(line string, tableName string, ipVersion models.IPVersion) (model
 			i++
 
 		default:
+			if rule.Target != "" && strings.HasPrefix(tok, "-") && !negateNext {
+				// iptables-save emits target options after the target. They do
+				// not constrain which packets the rule matches.
+				rule.TargetArgs = append(rule.TargetArgs, tok)
+				for i+1 < len(tokens) && !strings.HasPrefix(tokens[i+1], "-") && tokens[i+1] != "!" {
+					rule.TargetArgs = append(rule.TargetArgs, tokens[i+1])
+					i++
+				}
+				i++
+				continue
+			}
 			if strings.HasPrefix(tok, "-") && !isTargetOption(tok) {
 				rawTokens := []string{tok}
 				if negateNext {

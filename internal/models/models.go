@@ -33,6 +33,17 @@ const (
 	FindingDockerBypass     FindingCode = "docker_bypass"
 	FindingExposedService   FindingCode = "exposed_service"
 	FindingUnusedRule       FindingCode = "unused_rule"
+	FindingMissingLoopback  FindingCode = "missing_loopback"
+	FindingIPv6NDPBlocked   FindingCode = "ipv6_ndp_blocked"
+
+	// Docker-specific findings. FindingDockerBypass is reserved for published
+	// ports that filter/INPUT (or its default policy) would have refused.
+	FindingDockerPublished       FindingCode = "docker_published_port"
+	FindingDockerIneffectiveRule FindingCode = "docker_ineffective_rule" // matches the pre-DNAT tuple
+	FindingDockerShadowedRule    FindingCode = "docker_shadowed_rule"    // reached only after Docker accepted
+	FindingDockerDirectRoute     FindingCode = "docker_direct_route"
+	FindingDockerFragileRule     FindingCode = "docker_fragile_rule"
+	FindingDockerIPv6Unfiltered  FindingCode = "docker_ipv6_unfiltered"
 )
 
 // Certainty distinguishes proven outcomes from paths that depend on an
@@ -67,6 +78,9 @@ const (
 	ServiceFiltered    ServiceStatus = "FILTERED"
 	ServiceReachable   ServiceStatus = "REACHABLE"
 	ServiceLocalhost   ServiceStatus = "LOCALHOST"
+	// ServiceDocker marks a listener whose port Docker DNATs before INPUT;
+	// its reachability is that of the published port.
+	ServiceDocker ServiceStatus = "DOCKER_PUBLISHED"
 )
 
 // SocketFamily retains the family information conveyed by ss. A wildcard
@@ -126,6 +140,7 @@ type Rule struct {
 	Comment    string
 	Negations  map[string]bool // which fields are negated
 	Goto       bool            // true for --goto/-g; false for --jump/-j
+	TargetArgs []string        // options that follow the target, e.g. --notrack or --clamp-mss-to-pmtu
 	Fragment   bool            // rule includes -f/--fragment
 	RawLine    string
 	IPVersion  IPVersion
@@ -223,12 +238,15 @@ type AnalysisResult struct {
 	ServiceAssessment AssessmentStatus
 	Diagnostics       []AssessmentDiagnostic
 	Services          []ListeningService
+	Host              *HostContext
 	ShadowedRules     []ShadowFinding
 	DockerBypasses    []DockerBypassFinding
+	PublishedPorts    []PublishedPort
 	ExposedServices   []ExposedServiceFinding
 	UnusedRules       []UnusedRuleFinding
 	EffectiveIssues   []EffectivenessFinding
 	Recommendations   []Recommendation
+	Baseline          Baseline
 	Score             ScoreResult
 }
 
@@ -242,16 +260,62 @@ type ShadowFinding struct {
 	Severity      Severity
 }
 
-// DockerBypassFinding represents an INPUT rule bypassed by Docker NAT
+// DockerBypassFinding represents a firewall decision that Docker's packet
+// path makes ineffective, or a container endpoint reachable around the
+// host firewall. Code distinguishes the individual finding kinds.
 type DockerBypassFinding struct {
 	Code          FindingCode
 	Certainty     Certainty
+	IPVersion     IPVersion
 	InputRule     Rule
 	NATRule       Rule
+	Rule          *Rule // the ineffective or fragile user rule, when one is involved
 	ExposedPort   string
 	ContainerDest string
+	Bridge        string
+	GatewayMode   string // Docker bridge gateway mode inferred from the rules (nat, routed, nat-unprotected)
+	Scope         AccessScope
+	Interfaces    []string // ingress interfaces through which the path exists; empty means any
 	Reason        string
+	Fix           string
 	Severity      Severity
+}
+
+// PublishedPort is one host port translated by nat/PREROUTING to a forwarded
+// destination, together with the verdicts of both packet paths.
+type PublishedPort struct {
+	IPVersion     IPVersion
+	Protocol      Protocol
+	HostAddr      string // empty when the DNAT rule matches every local address
+	HostPort      int
+	ContainerAddr string
+	ContainerPort int
+	Bridge        string
+	NATRule       Rule
+	ForwardScope  AccessScope // "" when no source reaches the container
+	InputScope    AccessScope // what filter/INPUT would decide for the same packet
+	Certainty     Certainty
+	Interfaces    []string
+}
+
+// HostInterface describes one network interface of the analyzed host.
+type HostInterface struct {
+	Name  string
+	Addrs []string
+	Up    bool
+}
+
+// HostContext carries facts about the analyzed host that are not contained in
+// the rulesets. It is only populated in live mode; nil means unknown.
+type HostContext struct {
+	Interfaces []HostInterface
+}
+
+// Baseline is a recommended default firewall for both address families.
+type Baseline struct {
+	IPv4  string
+	IPv6  string
+	Notes []string
 }
 
 // AccessScope describes how restricted access to a service is
@@ -272,6 +336,7 @@ type ExposedServiceFinding struct {
 	AllowingRule *Rule
 	Severity     Severity
 	Scope        AccessScope
+	Interfaces   []string // ingress interfaces with this exposure; empty means any
 	Reason       string
 }
 

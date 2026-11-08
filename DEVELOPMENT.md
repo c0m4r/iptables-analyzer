@@ -44,12 +44,16 @@ iptables-analyzer/
 │   ├── loader/
 │   │   └── loader.go        # File and live system input
 │   ├── analyzer/
-│   │   ├── evaluation.go    # Ordered jump/goto/RETURN packet-path evaluator
+│   │   ├── evaluation.go    # Ordered jump/goto/RETURN evaluator and multi-table packet paths
 │   │   ├── shadow.go        # Shadowed rule detection (with match extension awareness)
-│   │   ├── docker.go        # Docker NAT bypass detection
+│   │   ├── docker.go        # Docker published-port, ineffective-rule and direct-routing analysis
+│   │   ├── docker_topology.go # Bridges, container addresses and gateway modes inferred from rules
+│   │   ├── docker_test.go   # Regression tests on real Docker 29 captures
 │   │   ├── effectiveness.go # Policy and hygiene checks (with match extension awareness)
 │   │   ├── analyzer.go      # Main analysis orchestration (with chain jump traversal)
 │   │   └── analyzer_test.go # Analyzer unit tests
+│   ├── baseline/
+│   │   └── baseline.go      # Recommended IPv4/IPv6 baseline firewall
 │   ├── services/
 │   │   └── services.go      # ss output parsing
 │   ├── scorer/
@@ -62,7 +66,9 @@ iptables-analyzer/
 │       └── colors.go        # 256-color palette and style definitions
 └── testdata/
     ├── basic.iptables-save      # IPv4 baseline (B with bundled service evidence)
-    ├── docker.iptables-save     # Docker with bypasses (score: F)
+    ├── docker.iptables-save     # Legacy Docker layout with bypasses (score: F)
+    ├── docker29.iptables-save   # Real Docker 29.9.3 capture (nat, routed, nat-unprotected, internal)
+    ├── docker29.ip6tables-save  # Real Docker 29.9.3 IPv6 capture
     └── insecure.iptables-save   # ACCEPT policies (score: F)
 ```
 
@@ -107,6 +113,22 @@ make test-coverage # Generates coverage.html
 - `basic.iptables-save`: IPv4 baseline. Expected with `--ipv4-only`: 100-point subtotal and `INCOMPLETE` without services; B with `testdata/services.txt`
 - `docker.iptables-save`: Docker setup with two DNAT ports blocked in INPUT. Expected: score F, two Docker bypass findings
 - `insecure.iptables-save`: Default ACCEPT policies with shadowed rules. Expected: score F, multiple shadow findings
+- `docker29.iptables-save` / `docker29.ip6tables-save`: unmodified captures from Docker 29.9.3 (iptables 1.8.11, nf_tables). `internal/analyzer/docker_test.go` derives variants from them (an INPUT block, `DOCKER-USER --dport`, raw/mangle drops, removed raw protection, ...). Each variant was reproduced on a live host with a probe container, and the test asserts the observed verdict
+
+### Verifying Docker behavior on a host
+
+The Docker tests encode kernel behavior; when adding a scenario, reproduce it first:
+
+```bash
+docker run -d --name web -p 8080:80 busybox httpd -f -p 80
+docker network create probe
+sudo iptables -I INPUT -p tcp --dport 8080 -j DROP           # the rule under test
+docker run --rm --network probe busybox wget -T 3 -qO- http://<host-ip>:8080/   # 404 = reachable, timeout = blocked
+sudo iptables -D INPUT -p tcp --dport 8080 -j DROP
+```
+
+The probe container arrives through a Docker bridge rather than an external
+interface, so only use it for rules that do not match on the ingress interface.
 
 ## Adding Features
 

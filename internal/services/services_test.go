@@ -48,3 +48,17 @@ func TestParseSSDataRejectsMalformedInventory(t *testing.T) {
 		t.Fatalf("valid empty inventory should succeed: services=%+v err=%v", services, err)
 	}
 }
+
+func TestParseSSDataWithNetidColumn(t *testing.T) {
+	data := `Netid State  Recv-Q Send-Q Local Address:Port Peer Address:PortProcess
+udp   UNCONN 0      0            0.0.0.0:5353      0.0.0.0:*    users:(("avahi-daemon",pid=4,fd=12))
+tcp   LISTEN 0      128          0.0.0.0:22        0.0.0.0:*    users:(("sshd",pid=9,fd=3))
+`
+	services, err := ParseSSData(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(services) != 2 || services[0].Protocol != "udp" || services[1].Protocol != "tcp" || services[1].Process != "sshd" {
+		t.Fatalf("ss -tulnp rows were misparsed: %+v", services)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/c0m4r/iptables-analyzer/internal/analyzer"
+	"github.com/c0m4r/iptables-analyzer/internal/baseline"
 	"github.com/c0m4r/iptables-analyzer/internal/loader"
 	"github.com/c0m4r/iptables-analyzer/internal/models"
 	"github.com/c0m4r/iptables-analyzer/internal/recommender"
@@ -30,12 +31,14 @@ type commandOptions struct {
 	servicesFile string
 	scoreOnly    bool
 	showVersion  bool
+	baseline     string
 }
 
 type commandDependencies struct {
 	loadRules     func(loader.Config) (*models.Ruleset, *models.Ruleset, error)
 	parseServices func(string) ([]models.ListeningService, error)
 	getServices   func() ([]models.ListeningService, error)
+	getHost       func() (*models.HostContext, error)
 	isRoot        func() bool
 }
 
@@ -44,6 +47,7 @@ func defaultCommandDependencies() commandDependencies {
 		loadRules:     loader.Load,
 		parseServices: services.ParseSSFile,
 		getServices:   services.GetListening,
+		getHost:       loader.Host,
 		isRoot:        loader.IsRoot,
 	}
 }
@@ -76,6 +80,8 @@ func newRootCommand(deps commandDependencies) *cobra.Command {
 	cmd.Flags().StringVar(&opts.servicesFile, "services-file", "", "Path to saved ss output file (alternative to live ss)")
 	cmd.Flags().BoolVarP(&opts.scoreOnly, "score-only", "s", false, "Only print the security score")
 	cmd.Flags().BoolVarP(&opts.showVersion, "version", "V", false, "Print version and exit")
+	cmd.Flags().StringVar(&opts.baseline, "baseline", "", "Print only the recommended baseline firewall: 4, 6 or all (default all)")
+	cmd.Flags().Lookup("baseline").NoOptDefVal = "all"
 	return cmd
 }
 
@@ -107,12 +113,20 @@ func runAnalysis(cmd *cobra.Command, opts *commandOptions, deps commandDependenc
 	if opts.ipv6Only && opts.ipv4File != "" {
 		return fmt.Errorf("--file cannot be used with --ipv6-only")
 	}
+	switch opts.baseline {
+	case "", "4", "6", "all":
+	default:
+		return fmt.Errorf("--baseline must be 4, 6 or all")
+	}
 
 	hasFiles := opts.ipv4File != "" || opts.ipv6File != ""
 	live := false
 	if !hasFiles {
 		if deps.isRoot() {
 			live = true
+		} else if opts.baseline != "" {
+			// Without rules the baseline is still useful; it is just not tailored.
+			return writeBaseline(cmd, baseline.Generate(baseline.Options{}), opts.baseline)
 		} else {
 			stderr := cmd.ErrOrStderr()
 			fmt.Fprintln(stderr, "No input specified. Provide rule files or run as root for live analysis.")
@@ -140,7 +154,14 @@ func runAnalysis(cmd *cobra.Command, opts *commandOptions, deps commandDependenc
 		return fmt.Errorf("loading rules: %w", err)
 	}
 
-	result := analyzer.Analyze(ipv4Rules, ipv6Rules)
+	var host *models.HostContext
+	if live && deps.getHost != nil {
+		if host, err = deps.getHost(); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %v; interface predicates are evaluated conservatively\n", err)
+			host = nil
+		}
+	}
+	result := analyzer.AnalyzeHost(ipv4Rules, ipv6Rules, host)
 	result.IPv4Only = opts.ipv4Only
 	result.IPv6Only = opts.ipv6Only
 	if opts.servicesFile != "" {
@@ -168,7 +189,11 @@ func runAnalysis(cmd *cobra.Command, opts *commandOptions, deps commandDependenc
 	}
 
 	result.Recommendations = recommender.Generate(result)
+	result.Baseline = baseline.Generate(baseline.FromResult(result))
 	result.Score = scorer.Calculate(result)
+	if opts.baseline != "" {
+		return writeBaseline(cmd, result.Baseline, opts.baseline)
+	}
 	renderOpts := ui.RenderOptions{
 		NoColor:  opts.noColor,
 		Verbose:  opts.verbose,
@@ -187,6 +212,32 @@ func runAnalysis(cmd *cobra.Command, opts *commandOptions, deps commandDependenc
 	}
 	if err := ui.Render(result, renderOpts); err != nil {
 		return fmt.Errorf("writing report: %w", err)
+	}
+	return nil
+}
+
+// writeBaseline prints the baseline for the requested families. A single
+// family is printed alone so that it can be redirected into a rules file.
+func writeBaseline(cmd *cobra.Command, b models.Baseline, family string) error {
+	out := cmd.OutOrStdout()
+	var err error
+	switch family {
+	case "4":
+		_, err = fmt.Fprint(out, b.IPv4)
+	case "6":
+		_, err = fmt.Fprint(out, b.IPv6)
+	default:
+		_, err = fmt.Fprintf(out, "%s\n%s", b.IPv4, b.IPv6)
+		if err == nil {
+			for _, note := range b.Notes {
+				if _, err = fmt.Fprintln(out, "# "+note); err != nil {
+					break
+				}
+			}
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("writing baseline: %w", err)
 	}
 	return nil
 }

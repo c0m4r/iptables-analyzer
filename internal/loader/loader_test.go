@@ -3,6 +3,7 @@ package loader
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/c0m4r/iptables-analyzer/internal/models"
@@ -28,4 +29,17 @@ func TestLoadIPv4File(t *testing.T) {
 	if ipv4 == nil || ipv4.IPVersion != models.IPv4 || ipv6 != nil {
 		t.Fatalf("unexpected rulesets: ipv4=%+v ipv6=%+v", ipv4, ipv6)
 	}
+}
+
+func TestHostListsLoopback(t *testing.T) {
+	host, err := Host()
+	if err != nil {
+		t.Skipf("interfaces unavailable: %v", err)
+	}
+	for _, iface := range host.Interfaces {
+		if iface.Name == "lo" || strings.HasPrefix(iface.Name, "lo") {
+			return
+		}
+	}
+	t.Fatalf("expected a loopback interface, got %+v", host.Interfaces)
 }

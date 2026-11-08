@@ -146,9 +146,15 @@ func parseSSData(data, forcedProto string) ([]models.ListeningService, error) {
 		if len(fields) == 0 {
 			continue
 		}
-		if fields[0] == "State" || strings.Contains(line, "Local Address:Port") {
+		if fields[0] == "State" || fields[0] == "Netid" || strings.Contains(line, "Local Address:Port") {
 			recognized = true
 			continue
+		}
+		// ss -tulnp prefixes every row with a Netid column (tcp, udp, ...).
+		netid := ""
+		if len(fields) > 1 && (fields[1] == "LISTEN" || fields[1] == "UNCONN") {
+			netid = fields[0]
+			fields = fields[1:]
 		}
 		if len(fields) < 5 {
 			parseErrs = append(parseErrs, fmt.Errorf("line %d: malformed ss row", lineNum))
@@ -164,6 +170,14 @@ func parseSSData(data, forcedProto string) ([]models.ListeningService, error) {
 			proto = "udp"
 		default:
 			parseErrs = append(parseErrs, fmt.Errorf("line %d: unsupported ss state %q", lineNum, fields[0]))
+			continue
+		}
+		switch netid {
+		case "":
+		case "tcp", "udp":
+			proto = netid
+		default:
+			parseErrs = append(parseErrs, fmt.Errorf("line %d: unsupported ss socket type %q", lineNum, netid))
 			continue
 		}
 		if forcedProto != "" {

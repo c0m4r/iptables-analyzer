@@ -1,6 +1,9 @@
 package scorer
 
 import (
+	"strconv"
+	"strings"
+
 	"github.com/c0m4r/iptables-analyzer/internal/analyzer"
 	"github.com/c0m4r/iptables-analyzer/internal/models"
 )
@@ -38,19 +41,31 @@ func Calculate(result *models.AnalysisResult) models.ScoreResult {
 		port     int
 	}
 	countedEndpoints := make(map[exposedEndpoint]struct{})
-	for _, svc := range result.ExposedServices {
-		if svc.Scope != models.ScopeExposed {
-			continue
-		}
-		endpoint := exposedEndpoint{protocol: svc.Service.Protocol, port: svc.Service.Port}
+	charge := func(protocol models.Protocol, port int) {
+		endpoint := exposedEndpoint{protocol: protocol, port: port}
 		if _, counted := countedEndpoints[endpoint]; counted {
-			continue
+			return
 		}
 		countedEndpoints[endpoint] = struct{}{}
-		if svc.Service.Port < 1024 {
+		if port < 1024 {
 			exposureDeduct += 5 // well-known port
 		} else {
 			exposureDeduct += 2 // high port
+		}
+	}
+	for _, svc := range result.ExposedServices {
+		if svc.Scope == models.ScopeExposed {
+			charge(svc.Service.Protocol, svc.Service.Port)
+		}
+	}
+	// Docker-published ports that INPUT would also have allowed are
+	// exposures, not bypasses. They are charged per host port like services.
+	for _, finding := range result.DockerBypasses {
+		if finding.Code != models.FindingDockerPublished || finding.Scope != models.ScopeExposed {
+			continue
+		}
+		for _, port := range portList(finding.ExposedPort) {
+			charge(finding.NATRule.Protocol, port)
 		}
 	}
 	if exposureDeduct > 25 {
@@ -61,11 +76,24 @@ func Calculate(result *models.AnalysisResult) models.ScoreResult {
 
 	// Shadow/Docker bypass deductions (max -25)
 	shadowDeduct := 0
-	for _, bypass := range result.DockerBypasses {
-		if bypass.Severity == models.SeverityCritical {
+	ipv6Gap := false
+	for _, finding := range result.DockerBypasses {
+		switch finding.Code {
+		case models.FindingDockerPublished:
+			continue // charged as exposure
+		case models.FindingDockerIPv6Unfiltered:
+			ipv6Gap = true
+			continue // charged in the IPv6 category
+		}
+		switch finding.Severity {
+		case models.SeverityCritical:
 			shadowDeduct += 12
-		} else {
+		case models.SeverityHigh:
 			shadowDeduct += 5
+		case models.SeverityMedium:
+			shadowDeduct += 2
+		default:
+			shadowDeduct++
 		}
 	}
 	for _, shadow := range result.ShadowedRules {
@@ -110,6 +138,9 @@ func Calculate(result *models.AnalysisResult) models.ScoreResult {
 		if result.IPv6Rules == nil || len(result.IPv6Rules.Tables) == 0 {
 			ipv6Deduct += 10
 		}
+		if ipv6Gap {
+			ipv6Deduct += 5
+		}
 		if ipv6Deduct > 10 {
 			ipv6Deduct = 10
 		}
@@ -147,6 +178,26 @@ func Calculate(result *models.AnalysisResult) models.ScoreResult {
 		Complete:   complete,
 		Unassessed: unassessed,
 	}
+}
+
+// portList expands "8080" or "9000-9002" into individual ports.
+func portList(spec string) []int {
+	low, high, isRange := strings.Cut(spec, "-")
+	start, err := strconv.Atoi(low)
+	if err != nil {
+		return nil
+	}
+	end := start
+	if isRange {
+		if end, err = strconv.Atoi(high); err != nil || end < start {
+			return []int{start}
+		}
+	}
+	ports := make([]int, 0, end-start+1)
+	for port := start; port <= end; port++ {
+		ports = append(ports, port)
+	}
+	return ports
 }
 
 func analyzedPolicyRulesets(result *models.AnalysisResult) []*models.Ruleset {

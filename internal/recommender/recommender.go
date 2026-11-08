@@ -1,9 +1,12 @@
 package recommender
 
 import (
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/c0m4r/iptables-analyzer/internal/analyzer"
 	"github.com/c0m4r/iptables-analyzer/internal/models"
 )
 
@@ -17,6 +20,8 @@ func Generate(result *models.AnalysisResult) []models.Recommendation {
 	recs = append(recs, hygieneRecommendations(result)...)
 	recs = append(recs, ipv6Recommendations(result)...)
 
+	// Most severe first; generation order is kept within a severity.
+	sort.SliceStable(recs, func(i, j int) bool { return recs[i].Severity > recs[j].Severity })
 	return recs
 }
 
@@ -29,7 +34,8 @@ func policyRecommendations(result *models.AnalysisResult) []models.Recommendatio
 		if issue.Chain == "INPUT" && (issue.Code == models.FindingPolicyAccept || issue.Title == "INPUT default policy is ACCEPT") {
 			recs = append(recs, models.Recommendation{
 				Title: "Set " + stack + " INPUT chain default policy to DROP",
-				Detail: "Install and verify required allow rules first, with a tested rollback path, then change the INPUT policy to DROP.\n" +
+				Detail: "Install and verify required allow rules first, with a tested rollback path, then change the INPUT policy to DROP. " +
+					"The Recommended Baseline section contains a complete, reviewed rule set for both IPv4 and IPv6.\n" +
 					"  Command: " + command + " -P INPUT DROP",
 				Severity: models.SeverityHigh,
 				Category: "policy",
@@ -55,46 +61,189 @@ func dockerRecommendations(result *models.AnalysisResult) []models.Recommendatio
 		return recs
 	}
 
-	severity := models.SeverityHigh
-	for _, bypass := range result.DockerBypasses {
-		if bypass.Severity == models.SeverityCritical {
-			severity = models.SeverityCritical
-			break
+	severity := models.SeverityLow
+	published := false
+	for _, finding := range result.DockerBypasses {
+		if finding.Severity > severity {
+			severity = finding.Severity
+		}
+		if finding.Code == models.FindingDockerBypass || finding.Code == models.FindingDockerPublished {
+			published = true
 		}
 	}
 
-	// General Docker recommendation
-	recs = append(recs, models.Recommendation{
-		Title: "Use DOCKER-USER chain for container access control",
-		Detail: "Docker manages the DOCKER chain directly. To restrict access to containerized services, " +
-			"add reviewed rules to DOCKER-USER instead of INPUT. Packets are already DNATed there, " +
-			"so match the published host port with conntrack --ctorigdstport or match the translated container tuple.",
-		Severity: severity,
-		Category: "docker",
-	})
-
-	for _, bypass := range result.DockerBypasses {
-		protocol := string(bypass.NATRule.Protocol)
-		if protocol == "" || protocol == string(models.ProtoAll) {
-			protocol = "tcp"
-		}
-		command := firewallCommand(bypass.NATRule.IPVersion)
-		detail := "Restrict the original published port before Docker's forwarding accept rules:\n" +
-			"  " + command + " -I DOCKER-USER -i <external-interface> -p " + protocol +
-			" -m conntrack --ctorigdstport " + bypass.ExposedPort + " -j DROP"
-		if bypass.InputRule.RuleNum > 0 {
-			detail = "The INPUT block at rule #" + strconv.Itoa(bypass.InputRule.RuleNum) +
-				" does not see DNATed traffic. " + detail
-		}
+	if published {
 		recs = append(recs, models.Recommendation{
-			Title:    "Restrict published port " + bypass.ExposedPort + " in DOCKER-USER",
-			Detail:   detail,
-			Severity: bypass.Severity,
+			Title: "Use the DOCKER-USER chain for container access control",
+			Detail: "Docker DNATs published ports in nat/PREROUTING, so the traffic is forwarded and never reaches filter/INPUT " +
+				"(this includes INPUT rules created by ufw or firewalld). DOCKER-USER is evaluated before Docker's own ACCEPT rules " +
+				"and Docker never flushes it. Packets are already translated there: match the published port with " +
+				"'-m conntrack --ctorigdstport <port> --ctdir ORIGINAL', not with --dport. If a service only needs local " +
+				"access, publish it on loopback (-p 127.0.0.1:<port>:<container-port>) or set \"ip\": \"127.0.0.1\" in daemon.json.",
+			Severity: severity,
 			Category: "docker",
 		})
 	}
 
+	for _, finding := range result.DockerBypasses {
+		var rec *models.Recommendation
+		switch finding.Code {
+		case models.FindingDockerBypass, models.FindingDockerPublished:
+			rec = publishedPortRecommendation(finding)
+		case models.FindingDockerIneffectiveRule, models.FindingDockerShadowedRule:
+			rec = ineffectiveRuleRecommendation(finding)
+		case models.FindingDockerDirectRoute:
+			rec = directRouteRecommendation(result, finding)
+		case models.FindingDockerFragileRule:
+			rec = fragileRuleRecommendation(finding)
+		case models.FindingDockerIPv6Unfiltered:
+			rec = &models.Recommendation{
+				Title: "Let Docker manage ip6tables and deny IPv6 forwarding by default",
+				Detail: finding.Fix + "\n" +
+					"  ip6tables -P FORWARD DROP",
+				Severity: finding.Severity,
+				Category: "docker",
+			}
+		}
+		if rec != nil {
+			recs = append(recs, *rec)
+		}
+	}
+
 	return recs
+}
+
+func publishedPortRecommendation(finding models.DockerBypassFinding) *models.Recommendation {
+	protocol := string(finding.NATRule.Protocol)
+	if protocol == "" || protocol == string(models.ProtoAll) {
+		protocol = "tcp"
+	}
+	command := firewallCommand(finding.IPVersion)
+	portSpec := strings.ReplaceAll(finding.ExposedPort, "-", ":")
+	match := "-p " + protocol + " -m conntrack --ctorigdstport " + portSpec + " --ctdir ORIGINAL"
+	if addr := finding.NATRule.DstAddr; addr != "" && !finding.NATRule.Negations["dst"] {
+		match = "-p " + protocol + " -m conntrack --ctorigdst " + addr + " --ctorigdstport " + portSpec + " --ctdir ORIGINAL"
+	}
+	var detail strings.Builder
+	if finding.Code == models.FindingDockerBypass && finding.InputRule.RuleNum > 0 {
+		detail.WriteString(finding.InputRule.Table + "/" + finding.InputRule.Chain + " rule #" +
+			strconv.Itoa(finding.InputRule.RuleNum) + " never sees this traffic because it is DNATed first. ")
+	} else if finding.Code == models.FindingDockerBypass {
+		detail.WriteString("The default-deny INPUT policy never sees this traffic because it is DNATed first. ")
+	}
+	detail.WriteString("Allow trusted sources first, then drop the rest of the published port (insert positions keep the order):\n")
+	detail.WriteString("  " + command + " -I DOCKER-USER 1 " + match + " -s <trusted-cidr> -j RETURN\n")
+	detail.WriteString("  " + command + " -I DOCKER-USER 2 " + match + " -j DROP\n")
+	detail.WriteString("Or, if only local clients need it, publish it on loopback: docker run -p 127.0.0.1:" +
+		strings.SplitN(finding.ExposedPort, "-", 2)[0] + ":<container-port> ...")
+	return &models.Recommendation{
+		Title:    "Restrict " + stackLabel(finding.IPVersion) + " published port " + finding.ExposedPort + "/" + protocol + " (" + finding.ContainerDest + ") in DOCKER-USER",
+		Detail:   detail.String(),
+		Severity: finding.Severity,
+		Category: "docker",
+	}
+}
+
+var dportToken = regexp.MustCompile(`(?:-m (?:tcp|udp) )?--dport ([0-9:]+)`)
+
+func ineffectiveRuleRecommendation(finding models.DockerBypassFinding) *models.Recommendation {
+	rule := finding.Rule
+	if rule == nil {
+		return nil
+	}
+	command := firewallCommand(finding.IPVersion)
+	spec := analyzer.RuleSpec(rule)
+	location := rule.Table + "/" + rule.Chain + " rule #" + strconv.Itoa(rule.RuleNum)
+	detail := finding.Fix
+	if finding.Code == models.FindingDockerIneffectiveRule {
+		replacement := spec
+		if !rule.Negations["dport"] {
+			replacement = dportToken.ReplaceAllString(replacement, "-m conntrack --ctorigdstport $1 --ctdir ORIGINAL")
+		}
+		if rule.DstAddr != "" && !rule.Negations["dst"] {
+			replacement = strings.Replace(replacement, "-d "+rule.DstAddr+" ", "", 1)
+			replacement = strings.Replace(replacement, "-j ", "-m conntrack --ctorigdst "+rule.DstAddr+" --ctdir ORIGINAL -j ", 1)
+		}
+		if replacement != spec && rule.Table == "filter" && rule.Chain == "DOCKER-USER" {
+			detail += "\n  Replace it: " + command + " -R DOCKER-USER " + strconv.Itoa(rule.RuleNum) + " " + replacement
+		} else if replacement != spec {
+			detail += "\n  Equivalent DOCKER-USER rule: " + command + " -I DOCKER-USER 1 " + replacement
+		}
+	} else if rule.Table == "filter" {
+		detail += "\n  " + command + " -I DOCKER-USER 1 " + spec +
+			"\n  " + command + " -D " + rule.Chain + " " + strconv.Itoa(rule.RuleNum)
+	}
+	return &models.Recommendation{
+		Title:    "Fix ineffective " + stackLabel(finding.IPVersion) + " " + location,
+		Detail:   detail,
+		Severity: finding.Severity,
+		Category: "docker",
+	}
+}
+
+func directRouteRecommendation(result *models.AnalysisResult, finding models.DockerBypassFinding) *models.Recommendation {
+	command := firewallCommand(finding.IPVersion)
+	bridge := finding.Bridge
+	if bridge == "" {
+		bridge = "<bridge>"
+	}
+	addr := finding.ContainerDest
+	if i := strings.LastIndex(addr, ":"); i > 0 {
+		addr = strings.Trim(addr[:i], "[]")
+	}
+	target := addr
+	if subnet := bridgeSubnet(result, finding.IPVersion, bridge); subnet != "" {
+		target = subnet
+	}
+	detail := finding.Fix + "\n" +
+		"  Drop packets addressed to the containers that do not arrive from their bridge (published ports are unaffected):\n" +
+		"  " + command + " -t raw -I PREROUTING -d " + target + " ! -i " + bridge + " -j DROP\n" +
+		"  Or refuse new connections into the bridge that were not DNATed by a published port:\n" +
+		"  " + command + " -I DOCKER-USER -o " + bridge + " ! -i " + bridge + " -m conntrack --ctstate NEW -m conntrack ! --ctstate DNAT -j DROP"
+	if finding.GatewayMode == "routed" {
+		port := finding.ExposedPort
+		detail = finding.Fix + "\n" +
+			"  " + command + " -I DOCKER-USER -o " + bridge + " -d " + addr + " -p tcp --dport " + port + " ! -s <trusted-cidr> -j DROP"
+	}
+	return &models.Recommendation{
+		Title:    "Block direct routing to " + stackLabel(finding.IPVersion) + " container " + finding.ContainerDest,
+		Detail:   detail,
+		Severity: finding.Severity,
+		Category: "docker",
+	}
+}
+
+// bridgeSubnet returns the subnet Docker masquerades for bridge, if known.
+func bridgeSubnet(result *models.AnalysisResult, version models.IPVersion, bridge string) string {
+	rs := result.IPv4Rules
+	if version == models.IPv6 {
+		rs = result.IPv6Rules
+	}
+	if rs == nil || rs.Tables["nat"] == nil || rs.Tables["nat"].Chains["POSTROUTING"] == nil {
+		return ""
+	}
+	for _, rule := range rs.Tables["nat"].Chains["POSTROUTING"].Rules {
+		if rule.Target == "MASQUERADE" && rule.OutIface == bridge && rule.Negations["out-iface"] && rule.SrcAddr != "" && !rule.Negations["src"] {
+			return rule.SrcAddr
+		}
+	}
+	return ""
+}
+
+func fragileRuleRecommendation(finding models.DockerBypassFinding) *models.Recommendation {
+	rule := finding.Rule
+	if rule == nil {
+		return nil
+	}
+	command := firewallCommand(finding.IPVersion)
+	return &models.Recommendation{
+		Title: "Move " + stackLabel(finding.IPVersion) + " filter/FORWARD rule #" + strconv.Itoa(rule.RuleNum) + " into DOCKER-USER",
+		Detail: finding.Fix + "\n" +
+			"  " + command + " -I DOCKER-USER 1 " + analyzer.RuleSpec(rule) + "\n" +
+			"  " + command + " -D FORWARD " + strconv.Itoa(rule.RuleNum),
+		Severity: finding.Severity,
+		Category: "docker",
+	}
 }
 
 func exposureRecommendations(result *models.AnalysisResult) []models.Recommendation {
@@ -122,7 +271,7 @@ func exposureRecommendations(result *models.AnalysisResult) []models.Recommendat
 		detail += "  Example allow: " + command + " -I " + chain + " -p " + string(svc.Protocol) + " --dport " +
 			strconv.Itoa(svc.Port) + " -s <trusted-network> -j ACCEPT"
 		recs = append(recs, models.Recommendation{
-			Title:    "Restrict access to " + svc.Process + " on port " + strconv.Itoa(svc.Port),
+			Title:    "Restrict " + stackLabel(exposed.IPVersion) + " access to " + svc.Process + " on port " + strconv.Itoa(svc.Port) + "/" + string(svc.Protocol),
 			Detail:   detail,
 			Severity: exposed.Severity,
 			Category: "exposure",
@@ -207,12 +356,10 @@ func ipv6Recommendations(result *models.AnalysisResult) []models.Recommendation 
 	if !result.IPv4Only && (result.IPv6Rules == nil || len(result.IPv6Rules.Tables) == 0) {
 		recs = append(recs, models.Recommendation{
 			Title: "Configure IPv6 firewall rules",
-			Detail: "No ip6tables rules detected. If IPv6 is enabled on this system, " +
-				"it may be completely unprotected. Configure ip6tables rules to match your IPv4 policy, " +
-				"or disable IPv6 if not needed:\n" +
-				"  ip6tables -P INPUT DROP\n" +
-				"  ip6tables -A INPUT -i lo -j ACCEPT\n" +
-				"  ip6tables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+			Detail: "No ip6tables rules detected. If IPv6 is enabled on this system, it may be completely unprotected: " +
+				"hosts usually obtain global IPv6 addresses automatically, and IPv4 rules do not apply to them. " +
+				"Apply the IPv6 part of the recommended baseline (see \"Recommended Baseline\" or --baseline 6); it keeps " +
+				"the ICMPv6 neighbor discovery that IPv6 needs to work.",
 			Severity: models.SeverityHigh,
 			Category: "ipv6",
 		})
@@ -234,24 +381,32 @@ func findSSHWithoutRateLimit(rs *models.Ruleset) *models.Rule {
 		return nil
 	}
 
+	limitedEarlier := false
 	for i := range input.Rules {
 		rule := &input.Rules[i]
-		if rule.IsAllow() && rule.Protocol == models.ProtoTCP && !rule.Negations["protocol"] &&
-			rule.DstPort == "22" && !rule.Negations["dport"] {
-			// Check if there's a limit match
-			hasLimit := false
-			for _, m := range rule.Matches {
-				if m.Module == "limit" || m.Module == "hashlimit" || m.Module == "recent" {
-					hasLimit = true
-					break
-				}
-			}
-			if !hasLimit {
-				return rule
-			}
+		if rule.Protocol != models.ProtoTCP || rule.Negations["protocol"] || rule.DstPort != "22" || rule.Negations["dport"] {
+			continue
+		}
+		// A preceding DROP with a rate-limiting match (hashlimit --hashlimit-above,
+		// recent --update --hitcount) limits the ACCEPT that follows it.
+		if rule.IsBlock() && hasRateLimit(rule) {
+			limitedEarlier = true
+			continue
+		}
+		if rule.IsAllow() && !hasRateLimit(rule) && !limitedEarlier {
+			return rule
 		}
 	}
 	return nil
+}
+
+func hasRateLimit(rule *models.Rule) bool {
+	for _, m := range rule.Matches {
+		if m.Module == "limit" || m.Module == "hashlimit" || m.Module == "recent" {
+			return true
+		}
+	}
+	return false
 }
 
 func sshRateLimitCommand(rs *models.Ruleset, rule *models.Rule) (string, bool) {

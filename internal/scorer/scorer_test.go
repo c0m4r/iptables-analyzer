@@ -112,3 +112,26 @@ func TestExposureScoreCountsProtocolPortOnceAcrossFamilies(t *testing.T) {
 		t.Fatalf("dual-stack endpoints were double-counted: %+v", score.Breakdown)
 	}
 }
+
+func TestDockerFindingsAreScoredByKind(t *testing.T) {
+	result := &models.AnalysisResult{
+		IPv4Only:          true,
+		ServiceAssessment: models.AssessmentComplete,
+		ExposedServices: []models.ExposedServiceFinding{{
+			Service: models.ListeningService{Protocol: models.ProtoTCP, Port: 9000}, Scope: models.ScopeExposed,
+		}},
+		DockerBypasses: []models.DockerBypassFinding{
+			{Code: models.FindingDockerPublished, Scope: models.ScopeExposed, ExposedPort: "9000-9002", NATRule: models.Rule{Protocol: models.ProtoTCP}},
+			{Code: models.FindingDockerBypass, Severity: models.SeverityCritical},
+			{Code: models.FindingDockerIneffectiveRule, Severity: models.SeverityHigh},
+		},
+	}
+	score := Calculate(result)
+	// 9000 is counted once across the listener and the published range: 3 ports × -2.
+	if score.Breakdown["exposure"] != -6 {
+		t.Fatalf("published ports must be charged as exposure, once per port: %+v", score.Breakdown)
+	}
+	if score.Breakdown["shadow"] != -17 {
+		t.Fatalf("bypass (-12) and ineffective rule (-5) expected: %+v", score.Breakdown)
+	}
+}

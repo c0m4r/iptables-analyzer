@@ -11,11 +11,24 @@ Types of changes: Added, Changed, Deprecated, Removed, Fixed, Security
 
 ### Added
 
+- recommended baseline firewall, always generated for both IPv4 and IPv6 and tailored to the detected SSH port, listeners and Docker; shown in every report, in JSON, and alone with `--baseline[=4|6|all]`
+- Docker analysis of published ports along the full hook sequence (raw, mangle, nat, filter, security), a "Docker Published Ports" table, and new finding codes: `docker_published_port`, `docker_ineffective_rule`, `docker_shadowed_rule`, `docker_fragile_rule`, `docker_direct_route`, `docker_ipv6_unfiltered`
+- detection of DOCKER-USER/FORWARD rules that match the pre-DNAT port or host address, FORWARD rules shadowed by Docker's ACCEPT rules, and rules above Docker's jumps that `dockerd` reorders on restart
+- detection of containers reachable by direct routing (missing Docker 28+ raw protection, loopback-only publications, `routed` and `nat-unprotected` gateway modes) and of IPv6 forwarding left unfiltered by Docker
+- checks for dropped loopback traffic and blocked IPv6 neighbor discovery/router advertisements
+- live mode reads the host's interfaces and addresses to evaluate `-i` and local-address predicates exactly
+- `ss -tulnp` (Netid column) inventories, `-F` lines in iptables-restore files, and target options such as `-j CT --notrack`
+- regression tests on real Docker 29.9.3 captures whose variants were reproduced on a live host
+
 - stable finding codes, service-assessment status, per-socket family/status metadata, and incomplete-score diagnostics in JSON output
 - regression coverage for fragmented traffic, dual-stack listeners, nested-chain remediation, DNAT state and ranges, ordered NAT traversal, original-tuple matches, malformed inventories, policy validation, semantic rendering, and output failures
 
 ### Changed
 
+- open published ports are reported and scored as exposure; `docker_bypass` is reserved for ports that INPUT or its default-deny policy would refuse
+- certainty is tracked per accepted source range: undecidable predicates (rate limits, ipsets) only make a verdict possible when it depends on them matching
+- interface-specific rules are evaluated per ingress interface, and findings name the interfaces they apply to
+- Docker recommendations use `--ctorigdstport ... --ctdir ORIGINAL`, allow trusted sources before the drop, and are ordered by severity
 - Docker analysis evaluates every published port with ordered PREROUTING traversal and retains original and translated conntrack tuples
 - service discovery distinguishes dual-stack, excluded, filtered, reachable, malformed, and valid empty inventories
 - verbose rule tables include raw rules and render negations, fragments, extension predicates, and goto control flow
@@ -23,6 +36,12 @@ Types of changes: Added, Changed, Deprecated, Removed, Fixed, Security
 
 ### Fixed
 
+- Docker findings were always "Possible path" because `addrtype`, Docker bridge interfaces and the container's output interface were not modeled
+- drops in raw/mangle PREROUTING were ignored, producing false Docker bypasses
+- sources accepted by a chain policy were classified as WHITELISTED instead of LOCALNET/EXPOSED
+- multiple `-m conntrack` matches in one rule overwrote each other's state list
+- SSH rate limiting implemented as a preceding `hashlimit`/`recent` DROP was not recognized
+- the INCOMPLETE grade was wrapped in the score card
 - unsafe SSH replacements, wrong-chain exposure advice, discarded fragment predicates, IPv6 wildcard loss, DNAT-state false negatives, range sampling, bare IPv6 target parsing, original-port protection false positives, stateful shadow false positives, duplicate listener findings and dual-stack exposure deductions, successful incomplete scores, invalid policy acceptance, excluded-service labeling, and ignored output errors
 
 ## [0.4.0] - 2026-08-03
