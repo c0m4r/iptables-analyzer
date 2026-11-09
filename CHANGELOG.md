@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Types of changes: Added, Changed, Deprecated, Removed, Fixed, Security
 
+## [Unreleased]
+
+### Added
+
+- Landlock sandbox: after the input is collected, the analyzer drops root privileges to uid/gid 65534, sets no_new_privs and enforces a Landlock domain without allow rules (no file access, execution, TCP/UDP, abstract UNIX sockets or signals, as far as the kernel's ABI allows) before it parses, analyzes and renders anything; `--sandbox=auto|strict|off`, sandbox status in the report overview and in JSON (`Sandbox`)
+- dependency cooldown: `addons/update-deps.sh` adopts only module versions published at least `COOLDOWN_DAYS` ago (`addons/deps.conf`, `--cooldown`, `GO_DEPS_COOLDOWN_DAYS`), with reviewed per-version exceptions; `addons/check-deps-cooldown.sh` and `make check-deps` verify it
+- Dependabot configuration for Go modules and GitHub Actions with the same cooldown
+- release workflow that builds, tests and attests (SLSA build provenance) the binaries and creates a draft release with `SHA256SUMS`
+- fuzz tests for the parsers, the escaping and shell quoting, and the whole command; `make fuzz`, `make test-sandbox`
+- documentation in `docs/` (usage, analysis method, security, supply chain); the README is now short and written in Simplified Technical English
+
+### Changed
+
+- input is collected first and parsed only inside the sandbox; `loader.Read`/`loader.Parse` and `services.Collect`/`Capture.Parse` replace the combined helpers in the command
+- `make build`, `make test` and `make build-dev` produce static binaries (`CGO_ENABLED=0`), which the sandbox needs on kernels before Landlock ABI 8
+- CI: actions pinned to commit SHAs, `permissions: {}` by default, no persisted credentials, no caches, fixed toolchain and module proxy, `go mod tidy -diff`, dependency cooldown, hidden-Unicode check, pinned govulncheck, zizmor workflow audit, dependency review on pull requests, sandbox tests without cgo, fuzz smoke tests and a reproducible-build check
+- recommended commands quote ruleset values for the shell, so comments are shown in single quotes
+
+### Security
+
+- rule comments, chain and interface names and ss process names could inject terminal escape sequences into the report; control characters, bidirectional overrides and invalid UTF-8 are now shown as `^[`, `<U+202E>` and `<0xNN>`
+- recommended commands embedded rule text unquoted, so a comment such as `$(...)` ran when the command was copied into a shell; every ruleset value is now shell-quoted
+- live mode ran `iptables-save`, `ip6tables-save` and `ss` from `PATH` with the caller's environment (for example `XTABLES_LIBDIR`); they now run only from root-owned, non-writable trusted locations with an environment of `PATH` and `LC_ALL=C`, without standard input and with `Pdeathsig`
+- rule files, ss files and tool output were read without a size limit; they are now limited to 64 MiB (rules) and 16 MiB (ss)
+- crafted rulesets whose chains jump to each other several times made the evaluation exponential (a 41-rule file took minutes, larger ones never finished); chain traversals are now bounded per ruleset, and affected results are reported as possible with an assessment note
+
 ## [0.6.0] - 2026-11-09
 
 ### Added

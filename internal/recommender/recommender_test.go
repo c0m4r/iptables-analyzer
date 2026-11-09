@@ -1,6 +1,7 @@
 package recommender
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -46,7 +47,7 @@ COMMIT
 			detail = rec.Detail
 		}
 	}
-	for _, wanted := range []string{"iptables -R INPUT 2", "-i wg0", "-d 192.0.2.10/32", `--comment "VPN SSH"`} {
+	for _, wanted := range []string{"iptables -R INPUT 2", "-i wg0", "-d 192.0.2.10/32", `--comment 'VPN SSH'`} {
 		if !strings.Contains(detail, wanted) {
 			t.Fatalf("safe replacement lost %q: %s", wanted, detail)
 		}
@@ -162,5 +163,61 @@ func TestFragileRuleRecommendationMovesRuleIntoDockerUser(t *testing.T) {
 	if len(recs) == 0 || !strings.Contains(recs[0].Detail, "iptables -I DOCKER-USER 1 -p tcp -m tcp --dport 80 -j DROP") ||
 		!strings.Contains(recs[0].Detail, "iptables -D FORWARD 1") {
 		t.Fatalf("expected move commands, got %+v", recs)
+	}
+}
+
+// Comments, chain names and interface names in a ruleset can contain shell
+// syntax. Copying a recommended command must not execute it.
+func TestRecommendedCommandsQuoteRulesetValues(t *testing.T) {
+	const payload = "$(touch /tmp/iptables-analyzer-pwned)`id`;reboot"
+	data := `*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:DOCKER-USER - [0:0]
+-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-A INPUT -p tcp --dport 22 -m comment --comment "` + payload + `" -j ACCEPT
+-A DOCKER-USER -i "eth0;id" -p tcp -m tcp --dport 8080 -m comment --comment "` + payload + `" -j DROP
+COMMIT
+`
+	rs, err := parser.Parse(data, models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssh := findSSHWithoutRateLimit(rs)
+	if ssh == nil {
+		t.Fatal("expected the SSH rule")
+	}
+	command, ok := sshRateLimitCommand(rs, ssh)
+	if !ok {
+		t.Fatal("expected an SSH replacement command")
+	}
+	docker := rs.Tables["filter"].Chains["DOCKER-USER"].Rules[0]
+	rec := ineffectiveRuleRecommendation(models.DockerBypassFinding{
+		Code: models.FindingDockerIneffectiveRule, IPVersion: models.IPv4, Rule: &docker, Fix: "fix",
+	})
+	if rec == nil {
+		t.Fatal("expected a DOCKER-USER replacement")
+	}
+	replace := rec.Detail[strings.Index(rec.Detail, "iptables -R"):]
+
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no POSIX shell available")
+	}
+	for _, line := range []string{command, replace} {
+		if !strings.Contains(line, "'"+payload+"'") {
+			t.Errorf("payload is not single-quoted in %s", line)
+		}
+		// Let a shell split the command (printing, not running iptables).
+		out, err := exec.Command(sh, "-c", `printf '%s\n' `+strings.TrimPrefix(line, "iptables ")).Output()
+		if err != nil {
+			t.Fatalf("shell rejected %s: %v", line, err)
+		}
+		if !strings.Contains(string(out), "\n"+payload+"\n") {
+			t.Errorf("payload did not survive as one literal argument: %s", out)
+		}
+	}
+	if !strings.Contains(replace, "-i 'eth0;id'") || !strings.Contains(replace, "--ctorigdstport 8080") {
+		t.Errorf("interface name not quoted or port not rewritten: %s", replace)
 	}
 }

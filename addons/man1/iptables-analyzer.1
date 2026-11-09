@@ -58,6 +58,12 @@ is generic; otherwise it keeps the detected SSH port, lists other listeners as
 commented rules and, on Docker hosts, adds DOCKER\-USER rules for published ports.
 Apply it with \fBiptables\-restore \-\-noflush\fR, which keeps Docker's chains.
 .TP
+.BR \-\-sandbox " \fIMODE\fR"
+Confine the process after it has read its input; see
+.BR SECURITY .
+\fIMODE\fR is \fBauto\fR (the default: apply what the system supports),
+\fBstrict\fR (fail unless the whole sandbox is in effect) or \fBoff\fR.
+.TP
 .BR \-V ", " \-\-version
 Print version and exit.
 .TP
@@ -121,6 +127,36 @@ Save listening services for offline analysis:
 ss \-tulnp > services.txt
 .EE
 .RE
+.SH SECURITY
+Rule files, saved
+.BR ss (8)
+output and the live tool output are untrusted input: comments, chain names,
+interface names and process names are chosen by whoever controls the firewall
+or runs a process. The analyzer therefore:
+.IP \(bu 2
+reads at most 64 MiB of rules and 16 MiB of
+.BR ss (8)
+output;
+.IP \(bu 2
+in live mode, runs only root-owned, not group- or world-writable
+.BR iptables\-save ,
+.BR ip6tables\-save " and " ss
+from /usr/sbin, /usr/bin, /sbin or /bin (PATH is a fallback with the same
+checks), with an environment that contains only PATH and LC_ALL=C;
+.IP \(bu 2
+after reading its input, drops root privileges to uid and gid 65534, sets
+no_new_privs, and enforces a Landlock domain that denies all file access,
+execution, TCP and UDP, abstract UNIX sockets and signals (as far as the
+kernel's Landlock ABI supports them). Parsing, analysis and output run in this
+sandbox. Landlock needs Linux 5.13 or later with landlock in the lsm= boot
+parameter; binaries built with cgo need Linux 7.0 (Landlock ABI 8);
+.IP \(bu 2
+shows control characters, bidirectional overrides and invalid UTF\-8 in
+input text as visible placeholders (\fB^[\fR, \fB<U+202E>\fR,
+\fB<0xFF>\fR);
+.IP \(bu 2
+quotes every value from the ruleset in recommended commands, so that copying
+a command into a shell cannot run a command hidden in a rule comment.
 .SH SEE ALSO
 .BR iptables (8),
 .BR ip6tables (8),

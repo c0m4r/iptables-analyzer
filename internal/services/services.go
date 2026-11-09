@@ -5,74 +5,86 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/c0m4r/iptables-analyzer/internal/models"
+	"github.com/c0m4r/iptables-analyzer/internal/safeio"
+	"github.com/c0m4r/iptables-analyzer/internal/textsafe"
 )
 
-// GetListening returns all listening services from ss output
+// Capture is the unparsed ss output collected on the live system.
+type Capture struct {
+	Outputs []Output
+	Err     error // failed listener discovery
+}
+
+// Output is the ss output listing the listeners of one protocol.
+type Output struct {
+	Proto string
+	Data  string
+}
+
+// GetListening collects and parses the listening services of the system.
 func GetListening() ([]models.ListeningService, error) {
-	var services []models.ListeningService
+	return Collect().Parse()
+}
+
+// Collect runs ss for TCP and UDP listeners without parsing its output.
+func Collect() Capture {
+	var capture Capture
 	var errs []error
-
-	// Get TCP listeners
-	tcpSvcs, err := getListeners("tcp")
-	if err != nil {
-		errs = append(errs, fmt.Errorf("TCP listener discovery: %w", err))
+	for _, proto := range []string{"tcp", "udp"} {
+		data, err := runSS(proto)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s listener discovery: %w", strings.ToUpper(proto), err))
+			continue
+		}
+		capture.Outputs = append(capture.Outputs, Output{Proto: proto, Data: data})
 	}
-	services = append(services, tcpSvcs...)
+	capture.Err = errors.Join(errs...)
+	return capture
+}
 
-	// Get UDP listeners
-	udpSvcs, err := getListeners("udp")
-	if err != nil {
-		errs = append(errs, fmt.Errorf("UDP listener discovery: %w", err))
+// Parse parses the captured output. It is safe to call in the sandbox.
+// The error includes the collection failures.
+func (c Capture) Parse() ([]models.ListeningService, error) {
+	var services []models.ListeningService
+	errs := []error{c.Err}
+	for _, output := range c.Outputs {
+		svcs, err := parseSSData(output.Data, output.Proto)
+		services = append(services, svcs...)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s listener discovery: %w", strings.ToUpper(output.Proto), err))
+		}
 	}
-	services = append(services, udpSvcs...)
-
 	return services, errors.Join(errs...)
 }
 
-func getListeners(proto string) ([]models.ListeningService, error) {
-	flag := "-tlnp"
+func runSS(proto string) (string, error) {
+	flag, fallback := "-tlnp", "-tln"
 	if proto == "udp" {
-		flag = "-ulnp"
+		flag, fallback = "-ulnp", "-uln"
 	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "ss", flag).Output()
+	out, err := safeio.Run(ctx, "ss", []string{flag}, safeio.MaxServicesSize)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("ss %s timed out: %w", flag, ctx.Err())
+			return "", err
 		}
 		// Try without -p (no root)
-		if proto == "tcp" {
-			flag = "-tln"
-		} else {
-			flag = "-uln"
-		}
-		out, err = exec.CommandContext(ctx, "ss", flag).Output()
+		out, err = safeio.Run(ctx, "ss", []string{fallback}, safeio.MaxServicesSize)
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil, fmt.Errorf("ss %s timed out: %w", flag, ctx.Err())
-			}
-			return nil, err
+			return "", err
 		}
 	}
-
-	return parseSSOutput(string(out), proto)
+	return string(out), nil
 }
 
 var processRe = regexp.MustCompile(`users:\(\("([^"]*)",pid=(\d+)`)
-
-func parseSSOutput(output string, proto string) ([]models.ListeningService, error) {
-	return parseSSData(output, proto)
-}
 
 func parseAddress(addr string) (string, int) {
 	// Handle formats:
@@ -118,11 +130,20 @@ func parseAddress(addr string) (string, int) {
 // ParseSSFile parses ss output saved to a file for offline analysis.
 // The file should contain output from: ss -tlnp && ss -ulnp
 func ParseSSFile(path string) ([]models.ListeningService, error) {
-	data, err := os.ReadFile(path)
+	data, err := ReadSSFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("reading services file %s: %w", path, err)
+		return nil, err
 	}
-	return ParseSSData(string(data))
+	return ParseSSData(data)
+}
+
+// ReadSSFile reads saved ss output without parsing it.
+func ReadSSFile(path string) (string, error) {
+	data, err := safeio.ReadFile(path, safeio.MaxServicesSize)
+	if err != nil {
+		return "", fmt.Errorf("reading services file %s: %w", path, err)
+	}
+	return string(data), nil
 }
 
 // ParseSSData parses combined ss output provided as a string.
@@ -141,7 +162,9 @@ func parseSSData(data, forcedProto string) ([]models.ListeningService, error) {
 	lineNum := 0
 	for scanner.Scan() {
 		lineNum++
-		line := scanner.Text()
+		// Process names are chosen by any local user; keep their control
+		// characters away from the terminal.
+		line := textsafe.Escape(scanner.Text())
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
 			continue

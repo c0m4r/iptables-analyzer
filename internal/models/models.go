@@ -248,6 +248,18 @@ type AnalysisResult struct {
 	Recommendations   []Recommendation
 	Baseline          Baseline
 	Score             ScoreResult
+	Sandbox           *SandboxStatus `json:",omitempty"`
+}
+
+// SandboxStatus records the confinement in effect while the collected input
+// was parsed, analyzed and rendered.
+type SandboxStatus struct {
+	Mode              string   // auto, strict or off
+	LandlockABI       int      // highest Landlock ABI of the kernel, 0 without Landlock
+	Landlock          bool     // a Landlock domain confines every thread
+	Restricted        []string // what the domain denies, e.g. filesystem, tcp, signals
+	PrivilegesDropped bool     // root privileges were dropped before parsing
+	Notes             []string // why a part of the sandbox is missing
 }
 
 // ShadowFinding represents a rule shadowed by an earlier rule

@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"fmt"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -48,6 +49,63 @@ type evalContext struct {
 	localAddrs     []netip.Addr
 	localKnown     bool
 	indexes        map[*models.Chain]*chainIndex
+	budget         *walkBudget
+}
+
+// maxChainVisits bounds the chain traversals of one evaluation context (one
+// analysis of one ruleset). Every jump evaluates its target chain again, so
+// chains that each jump to the next one twice grow exponentially with depth:
+// a crafted 50-line ruleset would otherwise run for days. A real Docker 29
+// host with several networks needs about 200 traversals; the bound leaves
+// room for hosts with thousands of published ports and Kubernetes chains.
+// Beyond it, traversals return the conservative answer used for loops.
+// It is a variable only so that tests can lower it.
+var maxChainVisits = 1 << 18
+
+// walkBudget counts the chain traversals that remain.
+type walkBudget struct {
+	remaining int
+	exhausted bool
+}
+
+func (b *walkBudget) spend() bool {
+	if b.remaining <= 0 {
+		b.exhausted = true
+		return false
+	}
+	b.remaining--
+	return true
+}
+
+// chainWalk is the state of one traversal: the chains on the current call
+// path (to detect loops) and the budget shared with the evaluation context.
+type chainWalk struct {
+	path   map[string]bool
+	budget *walkBudget
+}
+
+func newChainWalk(query packetQuery) *chainWalk {
+	walk := &chainWalk{path: map[string]bool{}}
+	if query.Ctx == nil {
+		walk.budget = &walkBudget{remaining: maxChainVisits}
+		return walk
+	}
+	if query.Ctx.budget == nil {
+		query.Ctx.budget = &walkBudget{remaining: maxChainVisits}
+	}
+	walk.budget = query.Ctx.budget
+	return walk
+}
+
+// limitReached reports whether evaluations in ctx were cut short.
+func (ctx *evalContext) limitReached() bool {
+	return ctx != nil && ctx.budget != nil && ctx.budget.exhausted
+}
+
+// evaluationLimitDiagnostic explains conservative results of a ruleset.
+func evaluationLimitDiagnostic(rs *models.Ruleset, area string) models.AssessmentDiagnostic {
+	return models.AssessmentDiagnostic{Area: area, Message: fmt.Sprintf(
+		"IPv%d rule chains jump into each other too often to evaluate exactly (more than %d chain traversals); affected results are reported as possible", rs.IPVersion, maxChainVisits)}
 }
 
 // chainIndex lists, per destination port, the rules of a chain that can match
@@ -224,7 +282,7 @@ func evaluatePath(rs *models.Ruleset, stages []pathStage, sources []netip.Prefix
 		query := stage.Query
 		query.Chain = stage.Chain
 		query.Hook = stage.Chain
-		evaluation := evaluateChain(table, stage.Chain, remaining, query, map[string]bool{}, false)
+		evaluation := evaluateChain(table, stage.Chain, remaining, query, newChainWalk(query), false)
 		result.Uncertain = result.Uncertain || evaluation.Uncertain
 		result.Dropped = append(result.Dropped, evaluation.Dropped...)
 		// Built-in chains always end in a policy; anything returned from an
@@ -301,19 +359,19 @@ func forwardPath(query packetQuery) []pathStage {
 	}
 }
 
-func evaluateChain(table *models.Table, chainName string, input []netip.Prefix, query packetQuery, path map[string]bool, possible bool) chainEvaluation {
+func evaluateChain(table *models.Table, chainName string, input []netip.Prefix, query packetQuery, walk *chainWalk, possible bool) chainEvaluation {
 	chain, ok := table.Chains[chainName]
 	if !ok {
 		return chainEvaluation{Returned: input}
 	}
-	if path[chainName] {
+	if walk.path[chainName] || !walk.budget.spend() {
 		// Kernel rule insertion normally prevents loops. If one is nevertheless
-		// present in saved input, keep both outcomes possible instead of claiming
-		// that traffic is filtered.
+		// present in saved input, or the ruleset is too complex to finish, keep
+		// both outcomes possible instead of claiming that traffic is filtered.
 		return chainEvaluation{Accepted: possibleSegments(input, nil), Returned: input, Uncertain: true}
 	}
-	path[chainName] = true
-	defer delete(path, chainName)
+	walk.path[chainName] = true
+	defer delete(walk.path, chainName)
 
 	remaining := normalizePrefixes(input)
 	var result chainEvaluation
@@ -366,7 +424,7 @@ func evaluateChain(table *models.Table, chainName string, input []netip.Prefix, 
 			if _, isChain := table.Chains[rule.Target]; isChain {
 				childQuery := query
 				childQuery.Chain = rule.Target
-				child := evaluateChain(table, rule.Target, matched, childQuery, path, branchPossible)
+				child := evaluateChain(table, rule.Target, matched, childQuery, walk, branchPossible)
 				result.Accepted = append(result.Accepted, child.Accepted...)
 				result.Dropped = append(result.Dropped, child.Dropped...)
 				result.Uncertain = result.Uncertain || child.Uncertain

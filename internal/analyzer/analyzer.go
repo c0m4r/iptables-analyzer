@@ -32,6 +32,7 @@ func AnalyzeHost(ipv4, ipv6 *models.Ruleset, host *models.HostContext) *models.A
 		docker := AnalyzeDocker(rs, host)
 		result.DockerBypasses = append(result.DockerBypasses, docker.Findings...)
 		result.PublishedPorts = append(result.PublishedPorts, docker.PublishedPorts...)
+		result.Diagnostics = append(result.Diagnostics, docker.Diagnostics...)
 		result.Diagnostics = append(result.Diagnostics, DockerAssessmentDiagnostics(rs)...)
 	}
 	result.DockerBypasses = append(result.DockerBypasses, DockerIPv6Gaps(ipv4, ipv6)...)
@@ -126,6 +127,11 @@ func CrossReferenceServices(result *models.AnalysisResult, services []models.Lis
 			result.Services[i].Status = models.ServiceReachable
 		default:
 			result.Services[i].Status = models.ServiceFiltered
+		}
+	}
+	for _, rs := range []*models.Ruleset{result.IPv4Rules, result.IPv6Rules} {
+		if evaluator := evaluators[rs]; evaluator != nil && evaluator.ctx.limitReached() {
+			result.Diagnostics = append(result.Diagnostics, evaluationLimitDiagnostic(rs, "services"))
 		}
 	}
 

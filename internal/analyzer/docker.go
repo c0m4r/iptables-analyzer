@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/c0m4r/iptables-analyzer/internal/models"
+	"github.com/c0m4r/iptables-analyzer/internal/parser"
 )
 
 // DockerAnalysis is the result of analyzing Docker's packet paths for one
@@ -15,6 +16,7 @@ import (
 type DockerAnalysis struct {
 	Findings       []models.DockerBypassFinding
 	PublishedPorts []models.PublishedPort
+	Diagnostics    []models.AssessmentDiagnostic
 }
 
 // DetectDockerBypasses finds published ports that bypass filter/INPUT and are
@@ -51,6 +53,9 @@ func AnalyzeDocker(rs *models.Ruleset, host *models.HostContext) DockerAnalysis 
 	analysis.Findings = append(analysis.Findings, d.flushRuleFindings()...)
 	analysis.Findings = append(analysis.Findings, d.directFindings...)
 	analysis.Findings = append(analysis.Findings, d.fragileFindings...)
+	if ctx.limitReached() {
+		analysis.Diagnostics = append(analysis.Diagnostics, evaluationLimitDiagnostic(rs, "docker"))
+	}
 	return analysis
 }
 
@@ -668,6 +673,18 @@ func RuleSpec(rule *models.Rule) string {
 	return raw
 }
 
+// RuleArgs returns a rule's match and target specification as the argument
+// list iptables receives, without the quoting of iptables-save. Commands
+// built from it must quote each argument (textsafe.ShellJoin): comments and
+// names in a ruleset can contain shell syntax.
+func RuleArgs(rule *models.Rule) []string {
+	args, err := parser.Tokenize(RuleSpec(rule))
+	if err != nil {
+		return nil
+	}
+	return args
+}
+
 func containsString(values []string, wanted string) bool {
 	for _, value := range values {
 		if value == wanted {
@@ -995,17 +1012,21 @@ func sourcesReachingDNAT(rs *models.Ruleset, table *models.Table, target models.
 	if sources == nil {
 		sources = []netip.Prefix{rootPrefix(rs.IPVersion)}
 	}
-	result := walkNATChain(table, "PREROUTING", sources, target, query, map[string]bool{})
+	result := walkNATChain(table, "PREROUTING", sources, target, query, newChainWalk(query))
 	return normalizePrefixes(result.Reached), result.Uncertain
 }
 
-func walkNATChain(table *models.Table, chainName string, input []netip.Prefix, target models.Rule, query packetQuery, path map[string]bool) natWalkResult {
+func walkNATChain(table *models.Table, chainName string, input []netip.Prefix, target models.Rule, query packetQuery, walk *chainWalk) natWalkResult {
 	chain := table.Chains[chainName]
-	if chain == nil || path[chainName] {
+	if chain == nil || walk.path[chainName] {
 		return natWalkResult{}
 	}
-	path[chainName] = true
-	defer delete(path, chainName)
+	if !walk.budget.spend() {
+		// Too complex to finish: the DNAT rule may be reached from any source.
+		return natWalkResult{Reached: input, Returned: input, Uncertain: true}
+	}
+	walk.path[chainName] = true
+	defer delete(walk.path, chainName)
 
 	remaining := normalizePrefixes(input)
 	var result natWalkResult
@@ -1033,7 +1054,7 @@ func walkNATChain(table *models.Table, chainName string, input []netip.Prefix, t
 			continue
 		}
 		if _, isChain := table.Chains[rule.Target]; isChain {
-			child := walkNATChain(table, rule.Target, matched, target, query, path)
+			child := walkNATChain(table, rule.Target, matched, target, query, walk)
 			result.Reached = append(result.Reached, child.Reached...)
 			result.Uncertain = result.Uncertain || child.Uncertain
 			if !rule.Goto {

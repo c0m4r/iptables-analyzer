@@ -4,32 +4,121 @@ on:
   push:
   pull_request:
 
-permissions:
-  contents: read
+# Jobs request the permissions they need; the default token can do nothing.
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Use exactly the Go version from go.mod (installed by setup-go), never a
+  # toolchain downloaded on the fly, and fetch modules only through the
+  # checksum-verified proxy, without direct VCS access.
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+  GOPROXY: https://proxy.golang.org
+  GOSUMDB: sum.golang.org
+  GOPRIVATE: ""
+  GONOSUMDB: ""
+  GONOPROXY: ""
+  GOINSECURE: ""
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: Test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # No cache: a poisoned module or build cache could bypass go.sum.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
       - name: Formatting
         run: test -z "$(gofmt -l .)"
+      - name: No hidden Unicode controls (Trojan Source)
+        env:
+          LC_ALL: C.UTF-8 # \x{...} above 0xFF needs PCRE's UTF mode
+        run: |
+          status=0
+          git grep -nIP '[\x{200B}-\x{200F}\x{202A}-\x{202E}\x{2066}-\x{2069}\x{2028}\x{2029}\x{FEFF}\x{1B}]' || status=$?
+          case "$status" in
+            0) echo "::error::bidirectional, zero-width or escape characters found in the sources above"; exit 1 ;;
+            1) echo "No hidden Unicode controls found." ;;
+            *) echo "::error::git grep failed with status $status"; exit 1 ;;
+          esac
       - name: Shell syntax
-        run: bash -n examples/save-rules.sh addons/build.sh addons/update-deps.sh addons/bash-completion/iptables-analyzer
+        run: bash -n examples/save-rules.sh addons/*.sh addons/bash-completion/iptables-analyzer
       - name: ShellCheck
-        run: shellcheck -s bash examples/save-rules.sh addons/build.sh addons/update-deps.sh addons/bash-completion/iptables-analyzer
+        run: shellcheck -x -s bash examples/save-rules.sh addons/*.sh addons/bash-completion/iptables-analyzer
       - name: Verify modules
-        run: go mod verify
+        run: |
+          go mod verify
+          go mod tidy -diff
+      - name: Dependency cooldown
+        run: ./addons/check-deps-cooldown.sh
       - name: Vet
-        run: go vet -mod=readonly ./...
-      - name: Tests
-        run: go test -mod=readonly -race -cover ./...
+        run: go vet ./...
+      - name: Tests (race detector)
+        run: go test -race -cover ./...
+      # Without cgo the Landlock sandbox can confine every thread on kernels
+      # before ABI 8, so its enforcement tests run instead of being skipped.
+      - name: Tests (static build, sandbox enforcement)
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 -v -run 'Sandbox|Enforce' ./internal/sandbox ./cmd
+      - name: Fuzz smoke test
+        run: |
+          go test -run '^$' -fuzz '^FuzzParse$' -fuzztime 20s ./internal/parser
+          go test -run '^$' -fuzz '^FuzzParseSSData$' -fuzztime 20s ./internal/services
+          go test -run '^$' -fuzz '^FuzzAnalysis$' -fuzztime 40s ./cmd
+          go test -run '^$' -fuzz '^FuzzShellQuote$' -fuzztime 10s ./internal/textsafe
+          go test -run '^$' -fuzz '^FuzzEscape$' -fuzztime 10s ./internal/textsafe
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
       - name: Vulnerability scan
-        uses: golang/govulncheck-action@v1.1.0
+        run: "$(go env GOPATH)/bin/govulncheck ./..."
+      - name: Reproducible build
+        run: |
+          build() { CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags='-s -w' -o "$1" .; }
+          build "$RUNNER_TEMP/a"
+          go clean -cache
+          build "$RUNNER_TEMP/b"
+          cmp "$RUNNER_TEMP/a" "$RUNNER_TEMP/b"
+          sha256sum "$RUNNER_TEMP/a"
+
+  workflows:
+    name: Workflow security (zizmor)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version-file: go.mod
-          repo-checkout: false
+          persist-credentials: false
+      # The action installs a hash-pinned zizmor wheel.
+      - uses: zizmorcore/zizmor-action@53290badfa369cb0bf7ad16342cb62c2fa47ac7b # v0.8.0
+        with:
+          version: 1.31.1
+          persona: regular
+          advanced-security: false
+          annotations: true
+
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: low

@@ -32,6 +32,18 @@ type RenderOptions struct {
 	Writer   io.Writer
 }
 
+// Prepare detects the terminal's color profile and background while the
+// process can still use the terminal freely. Rendering may then run in the
+// sandbox, where new terminal queries and file access are not available.
+func Prepare(opts RenderOptions) {
+	if opts.JSON {
+		return
+	}
+	renderer := lipgloss.DefaultRenderer()
+	renderer.ColorProfile()
+	renderer.HasDarkBackground()
+}
+
 // Render outputs the full analysis to stdout
 func Render(result *models.AnalysisResult, opts RenderOptions) error {
 	w := opts.Writer
@@ -216,10 +228,30 @@ func renderOverview(w io.Writer, result *models.AnalysisResult) {
 		}
 		fmt.Fprintf(w, "  Interfaces:      %s\n", styleMuted.Render(strings.Join(names, " ")))
 	}
+	if result.Sandbox != nil {
+		fmt.Fprintf(w, "  Sandbox:         %s\n", sandboxSummary(result.Sandbox))
+	}
 	for _, diagnostic := range result.Diagnostics {
 		fmt.Fprintf(w, "  Assessment note (%s): %s\n", diagnostic.Area, styleWarning.Render(diagnostic.Message))
 	}
 	fmt.Fprintln(w)
+}
+
+func sandboxSummary(status *models.SandboxStatus) string {
+	if status.Mode == "off" {
+		return styleWarning.Render("off")
+	}
+	var parts []string
+	if status.Landlock {
+		parts = append(parts, styleSuccess.Render(fmt.Sprintf("Landlock ABI %d", status.LandlockABI))+
+			styleMuted.Render(" ("+strings.Join(status.Restricted, ", ")+")"))
+	} else {
+		parts = append(parts, styleWarning.Render("Landlock unavailable"))
+	}
+	if status.PrivilegesDropped {
+		parts = append(parts, styleMuted.Render("root dropped"))
+	}
+	return strings.Join(parts, styleFaint.Render(" · "))
 }
 
 func renderRulesetOverview(w io.Writer, rs *models.Ruleset, label string) {

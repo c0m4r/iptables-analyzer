@@ -1,0 +1,76 @@
+name: Release
+
+# Pushing a version tag (for example 0.7.0) builds the binaries in CI,
+# signs a SLSA build provenance attestation for each of them, and creates a
+# draft release for review. Verify a downloaded binary with:
+#   gh attestation verify iptables-analyzer-<version>-amd64 --repo c0m4r/iptables-analyzer
+on:
+  push:
+    tags: ["[0-9]+.[0-9]+.[0-9]+"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+  GOPROXY: https://proxy.golang.org
+  GOSUMDB: sum.golang.org
+  GOPRIVATE: ""
+  GONOSUMDB: ""
+  GONOPROXY: ""
+  GOINSECURE: ""
+
+jobs:
+  release:
+    name: Build, attest and draft the release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write # create the draft release
+      id-token: write # sign the attestation with a Sigstore certificate
+      attestations: write # store the attestation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Tag matches VERSION
+        env:
+          TAG: ${{ github.ref_name }}
+        run: test "$(cat VERSION)" = "$TAG"
+      - name: Verify modules and dependency cooldown
+        run: |
+          go mod verify
+          go mod tidy -diff
+          ./addons/check-deps-cooldown.sh
+      - name: Test
+        run: |
+          go vet ./...
+          go test -race ./...
+          CGO_ENABLED=0 go test -count=1 ./internal/sandbox ./cmd
+      - name: Build
+        run: |
+          ./addons/build.sh
+          cd dist
+          sha256sum iptables-analyzer-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/iptables-analyzer-*
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --draft --verify-tag --title "$TAG" \
+            --notes "Built by GitHub Actions with build provenance attestations. See CHANGELOG.md." \
+            dist/iptables-analyzer-* dist/SHA256SUMS

@@ -1,14 +1,20 @@
 package recommender
 
 import (
-	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/c0m4r/iptables-analyzer/internal/analyzer"
 	"github.com/c0m4r/iptables-analyzer/internal/models"
+	"github.com/c0m4r/iptables-analyzer/internal/textsafe"
 )
+
+// Commands in recommendations are meant to be copied into a root shell.
+// Every value taken from the analyzed ruleset (rule arguments, chain,
+// interface and address names) is quoted with textsafe.ShellQuote, so a
+// comment such as "$(curl ...)" stays an argument instead of running.
 
 // Generate produces security recommendations based on analysis results
 func Generate(result *models.AnalysisResult) []models.Recommendation {
@@ -120,10 +126,11 @@ func publishedPortRecommendation(finding models.DockerBypassFinding) *models.Rec
 	}
 	command := firewallCommand(finding.IPVersion)
 	portSpec := strings.ReplaceAll(finding.ExposedPort, "-", ":")
-	match := "-p " + protocol + " -m conntrack --ctorigdstport " + portSpec + " --ctdir ORIGINAL"
+	args := []string{"-p", protocol, "-m", "conntrack"}
 	if addr := finding.NATRule.DstAddr; addr != "" && !finding.NATRule.Negations["dst"] {
-		match = "-p " + protocol + " -m conntrack --ctorigdst " + addr + " --ctorigdstport " + portSpec + " --ctdir ORIGINAL"
+		args = append(args, "--ctorigdst", addr)
 	}
+	match := textsafe.ShellJoin(append(args, "--ctorigdstport", portSpec, "--ctdir", "ORIGINAL"))
 	var detail strings.Builder
 	if finding.Code == models.FindingDockerBypass && finding.InputRule.RuleNum > 0 {
 		detail.WriteString(finding.InputRule.Table + "/" + finding.InputRule.Chain + " rule #" +
@@ -144,34 +151,35 @@ func publishedPortRecommendation(finding models.DockerBypassFinding) *models.Rec
 	}
 }
 
-var dportToken = regexp.MustCompile(`(?:-m (?:tcp|udp) )?--dport ([0-9:]+)`)
-
 func ineffectiveRuleRecommendation(finding models.DockerBypassFinding) *models.Recommendation {
 	rule := finding.Rule
 	if rule == nil {
 		return nil
 	}
 	command := firewallCommand(finding.IPVersion)
-	spec := analyzer.RuleSpec(rule)
+	args := analyzer.RuleArgs(rule)
 	location := rule.Table + "/" + rule.Chain + " rule #" + strconv.Itoa(rule.RuleNum)
 	detail := finding.Fix
-	if finding.Code == models.FindingDockerIneffectiveRule {
-		replacement := spec
+	switch {
+	case len(args) == 0:
+		// Without the rule's arguments no command can be built safely.
+	case finding.Code == models.FindingDockerIneffectiveRule:
+		replacement := args
 		if !rule.Negations["dport"] {
-			replacement = dportToken.ReplaceAllString(replacement, "-m conntrack --ctorigdstport $1 --ctdir ORIGINAL")
+			replacement = dportToOrigDstPort(replacement)
 		}
 		if rule.DstAddr != "" && !rule.Negations["dst"] {
-			replacement = strings.Replace(replacement, "-d "+rule.DstAddr+" ", "", 1)
-			replacement = strings.Replace(replacement, "-j ", "-m conntrack --ctorigdst "+rule.DstAddr+" --ctdir ORIGINAL -j ", 1)
+			replacement = dstToOrigDst(replacement, rule.DstAddr)
 		}
-		if replacement != spec && rule.Table == "filter" && rule.Chain == "DOCKER-USER" {
-			detail += "\n  Replace it: " + command + " -R DOCKER-USER " + strconv.Itoa(rule.RuleNum) + " " + replacement
-		} else if replacement != spec {
-			detail += "\n  Equivalent DOCKER-USER rule: " + command + " -I DOCKER-USER 1 " + replacement
+		changed := !slices.Equal(replacement, args)
+		if changed && rule.Table == "filter" && rule.Chain == "DOCKER-USER" {
+			detail += "\n  Replace it: " + command + " -R DOCKER-USER " + strconv.Itoa(rule.RuleNum) + " " + textsafe.ShellJoin(replacement)
+		} else if changed {
+			detail += "\n  Equivalent DOCKER-USER rule: " + command + " -I DOCKER-USER 1 " + textsafe.ShellJoin(replacement)
 		}
-	} else if rule.Table == "filter" {
-		detail += "\n  " + command + " -I DOCKER-USER 1 " + spec +
-			"\n  " + command + " -D " + rule.Chain + " " + strconv.Itoa(rule.RuleNum)
+	case rule.Table == "filter":
+		detail += "\n  " + command + " -I DOCKER-USER 1 " + textsafe.ShellJoin(args) +
+			"\n  " + command + " -D " + textsafe.ShellQuote(rule.Chain) + " " + strconv.Itoa(rule.RuleNum)
 	}
 	return &models.Recommendation{
 		Title:    "Fix ineffective " + stackLabel(finding.IPVersion) + " " + location,
@@ -183,25 +191,26 @@ func ineffectiveRuleRecommendation(finding models.DockerBypassFinding) *models.R
 
 func directRouteRecommendation(result *models.AnalysisResult, finding models.DockerBypassFinding) *models.Recommendation {
 	command := firewallCommand(finding.IPVersion)
-	bridge := finding.Bridge
-	if bridge == "" {
-		bridge = "<bridge>"
+	bridge := "<bridge>"
+	if finding.Bridge != "" {
+		bridge = textsafe.ShellQuote(finding.Bridge)
 	}
 	addr := finding.ContainerDest
 	if i := strings.LastIndex(addr, ":"); i > 0 {
 		addr = strings.Trim(addr[:i], "[]")
 	}
 	target := addr
-	if subnet := bridgeSubnet(result, finding.IPVersion, bridge); subnet != "" {
+	if subnet := bridgeSubnet(result, finding.IPVersion, finding.Bridge); subnet != "" {
 		target = subnet
 	}
+	addr, target = textsafe.ShellQuote(addr), textsafe.ShellQuote(target)
 	detail := finding.Fix + "\n" +
 		"  Drop packets addressed to the containers that do not arrive from their bridge (published ports are unaffected):\n" +
 		"  " + command + " -t raw -I PREROUTING -d " + target + " ! -i " + bridge + " -j DROP\n" +
 		"  Or refuse new connections into the bridge that were not DNATed by a published port:\n" +
 		"  " + command + " -I DOCKER-USER -o " + bridge + " ! -i " + bridge + " -m conntrack --ctstate NEW -m conntrack ! --ctstate DNAT -j DROP"
 	if finding.GatewayMode == "routed" {
-		port := finding.ExposedPort
+		port := textsafe.ShellQuote(finding.ExposedPort)
 		detail = finding.Fix + "\n" +
 			"  " + command + " -I DOCKER-USER -o " + bridge + " -d " + addr + " -p tcp --dport " + port + " ! -s <trusted-cidr> -j DROP"
 	}
@@ -219,7 +228,7 @@ func bridgeSubnet(result *models.AnalysisResult, version models.IPVersion, bridg
 	if version == models.IPv6 {
 		rs = result.IPv6Rules
 	}
-	if rs == nil || rs.Tables["nat"] == nil || rs.Tables["nat"].Chains["POSTROUTING"] == nil {
+	if bridge == "" || rs == nil || rs.Tables["nat"] == nil || rs.Tables["nat"].Chains["POSTROUTING"] == nil {
 		return ""
 	}
 	for _, rule := range rs.Tables["nat"].Chains["POSTROUTING"].Rules {
@@ -236,11 +245,15 @@ func fragileRuleRecommendation(finding models.DockerBypassFinding) *models.Recom
 		return nil
 	}
 	command := firewallCommand(finding.IPVersion)
+	detail := finding.Fix
+	if args := analyzer.RuleArgs(rule); len(args) > 0 {
+		detail += "\n" +
+			"  " + command + " -I DOCKER-USER 1 " + textsafe.ShellJoin(args) + "\n" +
+			"  " + command + " -D FORWARD " + strconv.Itoa(rule.RuleNum)
+	}
 	return &models.Recommendation{
-		Title: "Move " + stackLabel(finding.IPVersion) + " filter/FORWARD rule #" + strconv.Itoa(rule.RuleNum) + " into DOCKER-USER",
-		Detail: finding.Fix + "\n" +
-			"  " + command + " -I DOCKER-USER 1 " + analyzer.RuleSpec(rule) + "\n" +
-			"  " + command + " -D FORWARD " + strconv.Itoa(rule.RuleNum),
+		Title:    "Move " + stackLabel(finding.IPVersion) + " filter/FORWARD rule #" + strconv.Itoa(rule.RuleNum) + " into DOCKER-USER",
+		Detail:   detail,
 		Severity: finding.Severity,
 		Category: "docker",
 	}
@@ -268,8 +281,8 @@ func exposureRecommendations(result *models.AnalysisResult) []models.Recommendat
 		} else {
 			detail += "Add a source-restricted allow rule, then ensure unmatched traffic is dropped by policy or a final rule.\n"
 		}
-		detail += "  Example allow: " + command + " -I " + chain + " -p " + string(svc.Protocol) + " --dport " +
-			strconv.Itoa(svc.Port) + " -s <trusted-network> -j ACCEPT"
+		detail += "  Example allow: " + command + " -I " + textsafe.ShellQuote(chain) + " -p " + textsafe.ShellQuote(string(svc.Protocol)) +
+			" --dport " + strconv.Itoa(svc.Port) + " -s <trusted-network> -j ACCEPT"
 		recs = append(recs, models.Recommendation{
 			Title:    "Restrict " + stackLabel(exposed.IPVersion) + " access to " + svc.Process + " on port " + strconv.Itoa(svc.Port) + "/" + string(svc.Protocol),
 			Detail:   detail,
@@ -428,16 +441,66 @@ func sshRateLimitCommand(rs *models.Ruleset, rule *models.Rule) (string, bool) {
 	if !strings.HasPrefix(raw, prefix) {
 		return "", false
 	}
-	body := strings.TrimPrefix(raw, prefix)
-	targetAt := strings.LastIndex(body, " -j ACCEPT")
-	if targetAt < 0 {
-		targetAt = strings.LastIndex(body, " --jump ACCEPT")
+	args := analyzer.RuleArgs(rule)
+	targetAt := -1
+	for i := 1; i+1 < len(args); i++ {
+		if (args[i] == "-j" || args[i] == "--jump") && args[i+1] == "ACCEPT" {
+			targetAt = i
+		}
 	}
 	if targetAt < 0 {
 		return "", false
 	}
-	body = body[:targetAt] + " -m limit --limit 3/min --limit-burst 5" + body[targetAt:]
-	return firewallCommand(rule.IPVersion) + " -R " + rule.Chain + " " + strconv.Itoa(rule.RuleNum) + " " + body, true
+	limited := slices.Concat(args[:targetAt], []string{"-m", "limit", "--limit", "3/min", "--limit-burst", "5"}, args[targetAt:])
+	return firewallCommand(rule.IPVersion) + " -R " + textsafe.ShellQuote(rule.Chain) + " " + strconv.Itoa(rule.RuleNum) + " " +
+		textsafe.ShellJoin(limited), true
+}
+
+// dportToOrigDstPort replaces "[-m tcp|udp] --dport N", which never matches
+// in DOCKER-USER after DNAT, with a match on the original destination port.
+func dportToOrigDstPort(args []string) []string {
+	var result []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--dport" && i+1 < len(args) && isPortSpec(args[i+1]) {
+			if n := len(result); n >= 2 && result[n-2] == "-m" && (result[n-1] == "tcp" || result[n-1] == "udp") {
+				result = result[:n-2]
+			}
+			result = append(result, "-m", "conntrack", "--ctorigdstport", args[i+1], "--ctdir", "ORIGINAL")
+			i++
+			continue
+		}
+		result = append(result, args[i])
+	}
+	return result
+}
+
+// dstToOrigDst moves "-d addr" to a match on the original destination.
+func dstToOrigDst(args []string, addr string) []string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] != "-d" || args[i+1] != addr || (i > 0 && args[i-1] == "!") {
+			continue
+		}
+		result := slices.Concat(args[:i], args[i+2:])
+		for j, arg := range result {
+			if arg == "-j" || arg == "--jump" {
+				return slices.Concat(result[:j], []string{"-m", "conntrack", "--ctorigdst", addr, "--ctdir", "ORIGINAL"}, result[j:])
+			}
+		}
+		return args
+	}
+	return args
+}
+
+func isPortSpec(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, c := range value {
+		if (c < '0' || c > '9') && c != ':' {
+			return false
+		}
+	}
+	return true
 }
 
 func overLimitTrafficIsBlocked(rs *models.Ruleset, candidate *models.Rule) bool {

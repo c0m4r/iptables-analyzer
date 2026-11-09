@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/c0m4r/iptables-analyzer/internal/models"
+	"github.com/c0m4r/iptables-analyzer/internal/textsafe"
 )
 
 // Parse parses iptables-save format output into a Ruleset
@@ -25,7 +26,9 @@ func Parse(data string, ipVersion models.IPVersion) (*models.Ruleset, error) {
 
 	for scanner.Scan() {
 		lineNum++
-		line := strings.TrimSpace(scanner.Text())
+		// Control characters in comments or names would reach the terminal
+		// and copied commands; escaping keeps the tokenization unchanged.
+		line := textsafe.Escape(strings.TrimSpace(scanner.Text()))
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -590,6 +593,12 @@ func isMainFlag(tok string) bool {
 		return true
 	}
 	return false
+}
+
+// Tokenize splits an iptables-save rule specification into arguments,
+// removing the quoting that iptables-save applies.
+func Tokenize(line string) ([]string, error) {
+	return tokenizeChecked(line)
 }
 
 // tokenize splits a rule line into tokens, handling quoted strings

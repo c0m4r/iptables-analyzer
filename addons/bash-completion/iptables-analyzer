@@ -21,6 +21,16 @@ _iptables_analyzer() {
             ;;
     esac
 
+    if [[ "$prev" == --sandbox ]]; then
+        mapfile -t COMPREPLY < <(compgen -W "auto strict off" -- "$cur")
+        return
+    fi
+
+    if [[ "$cur" == --sandbox=* ]]; then
+        mapfile -t COMPREPLY < <(compgen -W "--sandbox=auto --sandbox=strict --sandbox=off" -- "$cur")
+        return
+    fi
+
     if [[ "$cur" == --baseline=* ]]; then
         mapfile -t COMPREPLY < <(compgen -W "--baseline=4 --baseline=6 --baseline=all" -- "$cur")
         return
@@ -38,6 +48,7 @@ _iptables_analyzer() {
             --services-file
             -s --score-only
             --baseline --baseline=4 --baseline=6 --baseline=all
+            --sandbox --sandbox=auto --sandbox=strict --sandbox=off
             -V --version
             -h --help
         "

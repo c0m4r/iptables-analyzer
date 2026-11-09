@@ -11,6 +11,7 @@ import (
 
 	"github.com/c0m4r/iptables-analyzer/internal/models"
 	"github.com/c0m4r/iptables-analyzer/internal/parser"
+	"github.com/c0m4r/iptables-analyzer/internal/sandbox"
 	"github.com/spf13/cobra"
 )
 
@@ -25,7 +26,7 @@ type errorWriter struct{}
 func (errorWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
 
 func TestExplicitServicesFileFailuresAreFatal(t *testing.T) {
-	command := NewRootCommand()
+	command := newRootCommand(testDependencies(false))
 	command.SetOut(&bytes.Buffer{})
 	command.SetErr(&bytes.Buffer{})
 	command.SetArgs([]string{
@@ -38,7 +39,7 @@ func TestExplicitServicesFileFailuresAreFatal(t *testing.T) {
 }
 
 func TestMixedFamilyInventoryMarksExcludedStackNotAnalyzed(t *testing.T) {
-	command := NewRootCommand()
+	command := newRootCommand(testDependencies(false))
 	var output bytes.Buffer
 	command.SetOut(&output)
 	command.SetErr(&bytes.Buffer{})
@@ -59,7 +60,7 @@ func TestMalformedServicesFileIsFatal(t *testing.T) {
 	if err := os.WriteFile(path, []byte("this is not ss output\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	command := NewRootCommand()
+	command := newRootCommand(testDependencies(false))
 	command.SetOut(&bytes.Buffer{})
 	command.SetErr(&bytes.Buffer{})
 	command.SetArgs([]string{"-4", "--file", filepath.Join("..", "testdata", "basic.iptables-save"), "--services-file", path})
@@ -69,7 +70,7 @@ func TestMalformedServicesFileIsFatal(t *testing.T) {
 }
 
 func TestCommandPropagatesOutputFailure(t *testing.T) {
-	command := NewRootCommand()
+	command := newRootCommand(testDependencies(false))
 	command.SetOut(errorWriter{})
 	command.SetErr(&bytes.Buffer{})
 	command.SetArgs([]string{"-4", "--file", filepath.Join("..", "testdata", "basic.iptables-save"), "--json", "--score-only"})
@@ -78,10 +79,19 @@ func TestCommandPropagatesOutputFailure(t *testing.T) {
 	}
 }
 
-func newTestCommand(out *bytes.Buffer, root bool) *cobra.Command {
+// testDependencies collects real input but replaces the sandbox, which
+// cannot be lifted, with one that does not confine the test process.
+func testDependencies(root bool) commandDependencies {
 	deps := defaultCommandDependencies()
 	deps.isRoot = func() bool { return root }
-	command := newRootCommand(deps)
+	deps.sandbox = func(mode sandbox.Mode) (models.SandboxStatus, error) {
+		return models.SandboxStatus{Mode: string(mode)}, nil
+	}
+	return deps
+}
+
+func newTestCommand(out *bytes.Buffer, root bool) *cobra.Command {
+	command := newRootCommand(testDependencies(root))
 	command.SetOut(out)
 	command.SetErr(&bytes.Buffer{})
 	return command

@@ -9,6 +9,7 @@ import (
 	"github.com/c0m4r/iptables-analyzer/internal/loader"
 	"github.com/c0m4r/iptables-analyzer/internal/models"
 	"github.com/c0m4r/iptables-analyzer/internal/recommender"
+	"github.com/c0m4r/iptables-analyzer/internal/sandbox"
 	"github.com/c0m4r/iptables-analyzer/internal/scorer"
 	"github.com/c0m4r/iptables-analyzer/internal/services"
 	"github.com/c0m4r/iptables-analyzer/internal/ui"
@@ -32,23 +33,28 @@ type commandOptions struct {
 	scoreOnly    bool
 	showVersion  bool
 	baseline     string
+	sandbox      string
 }
 
+// commandDependencies collect input from the host and confine the process.
+// Parsing and analysis are not injected: they always run after sandbox.
 type commandDependencies struct {
-	loadRules     func(loader.Config) (*models.Ruleset, *models.Ruleset, error)
-	parseServices func(string) ([]models.ListeningService, error)
-	getServices   func() ([]models.ListeningService, error)
-	getHost       func() (*models.HostContext, error)
-	isRoot        func() bool
+	readRules       func(loader.Config) (loader.Sources, error)
+	readServices    func(string) (string, error)
+	collectServices func() services.Capture
+	getHost         func() (*models.HostContext, error)
+	isRoot          func() bool
+	sandbox         func(sandbox.Mode) (models.SandboxStatus, error)
 }
 
 func defaultCommandDependencies() commandDependencies {
 	return commandDependencies{
-		loadRules:     loader.Load,
-		parseServices: services.ParseSSFile,
-		getServices:   services.GetListening,
-		getHost:       loader.Host,
-		isRoot:        loader.IsRoot,
+		readRules:       loader.Read,
+		readServices:    services.ReadSSFile,
+		collectServices: services.Collect,
+		getHost:         loader.Host,
+		isRoot:          loader.IsRoot,
+		sandbox:         sandbox.Enforce,
 	}
 }
 
@@ -82,6 +88,7 @@ func newRootCommand(deps commandDependencies) *cobra.Command {
 	cmd.Flags().BoolVarP(&opts.showVersion, "version", "V", false, "Print version and exit")
 	cmd.Flags().StringVar(&opts.baseline, "baseline", "", "Print only the recommended baseline firewall: 4, 6 or all (default all)")
 	cmd.Flags().Lookup("baseline").NoOptDefVal = "all"
+	cmd.Flags().StringVar(&opts.sandbox, "sandbox", string(sandbox.Auto), "Confine parsing and analysis with Landlock and a root privilege drop: auto, strict or off")
 	return cmd
 }
 
@@ -118,6 +125,10 @@ func runAnalysis(cmd *cobra.Command, opts *commandOptions, deps commandDependenc
 	default:
 		return fmt.Errorf("--baseline must be 4, 6 or all")
 	}
+	mode, err := sandbox.ParseMode(opts.sandbox)
+	if err != nil {
+		return err
+	}
 
 	hasFiles := opts.ipv4File != "" || opts.ipv6File != ""
 	live := false
@@ -126,6 +137,9 @@ func runAnalysis(cmd *cobra.Command, opts *commandOptions, deps commandDependenc
 			live = true
 		} else if opts.baseline != "" {
 			// Without rules the baseline is still useful; it is just not tailored.
+			if _, err := enforceSandbox(cmd, opts, deps, mode); err != nil {
+				return err
+			}
 			return writeBaseline(cmd, baseline.Generate(baseline.Options{}), opts.baseline)
 		} else {
 			stderr := cmd.ErrOrStderr()
@@ -142,6 +156,8 @@ func runAnalysis(cmd *cobra.Command, opts *commandOptions, deps commandDependenc
 		}
 	}
 
+	// Collect every input first. The sandbox then closes the filesystem and
+	// drops root, and only the collected data is parsed and analyzed.
 	cfg := loader.Config{
 		IPv4File: opts.ipv4File,
 		IPv6File: opts.ipv6File,
@@ -149,7 +165,7 @@ func runAnalysis(cmd *cobra.Command, opts *commandOptions, deps commandDependenc
 		IPv4Only: opts.ipv4Only,
 		IPv6Only: opts.ipv6Only,
 	}
-	ipv4Rules, ipv6Rules, err := deps.loadRules(cfg)
+	sources, err := deps.readRules(cfg)
 	if err != nil {
 		return fmt.Errorf("loading rules: %w", err)
 	}
@@ -161,17 +177,50 @@ func runAnalysis(cmd *cobra.Command, opts *commandOptions, deps commandDependenc
 			host = nil
 		}
 	}
+	var servicesData string
+	var capture services.Capture
+	if opts.servicesFile != "" {
+		if servicesData, err = deps.readServices(opts.servicesFile); err != nil {
+			return fmt.Errorf("loading services file: %w", err)
+		}
+	} else if live {
+		capture = deps.collectServices()
+	}
+
+	renderOpts := ui.RenderOptions{
+		NoColor:  opts.noColor,
+		Verbose:  opts.verbose,
+		JSON:     opts.jsonOutput,
+		LiveMode: live,
+		IPv4Only: opts.ipv4Only,
+		IPv6Only: opts.ipv6Only,
+		Version:  Version,
+		Writer:   cmd.OutOrStdout(),
+	}
+	if opts.baseline == "" {
+		ui.Prepare(renderOpts)
+	}
+	status, err := enforceSandbox(cmd, opts, deps, mode)
+	if err != nil {
+		return err
+	}
+
+	ipv4Rules, ipv6Rules, err := loader.Parse(sources)
+	if err != nil {
+		return fmt.Errorf("loading rules: %w", err)
+	}
 	result := analyzer.AnalyzeHost(ipv4Rules, ipv6Rules, host)
 	result.IPv4Only = opts.ipv4Only
 	result.IPv6Only = opts.ipv6Only
+	result.Sandbox = &status
 	if opts.servicesFile != "" {
-		svcs, err := deps.parseServices(opts.servicesFile)
+		svcs, err := services.ParseSSData(servicesData)
 		if err != nil {
 			return fmt.Errorf("loading services file: %w", err)
 		}
 		analyzer.CrossReferenceServices(result, svcs)
 	} else if live {
-		svcs, err := deps.getServices()
+		svcs, err := capture.Parse()
 		if len(svcs) > 0 {
 			analyzer.CrossReferenceServices(result, svcs)
 		}
@@ -194,16 +243,6 @@ func runAnalysis(cmd *cobra.Command, opts *commandOptions, deps commandDependenc
 	if opts.baseline != "" {
 		return writeBaseline(cmd, result.Baseline, opts.baseline)
 	}
-	renderOpts := ui.RenderOptions{
-		NoColor:  opts.noColor,
-		Verbose:  opts.verbose,
-		JSON:     opts.jsonOutput,
-		LiveMode: live,
-		IPv4Only: opts.ipv4Only,
-		IPv6Only: opts.ipv6Only,
-		Version:  Version,
-		Writer:   cmd.OutOrStdout(),
-	}
 	if opts.scoreOnly {
 		if err := ui.RenderScoreOnly(result, renderOpts); err != nil {
 			return fmt.Errorf("writing score: %w", err)
@@ -214,6 +253,21 @@ func runAnalysis(cmd *cobra.Command, opts *commandOptions, deps commandDependenc
 		return fmt.Errorf("writing report: %w", err)
 	}
 	return nil
+}
+
+// enforceSandbox confines the process. In auto mode the missing parts of
+// the sandbox are only reported with --verbose (and in the report itself).
+func enforceSandbox(cmd *cobra.Command, opts *commandOptions, deps commandDependencies, mode sandbox.Mode) (models.SandboxStatus, error) {
+	status, err := deps.sandbox(mode)
+	if err != nil {
+		return status, err
+	}
+	if opts.verbose {
+		for _, note := range status.Notes {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Sandbox: %s\n", note)
+		}
+	}
+	return status, nil
 }
 
 // writeBaseline prints the baseline for the requested families. A single

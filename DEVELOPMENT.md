@@ -4,10 +4,13 @@
 
 ```bash
 # Build and check
-make build        # Optimized build (3MB)
+make build        # Optimized static build (CGO_ENABLED=0)
 make check        # Run vet, fmt check, tests
 make test         # Run all unit tests
-make test-race    # Run all tests with race detector
+make test-race    # Run all tests with race detector (needs cgo)
+make test-sandbox # Run the Landlock enforcement tests (skipped without Landlock)
+make fuzz         # Fuzz the parsers and the whole pipeline (FUZZTIME=30s)
+make check-deps   # go mod verify, go mod tidy -diff, dependency cooldown
 
 # View help
 ./iptables-analyzer --help
@@ -23,12 +26,19 @@ make test-race    # Run all tests with race detector
 iptables-analyzer/
 ├── main.go                    # Entry point
 ├── go.mod, go.sum            # Module dependencies
-├── README.md                  # User documentation
+├── README.md                  # User documentation (short)
 ├── DEVELOPMENT.md            # This file
 ├── Makefile                  # Build and test targets
+├── docs/                     # Usage, analysis method, security, supply chain
+├── .github/
+│   ├── dependabot.yml              # Dependency updates with a cooldown
+│   └── workflows/                  # CI and release (SHA-pinned actions)
 ├── addons/
 │   ├── build.sh                    # Cross-platform build script
-│   ├── update-deps.sh              # Update Go dependencies
+│   ├── update-deps.sh              # Update Go dependencies (with the cooldown)
+│   ├── check-deps-cooldown.sh      # Fail on module versions younger than the cooldown
+│   ├── cooldown.sh                 # Helpers of the two scripts above
+│   ├── deps.conf                   # Cooldown days and reviewed exceptions
 │   ├── bash-completion/
 │   │   └── iptables-analyzer       # Bash completion script
 │   └── man1/
@@ -42,7 +52,13 @@ iptables-analyzer/
 │   │   ├── parser.go        # iptables-save format parser
 │   │   └── parser_test.go   # Parser unit tests
 │   ├── loader/
-│   │   └── loader.go        # File and live system input
+│   │   └── loader.go        # File and live system input (read, then parse)
+│   ├── safeio/
+│   │   └── safeio.go        # Bounded reads, trusted tool execution
+│   ├── sandbox/
+│   │   └── sandbox_linux.go # Privilege drop, no_new_privs, Landlock
+│   ├── textsafe/
+│   │   └── textsafe.go      # Control-character escaping, shell quoting
 │   ├── analyzer/
 │   │   ├── evaluation.go    # Ordered jump/goto/RETURN evaluator and multi-table packet paths
 │   │   ├── shadow.go        # Shadowed rule detection (with match extension awareness)
@@ -94,10 +110,29 @@ Follow Go conventions:
 
 ### Run all tests
 ```bash
-make test          # With race detector
-go test ./...      # Basic
+make test          # Static build, like the release binaries
+make test-race     # With race detector
 go test -v ./...   # Verbose
 ```
+
+### Sandbox tests
+
+`internal/sandbox` and `cmd` enforce the real sandbox in child processes (a sandbox
+cannot be lifted). Without Landlock in the kernel these tests are skipped; check with
+`cat /sys/kernel/security/lsm`. With cgo, they are also skipped on kernels before
+Landlock ABI 8, so run them with `CGO_ENABLED=0` (the Makefile default). Tests that
+call `newRootCommand` in-process must use `testDependencies`, which replaces the
+sandbox with one that does not confine the test binary.
+
+### Fuzzing
+
+```bash
+make fuzz FUZZTIME=2m
+```
+
+`FuzzAnalysis` runs the whole command on random rules and `ss` output and fails if the
+`--no-color` report contains a control character. Failing inputs are written to
+`testdata/fuzz/` of the package; commit them as regression tests after the fix.
 
 ### Test coverage
 ```bash
@@ -191,15 +226,17 @@ rs, _ := parser.Parse(testData, models.IPv4)
 
 ## Dependency Updates
 
-```bash
-# Update all dependencies
-./addons/update-deps.sh
+New module versions are adopted only after a cooldown (7 days, `addons/deps.conf`).
+See [docs/supply-chain.md](docs/supply-chain.md).
 
-# Manual update and verification
-go get -u ./...
-go mod tidy
-make check
+```bash
+make update-deps                    # newest versions past the cooldown, then verify
+make update-deps-patch              # patch versions only
+./addons/update-deps.sh --dry-run   # show what would change
+make check-deps                     # what CI checks
 ```
+
+Do not use `go get -u` directly: it ignores the cooldown, and CI rejects the result.
 
 ## Building
 
@@ -210,8 +247,11 @@ make build-dev     # Unstripped, easier debugging
 
 ### Production
 ```bash
-make build         # Stripped, optimized size (~3MB)
+make build         # Stripped, static (CGO_ENABLED=0)
 ```
+
+Release binaries are built by `.github/workflows/release.yml` when a version tag is
+pushed; see [docs/supply-chain.md](docs/supply-chain.md#releases).
 
 ### Cross-platform
 ```bash
@@ -240,7 +280,8 @@ make clean && make build
 
 ## Documentation
 
-- **README.md**: User guide and quick start
+- **README.md**: Short user guide in Simplified Technical English (ASD-STE100)
+- **docs/**: Detailed usage, analysis method, security and supply chain
 - **DEVELOPMENT.md**: This file
 - **Code comments**: Explain non-obvious algorithms
 - **Function docstrings**: Public API documentation

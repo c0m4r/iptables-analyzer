@@ -1,0 +1,26 @@
+# Dependency updates with a supply-chain cooldown: Dependabot only proposes
+# versions that were published at least default-days ago. Keep default-days
+# equal to COOLDOWN_DAYS in addons/deps.conf (CI checks this).
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      go-modules:
+        patterns: ["*"]
+
+  # Workflows pin actions by commit SHA; Dependabot updates the SHA and the
+  # version comment together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
