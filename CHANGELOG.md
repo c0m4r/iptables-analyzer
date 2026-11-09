@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Types of changes: Added, Changed, Deprecated, Removed, Fixed, Security
 
-## [0.5.0] - 2026-11-09
+## [0.6.0] - 2026-11-09
 
 ### Added
 
@@ -20,19 +20,12 @@ Types of changes: Added, Changed, Deprecated, Removed, Fixed, Security
 - `ss -tulnp` (Netid column) inventories, `-F` lines in iptables-restore files, and target options such as `-j CT --notrack`
 - regression tests on real Docker 29.9.3 captures whose variants were reproduced on a live host
 
-- stable finding codes, service-assessment status, per-socket family/status metadata, and incomplete-score diagnostics in JSON output
-- regression coverage for fragmented traffic, dual-stack listeners, nested-chain remediation, DNAT state and ranges, ordered NAT traversal, original-tuple matches, malformed inventories, policy validation, semantic rendering, and output failures
-
 ### Changed
 
 - open published ports are reported and scored as exposure; `docker_bypass` is reserved for ports that INPUT or its default-deny policy would refuse
 - certainty is tracked per accepted source range: undecidable predicates (rate limits, ipsets) only make a verdict possible when it depends on them matching
 - interface-specific rules are evaluated per ingress interface, and findings name the interfaces they apply to
 - Docker recommendations use `--ctorigdstport ... --ctdir ORIGINAL`, allow trusted sources before the drop, and are ordered by severity
-- Docker analysis evaluates every published port with ordered PREROUTING traversal and retains original and translated conntrack tuples
-- service discovery distinguishes dual-stack, excluded, filtered, reachable, malformed, and valid empty inventories
-- verbose rule tables include raw rules and render negations, fragments, extension predicates, and goto control flow
-- the capture helper writes through temporary files and preserves prior captures when collection fails
 
 ### Fixed
 
@@ -42,6 +35,23 @@ Types of changes: Added, Changed, Deprecated, Removed, Fixed, Security
 - multiple `-m conntrack` matches in one rule overwrote each other's state list
 - SSH rate limiting implemented as a preceding `hashlimit`/`recent` DROP was not recognized
 - the INCOMPLETE grade was wrapped in the score card
+
+## [0.5.0] - 2026-11-09
+
+### Added
+
+- stable finding codes, service-assessment status, per-socket family/status metadata, and incomplete-score diagnostics in JSON output
+- regression coverage for fragmented traffic, dual-stack listeners, nested-chain remediation, DNAT state and ranges, ordered NAT traversal, original-tuple matches, malformed inventories, policy validation, semantic rendering, and output failures
+
+### Changed
+
+- Docker analysis evaluates every published port with ordered PREROUTING traversal and retains original and translated conntrack tuples
+- service discovery distinguishes dual-stack, excluded, filtered, reachable, malformed, and valid empty inventories
+- verbose rule tables include raw rules and render negations, fragments, extension predicates, and goto control flow
+- the capture helper writes through temporary files and preserves prior captures when collection fails
+
+### Fixed
+
 - unsafe SSH replacements, wrong-chain exposure advice, discarded fragment predicates, IPv6 wildcard loss, DNAT-state false negatives, range sampling, bare IPv6 target parsing, original-port protection false positives, stateful shadow false positives, duplicate listener findings and dual-stack exposure deductions, successful incomplete scores, invalid policy acceptance, excluded-service labeling, and ignored output errors
 
 ## [0.4.0] - 2026-08-03
