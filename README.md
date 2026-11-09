@@ -8,7 +8,7 @@
 
 A command-line tool that examines iptables and ip6tables rules and finds security problems.
 
-<img width="833" height="330" alt="image" src="https://github.com/user-attachments/assets/3ec0795e-7ab7-4494-ba69-5fa00404cfc8" />
+<img width="721" height="457" alt="obraz" src="https://github.com/user-attachments/assets/d6ac5cf7-134a-43e5-be2d-29c50c4484a7" />
 
 </div>
 
