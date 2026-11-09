@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Types of changes: Added, Changed, Deprecated, Removed, Fixed, Security
 
+## [Unreleased]
+
+### Added
+
+- `SUBNET` access scope for sources that are specific public networks; the report shows it in the service table ("SUBNET") and the Docker published-port table ("PUBLIC NETS")
+
+### Fixed
+
+- a source restriction to a public network, for example `-s 203.0.113.0/24`, was reported as a HIGH `EXPOSED` service like `0.0.0.0/0`; public networks that add up to at most a /16 (IPv4) or a /48 (IPv6) are now `SUBNET` (LOW, not scored as exposure), while wider ranges and complements such as `! -s 10.0.0.0/8` stay `EXPOSED`
+- service findings with a source restriction said "accessible from the network"; they now name the sources ("from specific public networks", "from private networks", "from individual hosts")
+
 ## [0.7.0] - 2026-11-09
 
 ### Added

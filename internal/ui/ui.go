@@ -610,7 +610,7 @@ func renderFindingsAndRecommendations(w io.Writer, result *models.AnalysisResult
 		fmt.Fprintln(w)
 	}
 
-	// Exposed services (only truly EXPOSED scope — LOCALNET/WHITELISTED shown in service table)
+	// Exposed services (only truly EXPOSED scope — SUBNET/LOCALNET/WHITELISTED shown in service table)
 	if exposedOnlyCount > 0 {
 		renderSubSection(w, "Exposed Services", exposedOnlyCount)
 		for _, f := range result.ExposedServices {
@@ -738,6 +738,8 @@ func renderScope(scope models.AccessScope, certainty models.Certainty) string {
 	switch scope {
 	case models.ScopeExposed:
 		return styleDanger.Render("ANY SOURCE" + suffix)
+	case models.ScopeSubnet:
+		return styleWarning.Render("PUBLIC NETS" + suffix)
 	case models.ScopeLocalnet:
 		return styleWarning.Render("PRIVATE NETS" + suffix)
 	case models.ScopeWhitelisted:

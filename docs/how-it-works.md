@@ -110,6 +110,19 @@ and the default policies. It splits the source CIDRs symbolically.
 Thus earlier terminal rules and partial allowlists have their correct effect.
 Then it compares the result with the listening services from `ss`.
 
+The tool gives each reachable service the scope of the sources that it accepts:
+
+| Scope | Sources |
+| --- | --- |
+| `EXPOSED` | Any source, or public networks with more than 65,536 IPv4 addresses (one IPv6 /48) in total. |
+| `SUBNET` | Only specific public networks, for example `-s 203.0.113.0/24`. |
+| `LOCALNET` | Only private address ranges, for example `10.0.0.0/8` or `fc00::/7`. |
+| `WHITELISTED` | Only single hosts (/32 or /128). |
+
+When more than one scope applies, the tool uses the widest scope.
+The report lists only `EXPOSED` services as findings, and only they decrease the score.
+The service table shows the other scopes. Docker published ports use the same scopes.
+
 ### Evaluation limit
 
 Each jump evaluates the target chain again. Chains that jump to the next chain more than

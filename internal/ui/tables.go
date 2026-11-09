@@ -187,19 +187,16 @@ func getServiceStatus(svc models.ListeningService, result *models.AnalysisResult
 	best := models.AccessScope("")
 	for _, exposed := range result.ExposedServices {
 		if exposed.Service.Port == svc.Port &&
-			exposed.Service.Protocol == svc.Protocol && serviceAddressesMatch(svc, exposed.Service) {
-			if exposed.Scope == models.ScopeExposed {
-				best = models.ScopeExposed
-				break
-			}
-			if exposed.Scope == models.ScopeLocalnet || best == "" {
-				best = exposed.Scope
-			}
+			exposed.Service.Protocol == svc.Protocol && serviceAddressesMatch(svc, exposed.Service) &&
+			scopeRankUI(exposed.Scope) > scopeRankUI(best) {
+			best = exposed.Scope
 		}
 	}
 	switch best {
 	case models.ScopeExposed:
 		return styleDanger.Render("EXPOSED")
+	case models.ScopeSubnet:
+		return styleWarning.Render("SUBNET")
 	case models.ScopeLocalnet:
 		return styleWarning.Render("LOCALNET")
 	case models.ScopeWhitelisted:
@@ -325,6 +322,8 @@ func isDisplayDuplicate(match models.MatchExt) bool {
 func scopeRankUI(scope models.AccessScope) int {
 	switch scope {
 	case models.ScopeExposed:
+		return 4
+	case models.ScopeSubnet:
 		return 3
 	case models.ScopeLocalnet:
 		return 2

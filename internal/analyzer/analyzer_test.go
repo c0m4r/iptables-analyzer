@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/c0m4r/iptables-analyzer/internal/models"
@@ -194,27 +195,71 @@ COMMIT
 
 func TestSourceRestrictionsAreClassified(t *testing.T) {
 	tests := []struct {
-		name   string
-		source string
-		scope  models.AccessScope
+		name    string
+		version models.IPVersion
+		rules   string
+		scope   models.AccessScope
 	}{
-		{"host", "203.0.113.7/32", models.ScopeWhitelisted},
-		{"private network", "10.0.0.0/8", models.ScopeLocalnet},
-		{"public network", "203.0.113.0/24", models.ScopeExposed},
+		{"host", models.IPv4, "-A INPUT -s 203.0.113.7/32 -p tcp --dport 8080 -j ACCEPT", models.ScopeWhitelisted},
+		{"private host", models.IPv4, "-A INPUT -s 192.168.88.10/32 -p tcp --dport 8080 -j ACCEPT", models.ScopeWhitelisted},
+		{"private network", models.IPv4, "-A INPUT -s 10.0.0.0/8 -p tcp --dport 8080 -j ACCEPT", models.ScopeLocalnet},
+		{"public network", models.IPv4, "-A INPUT -s 203.0.113.0/24 -p tcp --dport 8080 -j ACCEPT", models.ScopeSubnet},
+		{"public network for all protocols", models.IPv4, "-A INPUT -s 203.0.113.0/24 -j ACCEPT", models.ScopeSubnet},
+		{"public /16", models.IPv4, "-A INPUT -s 198.51.0.0/16 -p tcp --dport 8080 -j ACCEPT", models.ScopeSubnet},
+		{"public /15", models.IPv4, "-A INPUT -s 198.50.0.0/15 -p tcp --dport 8080 -j ACCEPT", models.ScopeExposed},
+		{"public network beside private one", models.IPv4, "-A INPUT -s 10.0.0.0/8 -j ACCEPT\n-A INPUT -s 203.0.113.0/24 -j ACCEPT", models.ScopeSubnet},
+		{"public networks adding up beyond a /16", models.IPv4, "-A INPUT -s 198.51.0.0/16 -j ACCEPT\n-A INPUT -s 203.0.113.0/24 -j ACCEPT", models.ScopeExposed},
+		{"any source", models.IPv4, "-A INPUT -s 0.0.0.0/0 -p tcp --dport 8080 -j ACCEPT", models.ScopeExposed},
+		{"all but a private network", models.IPv4, "-A INPUT ! -s 10.0.0.0/8 -p tcp --dport 8080 -j ACCEPT", models.ScopeExposed},
+		{"public network minus a host", models.IPv4, "-A INPUT -s 203.0.113.9/32 -j DROP\n-A INPUT -s 203.0.113.0/24 -j ACCEPT", models.ScopeSubnet},
+		{"IPv6 site", models.IPv6, "-A INPUT -s 2001:db8:1::/48 -p tcp --dport 8080 -j ACCEPT", models.ScopeSubnet},
+		{"IPv6 provider range", models.IPv6, "-A INPUT -s 2001:db8::/32 -p tcp --dport 8080 -j ACCEPT", models.ScopeExposed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			data := "*filter\n:INPUT DROP [0:0]\n-A INPUT -s " + tt.source + " -p tcp --dport 8080 -j ACCEPT\nCOMMIT\n"
-			rs, err := parser.Parse(data, models.IPv4)
+			data := "*filter\n:INPUT DROP [0:0]\n" + tt.rules + "\nCOMMIT\n"
+			rs, err := parser.Parse(data, tt.version)
 			if err != nil {
 				t.Fatal(err)
 			}
-			result := Analyze(rs, nil)
-			CrossReferenceServices(result, []models.ListeningService{testService()})
+			var result *models.AnalysisResult
+			svc := testService()
+			if tt.version == models.IPv6 {
+				result = Analyze(nil, rs)
+				svc.Address, svc.IsIPv6, svc.Family = "::", true, models.SocketIPv6
+			} else {
+				result = Analyze(rs, nil)
+			}
+			CrossReferenceServices(result, []models.ListeningService{svc})
 			if len(result.ExposedServices) != 1 || result.ExposedServices[0].Scope != tt.scope {
 				t.Fatalf("expected %s, got %+v", tt.scope, result.ExposedServices)
 			}
+			finding := result.ExposedServices[0]
+			if tt.scope != models.ScopeExposed && (finding.Severity != models.SeverityLow || strings.Contains(finding.Reason, "from the network")) {
+				t.Fatalf("source-restricted service reported as a network exposure: %+v", finding)
+			}
 		})
+	}
+}
+
+func TestWorkSubnetAllowIsNotReportedAsExposure(t *testing.T) {
+	data := "*filter\n:INPUT DROP [0:0]\n-A INPUT -s 203.0.113.0/24 -m comment --comment \"work subnet\" -j ACCEPT\nCOMMIT\n"
+	rs, err := parser.Parse(data, models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := Analyze(rs, nil)
+	svc := testService()
+	svc.Port, svc.Process = 22, "sshd"
+	CrossReferenceServices(result, []models.ListeningService{svc})
+	if len(result.ExposedServices) != 1 {
+		t.Fatalf("expected one finding, got %+v", result.ExposedServices)
+	}
+	finding := result.ExposedServices[0]
+	if finding.Scope != models.ScopeSubnet || finding.Severity != models.SeverityLow ||
+		finding.AllowingRule == nil || finding.AllowingRule.RuleNum != 1 ||
+		!strings.Contains(finding.Reason, "from specific public networks") {
+		t.Fatalf("unexpected finding: %+v", finding)
 	}
 }
 

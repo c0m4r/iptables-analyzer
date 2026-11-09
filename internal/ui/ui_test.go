@@ -105,3 +105,27 @@ func TestServiceTableShowsDockerPublishedStatus(t *testing.T) {
 		t.Fatalf("published listener status missing: %s", output.String())
 	}
 }
+
+func TestServiceStatusShowsBroadestSourceScope(t *testing.T) {
+	service := models.ListeningService{Protocol: models.ProtoTCP, Address: "0.0.0.0", Port: 22, IsWildcard: true, Status: models.ServiceReachable}
+	finding := func(scope models.AccessScope, family models.SocketFamily) models.ExposedServiceFinding {
+		svc := service
+		svc.Family = family
+		return models.ExposedServiceFinding{Service: svc, Scope: scope}
+	}
+	tests := []struct {
+		findings []models.ExposedServiceFinding
+		status   string
+	}{
+		{[]models.ExposedServiceFinding{finding(models.ScopeSubnet, models.SocketIPv4)}, "SUBNET"},
+		{[]models.ExposedServiceFinding{finding(models.ScopeLocalnet, models.SocketIPv4), finding(models.ScopeSubnet, models.SocketIPv6)}, "SUBNET"},
+		{[]models.ExposedServiceFinding{finding(models.ScopeSubnet, models.SocketIPv4), finding(models.ScopeExposed, models.SocketIPv6)}, "EXPOSED"},
+		{[]models.ExposedServiceFinding{finding(models.ScopeWhitelisted, models.SocketIPv4), finding(models.ScopeLocalnet, models.SocketIPv6)}, "LOCALNET"},
+	}
+	for _, tt := range tests {
+		status := getServiceStatus(service, &models.AnalysisResult{ExposedServices: tt.findings})
+		if !strings.Contains(status, tt.status) {
+			t.Fatalf("expected %s, got %q for %+v", tt.status, status, tt.findings)
+		}
+	}
+}

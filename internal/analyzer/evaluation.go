@@ -2,6 +2,7 @@ package analyzer
 
 import (
 	"fmt"
+	"math/big"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -1153,26 +1154,49 @@ var restrictedSourcePrefixes = []netip.Prefix{
 	netip.MustParsePrefix("::1/128"),
 }
 
+// Public sources count as specific networks rather than the Internet while
+// they add up to at most one prefix of this length: 65,536 IPv4 addresses or
+// one IPv6 site. Wider ranges and complements such as "! -s 10.0.0.0/8" stay
+// exposed.
+const (
+	subnetMinBitsIPv4 = 16
+	subnetMinBitsIPv6 = 48
+)
+
 func classifyAcceptedSources(accepted []decisionSegment) (models.AccessScope, *models.Rule) {
 	if len(accepted) == 0 {
 		return "", nil
 	}
 	// Track presence separately from attribution: segments accepted by a
 	// chain policy have no rule.
-	var whitelistRule, localRule, exposedRule *models.Rule
-	local, exposed := false, false
+	var whitelistRule, localRule, subnetRule, exposedRule *models.Rule
+	local, subnet, exposed := false, false, false
+	minBits := subnetMinBitsIPv4
+	if accepted[0].Prefix.Addr().Is6() {
+		minBits = subnetMinBitsIPv6
+	}
+	public, size := new(big.Int), new(big.Int)
 	for _, segment := range accepted {
 		prefix := segment.Prefix
+		restricted := prefixIsRestricted(prefix)
+		if !restricted && prefix.Bits() >= minBits {
+			public.Add(public, size.Lsh(big.NewInt(1), uint(prefix.Addr().BitLen()-prefix.Bits())))
+		}
 		switch {
 		case prefix.Bits() == prefix.Addr().BitLen():
 			if whitelistRule == nil {
 				whitelistRule = segment.Rule
 			}
-		case prefixIsRestricted(prefix):
+		case restricted:
 			local = true
 			if localRule == nil {
 				localRule = segment.Rule
 			}
+		case prefix.Bits() >= minBits:
+			if !subnet || subnetRule == nil {
+				subnetRule = segment.Rule
+			}
+			subnet = true
 		default:
 			if !exposed || exposedRule == nil {
 				exposedRule = segment.Rule
@@ -1182,6 +1206,16 @@ func classifyAcceptedSources(accepted []decisionSegment) (models.AccessScope, *m
 	}
 	if exposed {
 		return models.ScopeExposed, exposedRule
+	}
+	// Many narrow allowlist entries can still add up to a wide audience.
+	if public.Cmp(size.Lsh(big.NewInt(1), uint(accepted[0].Prefix.Addr().BitLen()-minBits))) > 0 {
+		if subnet {
+			return models.ScopeExposed, subnetRule
+		}
+		return models.ScopeExposed, whitelistRule
+	}
+	if subnet {
+		return models.ScopeSubnet, subnetRule
 	}
 	if local {
 		return models.ScopeLocalnet, localRule
@@ -1208,6 +1242,8 @@ func prefixIsRestricted(prefix netip.Prefix) bool {
 func scopeRank(scope models.AccessScope) int {
 	switch scope {
 	case models.ScopeExposed:
+		return 4
+	case models.ScopeSubnet:
 		return 3
 	case models.ScopeLocalnet:
 		return 2

@@ -264,7 +264,7 @@ func exposureRecommendations(result *models.AnalysisResult) []models.Recommendat
 
 	for _, exposed := range result.ExposedServices {
 		// Only recommend restrictions for truly exposed services.
-		// LOCALNET and WHITELISTED services already have source restrictions in place.
+		// SUBNET, LOCALNET and WHITELISTED services already have source restrictions in place.
 		if exposed.Scope != models.ScopeExposed {
 			continue
 		}

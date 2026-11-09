@@ -335,6 +335,7 @@ type AccessScope string
 
 const (
 	ScopeExposed     AccessScope = "EXPOSED"     // reachable from any source
+	ScopeSubnet      AccessScope = "SUBNET"      // reachable only from specific public networks (at most a /16 or an IPv6 /48 in total)
 	ScopeLocalnet    AccessScope = "LOCALNET"    // reachable only from private IP ranges
 	ScopeWhitelisted AccessScope = "WHITELISTED" // reachable only from specific /32 hosts
 )

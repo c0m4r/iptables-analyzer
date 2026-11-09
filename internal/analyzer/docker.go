@@ -415,6 +415,8 @@ func mappingReason(finding models.DockerBypassFinding, explicit, plural bool) st
 
 func scopeAudience(scope models.AccessScope) string {
 	switch scope {
+	case models.ScopeSubnet:
+		return "specific public networks"
 	case models.ScopeLocalnet:
 		return "private networks"
 	case models.ScopeWhitelisted:

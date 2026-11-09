@@ -199,8 +199,10 @@ func addServiceFinding(result *models.AnalysisResult, svc models.ListeningServic
 	if svc.Port >= 1024 {
 		sev = models.SeverityMedium
 	}
+	audience := "the network"
 	if exposure.scope != models.ScopeExposed {
 		sev = models.SeverityLow
+		audience = scopeAudience(exposure.scope)
 	}
 
 	reachability := "is accessible"
@@ -213,7 +215,7 @@ func addServiceFinding(result *models.AnalysisResult, svc models.ListeningServic
 	}
 	reason := "Service " + process + " listening on port " +
 		strconv.Itoa(svc.Port) + "/" + string(svc.Protocol) +
-		" (" + ipLabel + ") " + reachability + " from the network"
+		" (" + ipLabel + ") " + reachability + " from " + audience
 	if len(exposure.interfaces) > 0 {
 		reason += " via " + strings.Join(exposure.interfaces, ", ")
 	}
