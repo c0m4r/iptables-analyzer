@@ -1,6 +1,6 @@
 module github.com/c0m4r/iptables-analyzer
 
-go 1.26.8
+go 1.26.11
 
 require (
 	github.com/charmbracelet/lipgloss v1.1.0
