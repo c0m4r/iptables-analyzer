@@ -402,3 +402,24 @@ func TestIPv6WiderThanIPv4IsReported(t *testing.T) {
 		t.Fatalf("equal rules were reported: %+v", found)
 	}
 }
+
+// An overlay device carries traffic of other hosts, and pod interfaces
+// connect workloads that are not the host. A service that they reach is
+// reported with the interface, not as internal.
+func TestClusterInterfacesAreNotGuestBridges(t *testing.T) {
+	for _, iface := range []string{"flannel.1", "cni0", "cali1234abcd", "vnet0", "vxlan.calico"} {
+		result := analyzeWithServices(t, filterRules("-A INPUT -i "+iface+" -p tcp -m tcp --dport 10250 -j ACCEPT"),
+			`tcp LISTEN 0 128 0.0.0.0:10250 0.0.0.0:* users:(("kubelet",pid=700,fd=20))`)
+		finding := exposure(result, 10250)
+		if finding == nil || finding.Scope != models.ScopeExposed || strings.Join(finding.Interfaces, ",") != iface {
+			t.Errorf("%s: %+v (status %s)", iface, finding, serviceStatus(t, result, 10250))
+		}
+	}
+	for _, iface := range []string{"virbr0", "lxdbr0", "incusbr0", "podman0", "cni-podman0", "docker0"} {
+		result := analyzeWithServices(t, filterRules("-A INPUT -i "+iface+" -p tcp -m tcp --dport 10250 -j ACCEPT"),
+			`tcp LISTEN 0 128 0.0.0.0:10250 0.0.0.0:* users:(("kubelet",pid=700,fd=20))`)
+		if status := serviceStatus(t, result, 10250); status != models.ServiceInternal {
+			t.Errorf("%s is a host-only bridge: status %s", iface, status)
+		}
+	}
+}

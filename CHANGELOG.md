@@ -56,6 +56,7 @@ The changes of this release follow the audit in `docs/audit-0.7.1.md`; `ROADMAP.
 - the DHCP client rule (`--sport 67 --dport 68`) was a HIGH exposure
 - a comment that starts with `-` or equals `!` stopped the analysis (`--comment requires a value`)
 - the second argument of `--tcp-flags` and `--match-set` was lost; a negation in front of a rule option after a match was taken for a match option
+- the old form of a negation (`--option ! value`), which iptables still accepts, was not read; an argument that belongs to no option is now an error, as it is for `iptables-restore`
 - process names with spaces were lost; a socket-activated daemon was named `systemd`; a socket bound to a device (`0.0.0.0%virbr0`) was evaluated for every interface
 - analysis time grew with the square of the number of single-address rules (3,000 rules: 30 s); 20,000 rules now take approximately one second
 - unused-rule findings for negated port predicates named the wrong port, and a file without a filter table lost 25 points without a finding

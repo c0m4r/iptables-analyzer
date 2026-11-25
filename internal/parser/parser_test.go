@@ -505,3 +505,57 @@ func TestParseNoTables(t *testing.T) {
 		}
 	}
 }
+
+// iptables-restore removes quotes and then reads every argument by its text.
+// A quoted option is that option, and a quoted "!" is a negation. Reading
+// them as plain values would analyze other rules than the kernel gets.
+func TestQuotedTokensAreReadLikeIptablesRestoreReadsThem(t *testing.T) {
+	rule := parseOneRule(t, "filter", `-A INPUT "-j" ACCEPT`)
+	if rule.Target != "ACCEPT" {
+		t.Fatalf("a quoted -j must be the target option: %+v", rule)
+	}
+	rule = parseOneRule(t, "filter", `-A INPUT "!" "-s" "10.0.0.0/8" -j DROP`)
+	if rule.SrcAddr != "10.0.0.0/8" || !rule.Negations["src"] || rule.Target != "DROP" {
+		t.Fatalf("quoted negation and option: %+v", rule)
+	}
+	rule = parseOneRule(t, "filter", `-A INPUT -p tcp "-m" tcp "--dport" 22 -j ACCEPT`)
+	if rule.DstPort != "22" || len(rule.Matches) != 1 || rule.Matches[0].Module != "tcp" {
+		t.Fatalf("quoted match options: %+v", rule)
+	}
+}
+
+// "--option ! value" is the old place of the negation. iptables still
+// accepts it, so a rules file may contain it.
+func TestParseNegationBehindTheOption(t *testing.T) {
+	rule := parseOneRule(t, "filter", `-A INPUT -s ! 10.0.0.0/8 -p ! udp -i ! lo -j DROP`)
+	if rule.SrcAddr != "10.0.0.0/8" || !rule.Negations["src"] || rule.Protocol != models.ProtoUDP ||
+		!rule.Negations["protocol"] || rule.InIface != "lo" || !rule.Negations["in-iface"] || rule.Target != "DROP" {
+		t.Fatalf("negation behind the rule options: %+v", rule)
+	}
+	rule = parseOneRule(t, "filter", `-A INPUT -p tcp -m tcp --dport ! 22 -m conntrack --ctstate ! INVALID -j ACCEPT`)
+	if rule.DstPort != "22" || !rule.Negations["dport"] || !rule.Matches[0].Negations["--dport"] ||
+		!rule.Matches[1].Negations["--ctstate"] || strings.Join(rule.States, ",") != "INVALID" {
+		t.Fatalf("negation behind the match options: %+v", rule)
+	}
+	// A value that is "!" stays a value where the option takes free text.
+	rule = parseOneRule(t, "filter", `-A INPUT -m comment --comment ! -j ACCEPT`)
+	if rule.Comment != "!" || rule.Target != "ACCEPT" || len(rule.Negations) != 0 {
+		t.Fatalf("comment of one exclamation mark: %+v", rule)
+	}
+}
+
+// iptables-restore refuses an argument that belongs to no option. Such a
+// file cannot be loaded, so it must not be analyzed as if it could.
+func TestParseRejectsArgumentsWithoutOption(t *testing.T) {
+	for _, line := range []string{
+		`-A INPUT stray -j ACCEPT`,
+		`-A INPUT -j ACCEPT stray`,
+		`-A INPUT -p tcp "quoted value" -j ACCEPT`,
+		`-A INPUT ! -j ACCEPT`,
+		`-A INPUT ! -m tcp -p tcp -j ACCEPT`,
+	} {
+		if _, err := Parse("*filter\n:INPUT DROP [0:0]\n"+line+"\nCOMMIT\n", models.IPv4); err == nil {
+			t.Errorf("%s: expected a parse error", line)
+		}
+	}
+}

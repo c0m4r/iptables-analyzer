@@ -196,6 +196,8 @@ shows an assessment note. A real Docker host with many networks uses approximate
   kube-proxy matches the port in an earlier chain. The tool gives one assessment note
   for these rules.
 - Interfaces with the names of host-only bridges (`docker0`, `br-*`, `virbr*`, `lxcbr*`,
-  `lxdbr*`, `incusbr*`, `podman*`, `cni*`, `flannel*`, `cali*`) connect containers and
-  virtual machines of the host. A listener that only they reach has the status `INTERNAL`.
+  `lxdbr*`, `incusbr*`, `podman*`) connect containers and virtual machines of the host.
+  A listener that only they reach has the status `INTERNAL`.
+  Overlay devices and the pod interfaces of a cluster (`flannel.1`, `cni0`, `cali*`) are
+  ordinary interfaces: they can carry traffic of other hosts.
 - The tool does not read the contents of ipsets, sysctl values, or native nftables rules.

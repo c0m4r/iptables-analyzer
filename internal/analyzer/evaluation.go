@@ -1027,10 +1027,16 @@ func isBridgeInterface(name string, ctx *evalContext) bool {
 	return guestInterfaceName(name)
 }
 
-// guestInterfacePrefixes are the interface names that container and virtual
-// machine managers give to their host-only bridges and links: libvirt, LXC,
-// LXD, Incus, Podman, CNI plugins, Flannel, Calico and QEMU taps.
-var guestInterfacePrefixes = []string{"virbr", "lxcbr", "lxdbr", "incusbr", "podman", "cni", "flannel", "cali", "vnet"}
+// guestInterfacePrefixes are the names that libvirt, LXC, LXD, Incus and
+// Podman give to bridges that exist only on this host: every packet that
+// enters through one comes from a guest of this host.
+//
+// The list is short on purpose. Overlay and tunnel devices (flannel.1, vxlan)
+// carry traffic of other hosts, and the pod interfaces of a cluster (cni0,
+// cali*) connect workloads that are not trusted like the host itself. They
+// are ordinary ingress interfaces: a rule that accepts from them is reported
+// with their name, not hidden as internal.
+var guestInterfacePrefixes = []string{"virbr", "lxcbr", "lxdbr", "incusbr", "podman", "cni-podman"}
 
 func guestInterfaceName(name string) bool {
 	if dockerInterfaceName(name) {

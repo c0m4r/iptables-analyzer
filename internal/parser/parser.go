@@ -270,22 +270,18 @@ func isBuiltinChain(tableName, chainName string) bool {
 	return builtins[tableName][chainName]
 }
 
-// token is one argument of a rule line. A quoted argument is always a value:
-// it is never an option name or a negation, whatever its text is.
-type token struct {
-	text   string
-	quoted bool
-}
+// Tokens are judged by their text, whether or not they were quoted: that is
+// what iptables-restore does after it has removed the quotes. A quoted "-j"
+// is the option -j there, so it must be the option -j here, or a rules file
+// could show this program one ruleset and load another.
 
-func (t token) isOption() bool { return !t.quoted && len(t.text) > 1 && t.text[0] == '-' }
-func (t token) isBang() bool   { return !t.quoted && t.text == "!" }
-func (t token) isMainFlag() bool {
-	return !t.quoted && isMainFlag(t.text)
-}
+func isOption(tok string) bool { return len(tok) > 1 && tok[0] == '-' }
 
 // freeTextOptions take exactly one argument that cannot be recognized by its
 // form: iptables-save only quotes values that contain characters other than
 // letters, digits, "-" and "_", so a comment may be written as --comment -x-.
+// The option parser of iptables takes the next argument of such an option
+// whatever it looks like, and so does this one.
 var freeTextOptions = map[string]bool{
 	"--comment": true, "--log-prefix": true, "--nflog-prefix": true,
 	"--string": true, "--hex-string": true, "--name": true, "--hashlimit-name": true,
@@ -301,9 +297,10 @@ var pairOptions = map[string]bool{
 
 // optionValues returns the arguments of the option at tokens[i] and the index
 // of the token after them. Options that are not in the tables above take the
-// next token unless it looks like an option or a negation.
-func optionValues(tokens []token, i int) ([]string, int, error) {
-	option := tokens[i].text
+// next token unless it looks like an option. negated reports the old form
+// "--option ! value", which iptables still accepts.
+func optionValues(tokens []string, i int) (values []string, next int, negated bool, err error) {
+	option := tokens[i]
 	count := 0
 	switch {
 	case pairOptions[option]:
@@ -311,22 +308,21 @@ func optionValues(tokens []token, i int) ([]string, int, error) {
 	case freeTextOptions[option]:
 		count = 1
 	default:
-		if i+1 < len(tokens) && !tokens[i+1].isOption() && !tokens[i+1].isBang() {
-			return []string{tokens[i+1].text}, i + 2, nil
+		if i+2 < len(tokens) && tokens[i+1] == "!" && !isOption(tokens[i+2]) {
+			return []string{tokens[i+2]}, i + 3, true, nil
 		}
-		return nil, i + 1, nil
+		if i+1 < len(tokens) && !isOption(tokens[i+1]) && tokens[i+1] != "!" {
+			return []string{tokens[i+1]}, i + 2, false, nil
+		}
+		return nil, i + 1, false, nil
 	}
 	if i+count >= len(tokens) {
 		if count == 1 {
-			return nil, 0, fmt.Errorf("%s requires a value", option)
+			return nil, 0, false, fmt.Errorf("%s requires a value", option)
 		}
-		return nil, 0, fmt.Errorf("%s requires %d values", option, count)
+		return nil, 0, false, fmt.Errorf("%s requires %d values", option, count)
 	}
-	values := make([]string, 0, count)
-	for k := 1; k <= count; k++ {
-		values = append(values, tokens[i+k].text)
-	}
-	return values, i + count + 1, nil
+	return tokens[i+1 : i+1+count], i + count + 1, false, nil
 }
 
 func parseRule(line string, tableName string, ipVersion models.IPVersion) (models.Rule, error) {
@@ -337,15 +333,15 @@ func parseRule(line string, tableName string, ipVersion models.IPVersion) (model
 		Negations: make(map[string]bool),
 	}
 
-	tokens, err := tokenizeQuoted(line)
+	tokens, err := tokenizeChecked(line)
 	if err != nil {
 		return rule, err
 	}
-	if len(tokens) < 2 || tokens[0].quoted || tokens[0].text != "-A" {
+	if len(tokens) < 2 || tokens[0] != "-A" {
 		return rule, fmt.Errorf("invalid rule: %s", line)
 	}
 
-	rule.Chain = tokens[1].text
+	rule.Chain = tokens[1]
 
 	// field maps an address, port or interface option to the rule field it
 	// sets and the key of its negation.
@@ -369,41 +365,48 @@ func parseRule(line string, tableName string, ipVersion models.IPVersion) (model
 
 	i := 2
 	negateNext := false
-	// value returns the argument of the main option at i.
+	// value returns the argument of the option at i and moves i behind it.
+	// The option takes the next token whatever it looks like. "! value" is
+	// the old place of the negation; it sets negateNext like "! --option".
 	value := func() (string, error) {
-		if i+1 >= len(tokens) {
-			return "", fmt.Errorf("%s requires a value", tokens[i].text)
+		option := tokens[i]
+		if i+2 < len(tokens) && tokens[i+1] == "!" {
+			negateNext = true
+			i += 3
+			return tokens[i-1], nil
 		}
-		return tokens[i+1].text, nil
+		if i+1 >= len(tokens) {
+			return "", fmt.Errorf("%s requires a value", option)
+		}
+		i += 2
+		return tokens[i-1], nil
+	}
+	// negated reports and clears a pending negation.
+	negated := func() bool {
+		was := negateNext
+		negateNext = false
+		return was
 	}
 
 	for i < len(tokens) {
 		tok := tokens[i]
 
-		if tok.isBang() {
+		if tok == "!" {
 			negateNext = true
 			i++
 			continue
 		}
-		if tok.quoted {
-			// A quoted value without an option in front of it.
-			negateNext = false
-			i++
-			continue
-		}
 
-		switch tok.text {
+		switch tok {
 		case "-p", "--protocol":
 			val, err := value()
 			if err != nil {
 				return rule, err
 			}
 			rule.Protocol = models.Protocol(strings.ToLower(val))
-			if negateNext {
+			if negated() {
 				rule.Negations["protocol"] = true
-				negateNext = false
 			}
-			i += 2
 
 		case "-s", "--source", "-d", "--destination",
 			"--sport", "--source-port", "--sports",
@@ -413,26 +416,29 @@ func parseRule(line string, tableName string, ipVersion models.IPVersion) (model
 			if err != nil {
 				return rule, err
 			}
-			target, negation := field(tok.text)
+			target, negation := field(tok)
 			*target = val
-			if negateNext {
+			if negated() {
 				rule.Negations[negation] = true
-				negateNext = false
 			}
-			i += 2
 
 		case "-j", "--jump", "-g", "--goto":
-			val, err := value()
-			if err != nil {
-				return rule, err
+			if i+1 >= len(tokens) {
+				return rule, fmt.Errorf("%s requires a value", tok)
 			}
-			rule.Target = val
-			rule.Goto = tok.text == "-g" || tok.text == "--goto"
+			if negated() {
+				return rule, fmt.Errorf("a target cannot be negated in rule: %s", line)
+			}
+			rule.Target = tokens[i+1]
+			rule.Goto = tok == "-g" || tok == "--goto"
 			i += 2
 
 		case "-m", "--match":
 			if i+1 >= len(tokens) {
-				return rule, fmt.Errorf("%s requires a module name", tok.text)
+				return rule, fmt.Errorf("%s requires a module name", tok)
+			}
+			if negated() {
+				return rule, fmt.Errorf("a match module cannot be negated in rule: %s", line)
 			}
 			next, err := parseMatch(&rule, tokens, i, line)
 			if err != nil {
@@ -441,19 +447,19 @@ func parseRule(line string, tableName string, ipVersion models.IPVersion) (model
 			i = next
 
 		case "--to-destination", "--to-source":
-			val, err := value()
-			if err != nil {
-				return rule, err
+			if i+1 >= len(tokens) {
+				return rule, fmt.Errorf("%s requires a value", tok)
 			}
-			rule.DNATTarget = val
+			rule.DNATTarget = tokens[i+1]
+			negateNext = false
 			i += 2
 
 		case "--comment":
-			val, err := value()
-			if err != nil {
-				return rule, err
+			if i+1 >= len(tokens) {
+				return rule, fmt.Errorf("%s requires a value", tok)
 			}
-			rule.Comment = strings.Trim(val, "\"")
+			rule.Comment = strings.Trim(tokens[i+1], "\"")
+			negateNext = false
 			i += 2
 
 		case "--ctstate", "--state":
@@ -462,70 +468,74 @@ func parseRule(line string, tableName string, ipVersion models.IPVersion) (model
 				return rule, err
 			}
 			rule.States = strings.Split(val, ",")
-			if negateNext {
+			if negated() {
 				rule.Negations["state"] = true
-				negateNext = false
 			}
-			i += 2
 
 		case "-f", "--fragment":
 			rule.Fragment = true
-			if negateNext {
+			if negated() {
 				rule.Negations["fragment"] = true
-				negateNext = false
 			}
 			i++
 
 		case "-4", "--ipv4", "-6", "--ipv6":
+			negateNext = false
 			i++
 
 		case "-c", "--set-counters":
 			// Packet and byte counters do not affect what the rule matches.
 			if i+2 >= len(tokens) {
-				return rule, fmt.Errorf("%s requires 2 values", tok.text)
+				return rule, fmt.Errorf("%s requires 2 values", tok)
 			}
+			negateNext = false
 			i += 3
 
 		default:
-			if !tok.isOption() {
-				negateNext = false
-				i++
-				continue
+			if !isOption(tok) {
+				// iptables-restore refuses an argument that belongs to no
+				// option. Reading on would analyze rules that cannot be loaded.
+				return rule, fmt.Errorf("unexpected argument %q in rule: %s", tok, line)
 			}
 			if rule.Target != "" && !negateNext {
 				// iptables-save emits target options after the target. They do
 				// not constrain which packets the rule matches.
-				values, next, err := optionValues(tokens, i)
+				values, next, _, err := optionValues(tokens, i)
 				if err != nil {
 					return rule, err
 				}
-				rule.TargetArgs = append(rule.TargetArgs, tok.text)
+				rule.TargetArgs = append(rule.TargetArgs, tok)
 				rule.TargetArgs = append(rule.TargetArgs, values...)
-				for next < len(tokens) && !tokens[next].isOption() && !tokens[next].isBang() {
-					rule.TargetArgs = append(rule.TargetArgs, tokens[next].text)
+				for next < len(tokens) && !isOption(tokens[next]) && tokens[next] != "!" {
+					rule.TargetArgs = append(rule.TargetArgs, tokens[next])
 					next++
 				}
 				i = next
 				continue
 			}
-			if isTargetOption(tok.text) {
+			if isTargetOption(tok) {
+				// A target option in front of its target: skip it with its value.
+				_, next, _, err := optionValues(tokens, i)
+				if err != nil {
+					return rule, err
+				}
 				negateNext = false
-				i++
+				i = next
 				continue
 			}
-			rawTokens := []string{tok.text}
+			rawTokens := []string{tok}
 			if negateNext {
-				rawTokens = []string{"!", tok.text}
+				rawTokens = []string{"!", tok}
 			}
 			ext := models.MatchExt{Module: "raw", Params: map[string]string{}, Negations: map[string]bool{}, RawTokens: rawTokens}
-			values, next, err := optionValues(tokens, i)
+			values, next, inverted, err := optionValues(tokens, i)
 			if err != nil {
 				return rule, err
 			}
-			ext.RawTokens = append(ext.RawTokens, values...)
-			ext.Params[tok.text] = strings.Join(values, " ")
-			if negateNext {
-				ext.Negations[tok.text] = true
+			ext.RawTokens = append(ext.RawTokens, tokens[i+1:next]...)
+			ext.Params[tok] = strings.Join(values, " ")
+			if negateNext || inverted {
+				ext.Negations[tok] = true
 			}
 			rule.Matches = append(rule.Matches, ext)
 			negateNext = false
@@ -541,9 +551,9 @@ func parseRule(line string, tableName string, ipVersion models.IPVersion) (model
 // parseMatch parses "-m module" at tokens[i] with the options that follow it,
 // up to the next option of the rule itself. It returns the index of the first
 // token it did not consume.
-func parseMatch(rule *models.Rule, tokens []token, i int, line string) (int, error) {
+func parseMatch(rule *models.Rule, tokens []string, i int, line string) (int, error) {
 	ext := models.MatchExt{
-		Module:    tokens[i+1].text,
+		Module:    tokens[i+1],
 		Params:    make(map[string]string),
 		Negations: make(map[string]bool),
 	}
@@ -552,30 +562,31 @@ func parseMatch(rule *models.Rule, tokens []token, i int, line string) (int, err
 	for i < len(tokens) {
 		tok := tokens[i]
 		negated := false
-		if tok.isBang() {
+		if tok == "!" {
 			if i+1 >= len(tokens) {
 				return i, fmt.Errorf("dangling negation in rule: %s", line)
 			}
-			if tokens[i+1].isMainFlag() {
+			if isMainFlag(tokens[i+1]) {
 				break // "! -i eth0" negates an option of the rule, not of the module
 			}
 			negated = true
 			i++
 			tok = tokens[i]
-		} else if tok.isMainFlag() {
+		} else if isMainFlag(tok) {
 			break
 		}
-		if !tok.isOption() || !strings.HasPrefix(tok.text, "--") {
+		if !strings.HasPrefix(tok, "--") {
 			// An argument this parser does not attribute to an option. It stays
 			// in RawTokens, so the rule is not mistaken for an unconditional one.
 			i++
 			continue
 		}
-		key := tok.text
-		values, next, err := optionValues(tokens, i)
+		key := tok
+		values, next, inverted, err := optionValues(tokens, i)
 		if err != nil {
 			return i, err
 		}
+		negated = negated || inverted
 		val := strings.Join(values, " ")
 		if val == "" && moduleParamRequiresValue(key) {
 			return i, fmt.Errorf("%s requires a value", key)
@@ -613,9 +624,7 @@ func parseMatch(rule *models.Rule, tokens []token, i int, line string) (int, err
 		}
 		i = next
 	}
-	for _, tok := range tokens[start:i] {
-		ext.RawTokens = append(ext.RawTokens, tok.text)
-	}
+	ext.RawTokens = append(ext.RawTokens, tokens[start:i]...)
 	rule.Matches = append(rule.Matches, ext)
 	return i, nil
 }
@@ -673,21 +682,7 @@ func tokenize(line string) []string {
 }
 
 func tokenizeChecked(line string) ([]string, error) {
-	tokens, err := tokenizeQuoted(line)
-	if err != nil {
-		return nil, err
-	}
-	texts := make([]string, len(tokens))
-	for i, tok := range tokens {
-		texts[i] = tok.text
-	}
-	return texts, nil
-}
-
-// tokenizeQuoted splits a rule line into tokens and records which of them
-// were quoted.
-func tokenizeQuoted(line string) ([]token, error) {
-	var tokens []token
+	var tokens []string
 	var current strings.Builder
 	inQuote := false
 	quoteChar := byte(0)
@@ -708,7 +703,7 @@ func tokenizeQuoted(line string) ([]token, error) {
 			}
 			if ch == quoteChar {
 				inQuote = false
-				tokens = append(tokens, token{text: current.String(), quoted: true})
+				tokens = append(tokens, current.String())
 				current.Reset()
 			} else {
 				current.WriteByte(ch)
@@ -717,12 +712,12 @@ func tokenizeQuoted(line string) ([]token, error) {
 			inQuote = true
 			quoteChar = ch
 			if current.Len() > 0 {
-				tokens = append(tokens, token{text: current.String()})
+				tokens = append(tokens, current.String())
 				current.Reset()
 			}
 		case ch == ' ' || ch == '\t':
 			if current.Len() > 0 {
-				tokens = append(tokens, token{text: current.String()})
+				tokens = append(tokens, current.String())
 				current.Reset()
 			}
 		default:
@@ -733,7 +728,7 @@ func tokenizeQuoted(line string) ([]token, error) {
 		return nil, fmt.Errorf("unterminated quoted string in rule: %s", line)
 	}
 	if current.Len() > 0 {
-		tokens = append(tokens, token{text: current.String()})
+		tokens = append(tokens, current.String())
 	}
 	return tokens, nil
 }
