@@ -127,6 +127,9 @@ func renderServiceTable(w io.Writer, result *models.AnalysisResult) {
 		port := strconv.Itoa(svc.Port)
 		proto := string(svc.Protocol)
 		addr := svc.Address
+		if svc.Device != "" {
+			addr += "%" + svc.Device
+		}
 		process := svc.Process
 		if process == "" {
 			process = "-"
@@ -171,6 +174,9 @@ func getServiceStatus(svc models.ListeningService, result *models.AnalysisResult
 	if svc.Status == models.ServiceFiltered {
 		return styleSuccess.Render("FILTERED")
 	}
+	if svc.Status == models.ServiceInternal {
+		return styleLow.Render("INTERNAL")
+	}
 	if svc.Status == models.ServiceDocker {
 		best := models.AccessScope("")
 		for _, mapping := range result.PublishedPorts {
@@ -197,6 +203,8 @@ func getServiceStatus(svc models.ListeningService, result *models.AnalysisResult
 		return styleDanger.Render("EXPOSED")
 	case models.ScopeSubnet:
 		return styleWarning.Render("SUBNET")
+	case models.ScopeRestricted:
+		return styleWarning.Render("RESTRICTED")
 	case models.ScopeLocalnet:
 		return styleWarning.Render("LOCALNET")
 	case models.ScopeWhitelisted:
@@ -322,8 +330,10 @@ func isDisplayDuplicate(match models.MatchExt) bool {
 func scopeRankUI(scope models.AccessScope) int {
 	switch scope {
 	case models.ScopeExposed:
-		return 4
+		return 5
 	case models.ScopeSubnet:
+		return 4
+	case models.ScopeRestricted:
 		return 3
 	case models.ScopeLocalnet:
 		return 2

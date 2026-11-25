@@ -61,13 +61,17 @@ iptables-analyzer/
 │   │   └── textsafe.go      # Control-character escaping, shell quoting
 │   ├── analyzer/
 │   │   ├── evaluation.go    # Ordered jump/goto/RETURN evaluator and multi-table packet paths
+│   │   ├── addrset.go       # Source-address sets as sorted ranges
 │   │   ├── shadow.go        # Shadowed rule detection (with match extension awareness)
 │   │   ├── docker.go        # Docker published-port, ineffective-rule and direct-routing analysis
 │   │   ├── docker_topology.go # Bridges, container addresses and gateway modes inferred from rules
 │   │   ├── docker_test.go   # Regression tests on real Docker 29 captures
-│   │   ├── effectiveness.go # Policy and hygiene checks (with match extension awareness)
+│   │   ├── effectiveness.go # Default behavior, open ports, unreachable rules, IPv4/IPv6 comparison
 │   │   ├── analyzer.go      # Main analysis orchestration (with chain jump traversal)
-│   │   └── analyzer_test.go # Analyzer unit tests
+│   │   ├── analyzer_test.go # Analyzer unit tests
+│   │   ├── regress_test.go  # The inputs of docs/audit-0.7.1.md
+│   │   ├── addrset_test.go  # Set operations against membership tables
+│   │   └── perf_test.go     # Blocklist timing test and benchmarks
 │   ├── baseline/
 │   │   └── baseline.go      # Recommended IPv4/IPv6 baseline firewall
 │   ├── services/
@@ -85,7 +89,9 @@ iptables-analyzer/
     ├── docker.iptables-save     # Legacy Docker layout with bypasses (score: F)
     ├── docker29.iptables-save   # Real Docker 29.9.3 capture (nat, routed, nat-unprotected, internal)
     ├── docker29.ip6tables-save  # Real Docker 29.9.3 IPv6 capture
-    └── insecure.iptables-save   # ACCEPT policies (score: F)
+    ├── insecure.iptables-save   # ACCEPT policies (score: F)
+    ├── ufw.iptables-save        # A host managed by ufw (no false findings expected)
+    └── ufw-services.txt         # Its listeners
 ```
 
 ## Dependencies
@@ -134,6 +140,21 @@ make fuzz FUZZTIME=2m
 `--no-color` report contains a control character. Failing inputs are written to
 `testdata/fuzz/` of the package; commit them as regression tests after the fix.
 
+### Timing
+
+`TestLargeBlocklistsAreAnalyzedQuickly` analyzes 20,000 single-address rules and fails
+when that takes more than ten seconds. `go test -short` skips it. For numbers:
+
+```bash
+go test -run '^$' -bench Blocklist ./internal/analyzer
+```
+
+### Tests with the real iptables
+
+`internal/baseline` loads the generated baseline with `iptables-restore` in a new network
+namespace (`unshare -rn`). The test is skipped when the tools or unprivileged user
+namespaces are not available.
+
 ### Test coverage
 ```bash
 make test-coverage # Generates coverage.html
@@ -147,7 +168,8 @@ make test-coverage # Generates coverage.html
 ### Test fixtures
 - `basic.iptables-save`: IPv4 baseline. Expected with `--ipv4-only`: 100-point subtotal and `INCOMPLETE` without services; B with `testdata/services.txt`
 - `docker.iptables-save`: Docker setup with two DNAT ports blocked in INPUT. Expected: score F, two Docker bypass findings
-- `insecure.iptables-save`: Default ACCEPT policies with shadowed rules. Expected: score F, multiple shadow findings
+- `insecure.iptables-save`: Default ACCEPT policies and rules behind a catch-all ACCEPT. Expected: grade F, one finding for the default accept and one for the unreachable rules
+- `ufw.iptables-save` with `ufw-services.txt`: the chains that ufw creates, with `ufw limit 22/tcp`. Expected: no effectiveness finding above INFO, SSH as rate limited, the DHCP client as LOW
 - `docker29.iptables-save` / `docker29.ip6tables-save`: unmodified captures from Docker 29.9.3 (iptables 1.8.11, nf_tables). `internal/analyzer/docker_test.go` derives variants from them (an INPUT block, `DOCKER-USER --dport`, raw/mangle drops, removed raw protection, ...). Each variant was reproduced on a live host with a probe container, and the test asserts the observed verdict
 
 ### Verifying Docker behavior on a host

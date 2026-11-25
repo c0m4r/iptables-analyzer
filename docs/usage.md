@@ -19,6 +19,14 @@ The tool then reads:
 
 The interface list lets the tool evaluate `-i` and local-address predicates exactly.
 
+`iptables-save` prints nothing when no rules are loaded.
+The tool then reports that the address family accepts all traffic.
+
+The nf_tables variant of `iptables-save` cannot print native nftables rules,
+and it warns when the legacy tables also hold rules.
+The tool shows these messages as assessment notes, and the grade is `INCOMPLETE`.
+To see such rules, use `nft list ruleset` or `iptables-legacy-save`.
+
 ## File analysis
 
 1. Save the rules on the host that you want to examine:
@@ -47,6 +55,10 @@ In file mode, the tool does not examine the services of the host that runs it.
 Without `--services-file`, the service exposure and the grade are `INCOMPLETE`.
 A missing or malformed services file is a fatal error.
 A valid `ss` file with only a header means a host without listeners.
+
+Without a file for one address family, the tool examines only the other family.
+The overview shows the family as `not supplied`. There is no deduction for it.
+A rules file without tables (an empty file) means that no rules are loaded for that family.
 
 The tool reads at most 64 MiB of rules and 16 MiB of `ss` output.
 Process substitution works, for example `-f <(sudo iptables-save)`.
@@ -99,6 +111,17 @@ The baseline:
 With `--noflush`, the baseline replaces only `INPUT` (and `DOCKER-USER` on Docker hosts).
 The Docker chains stay.
 
+The baseline keeps what it cannot know:
+
+- Jumps from `INPUT` to chains of other programs (fail2ban, libvirt, Tailscale) are in the
+  baseline again, before the SSH rules. Rules in those chains are not part of the baseline.
+- The rules that `DOCKER-USER` has now are in the file as comments.
+- A host that routes packets with a `FORWARD` policy of ACCEPT keeps that policy.
+- A TCP socket that only systemd holds can be a socket-activated `sshd`. The notes name the port.
+
+CAUTION: Do not apply the baseline on a host that ufw manages. Use ufw to change its rules.
+The notes of the baseline show this caution when the rules have ufw chains.
+
 To apply the baseline with an automatic rollback:
 
 1. Keep a second SSH session open.
@@ -134,25 +157,52 @@ the grade is `INCOMPLETE`. The report then shows the subtotal and a list of the 
 
 | Category | Deductions |
 | --- | --- |
-| Policy | -15 for INPUT ACCEPT, -10 for FORWARD ACCEPT (maximum -25). OUTPUT ACCEPT is only advisory. |
-| Exposure | -5 for each well-known TCP/UDP port and -2 for each high port open to all sources (maximum -25). A port open on IPv4 and IPv6 counts one time. Docker published ports open to all sources also count. |
+| Policy | -15 when INPUT accepts connections to ports that no rule names. -10 when FORWARD accepts traffic that no rule names and the host routes packets, -5 when routing is not known (maximum -25). OUTPUT ACCEPT is only a note. |
+| Exposure | -5 for each well-known TCP/UDP port and -2 for each high port open to all sources. -2 at most for a port with a rate limit, -1 for a port that needs a specific source port. -10 for a range of 1,024 or more ports open to all sources (maximum -25). A port open on IPv4 and IPv6 counts one time. Docker published ports open to all sources also count. |
 | Shadows and bypasses | -12 for each critical, -5 for each high and -2 for each medium Docker finding; -5 for each high-severity and -2 for each other shadowed rule (maximum -25). |
-| Hygiene | -5 without a conntrack `ESTABLISHED` rule, -5 without a final DROP, -2 for dead rules. |
-| IPv6 | -10 when IPv6 is in scope but there are no IPv6 rules, -5 when Docker does not filter IPv6 forwarding. |
+| Hygiene | -5 when INPUT drops the replies to the connections of the host, -5 or -3 for each chain with unreachable rules, -3 for dropped loopback traffic, -5 and -3 for blocked IPv6 neighbor discovery and router advertisements (maximum -15). |
+| IPv6 | -10 when no IPv6 rules are loaded, -5 when Docker does not filter IPv6 forwarding, -5 when IPv6 opens ports that IPv4 restricts and -3 when IPv4 filters them (maximum -10). |
+
+Each deduction comes from a finding in the report.
+A finding with the certainty `POSSIBLE` has half of the deduction.
+
+The findings also limit the grade:
+
+- **F** when INPUT accepts all new connections, for example with an ACCEPT policy
+  and no final DROP, or with a rule `-j ACCEPT`.
+- **D** when INPUT accepts connections to all ports that no rule names, but not for
+  all protocols or interfaces.
+- **C** when a Docker published port bypasses an INPUT rule for all sources.
+
+The report shows the limit below the score.
 
 ### Findings
 
 The report sorts the findings by severity:
 
-- **CRITICAL**: Docker bypasses an explicit INPUT restriction for all sources.
-- **HIGH**: exposed services on well-known ports, missing policies.
-- **MEDIUM**: effectiveness problems and possible hygiene problems.
-- **LOW**: best-practice suggestions.
-- **INFO**: unused rules and small findings.
+- **CRITICAL**: Docker bypasses an INPUT rule that names the port, for all sources.
+- **HIGH**: exposed services on well-known ports, a chain that accepts by default, wide open port ranges.
+- **MEDIUM**: exposed services on high ports or with a rate limit, effectiveness problems.
+- **LOW**: services open to restricted sources, best-practice suggestions.
+- **INFO**: unused rules and notes.
 
 Each finding is `DEFINITE` or `POSSIBLE`.
-Some predicates are not decidable, for example ipsets, marks and rate limits.
+The tool cannot evaluate some predicates, for example packet marks.
 A finding that depends on such a predicate is `POSSIBLE`.
+
+Some predicates do not make a finding uncertain:
+
+- A rate limit, a connection limit or a time window does not restrict the sources.
+  The service is exposed, and the finding shows the condition (`limited by: rate limit`).
+- An ipset, a MAC address or a GeoIP match restricts the sources to a set that the tool
+  cannot read. The scope is then `RESTRICTED`, and the finding names the set.
+
+### Open ports
+
+The report lists the ports for which INPUT accepts new connections, with their sources.
+The tool does not need the listening services for this list.
+`all ports that no rule names` shows what the firewall does by default.
+A port with a listener is an exposed service. A port without a listener is an unused rule.
 
 ### Recommendations
 
@@ -161,6 +211,20 @@ The tool writes a replacement command only when the command keeps the original r
 Otherwise, it gives a description.
 
 All values from the rules are in shell quotes, for example `--comment 'my rule'`.
+
+### Service status
+
+| Status | Meaning |
+| --- | --- |
+| `EXPOSED`, `SUBNET`, `RESTRICTED`, `LOCALNET`, `WHITELISTED` | Reachable from other hosts, with this scope of sources |
+| `INTERNAL` | Reachable only through a bridge of containers or virtual machines of this host (`docker0`, `virbr0`) |
+| `DOCKER: ...` | The port is published by Docker; the scope is that of the forwarded path |
+| `FILTERED` | Not reachable from other hosts |
+| `LOCALHOST` | Bound to a loopback address or to the loopback device |
+| `NOT ANALYZED` | The address family of the socket was not examined |
+
+A socket that `ss` shows as `address%device` receives packets only from that device.
+The tool evaluates it for that interface only.
 
 ### Sandbox line
 

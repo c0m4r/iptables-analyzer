@@ -67,8 +67,8 @@ type dockerAnalyzer struct {
 	candidates []ingressCandidate
 
 	published       []models.PublishedPort
-	publishedTo     map[string]bool           // container endpoints reached through a published port
-	forwardAccepted map[string][]netip.Prefix // container endpoint -> sources accepted through published ports
+	publishedTo     map[string]bool      // container endpoints reached through a published port
+	forwardAccepted map[string]labelSets // container endpoint -> sources accepted through published ports
 	forwardRules    []*models.Rule
 	loopbackOnly    map[string]string // container endpoint -> loopback host port
 	portFindings    []portFinding
@@ -99,8 +99,8 @@ type candidateOutcome struct {
 	input     pathResult
 	// bypass holds sources FORWARD accepts and INPUT refuses; definiteBypass
 	// the subset established without undecidable predicates.
-	bypass         []netip.Prefix
-	definiteBypass []netip.Prefix
+	bypass         []decisionSegment
+	definiteBypass []decisionSegment
 	natUncertain   bool
 }
 
@@ -109,7 +109,7 @@ func (d *dockerAnalyzer) analyzePublishedPorts() {
 	if natTable == nil || natTable.Chains["PREROUTING"] == nil {
 		return
 	}
-	d.forwardAccepted = map[string][]netip.Prefix{}
+	d.forwardAccepted = map[string]labelSets{}
 	d.publishedTo = map[string]bool{}
 	d.loopbackOnly = map[string]string{}
 	d.forwardRules = d.userForwardRules()
@@ -182,9 +182,9 @@ func (d *dockerAnalyzer) analyzeMapping(natTable *models.Table, dnat models.Rule
 		Certainty:     models.CertaintyDefinite,
 	}
 
-	root := []netip.Prefix{rootPrefix(d.rs.IPVersion)}
+	root := rootSet(d.rs.IPVersion)
 	var outcomes []candidateOutcome
-	var forwardUnion, inputUnion []netip.Prefix
+	var forwardSegments, inputSegments []decisionSegment
 	for _, candidate := range d.candidates {
 		original := packetQuery{
 			Protocol:        dnat.Protocol,
@@ -204,8 +204,8 @@ func (d *dockerAnalyzer) analyzeMapping(natTable *models.Table, dnat models.Rule
 		pre := evaluatePath(d.rs, preroutingPath(original), root)
 		natQuery := original
 		natQuery.Hook = "PREROUTING"
-		sources, natUncertain := sourcesReachingDNAT(d.rs, natTable, dnat, natQuery, pre.acceptedPrefixes())
-		if len(sources) == 0 {
+		sources, natUncertain := sourcesReachingDNAT(natTable, dnat, natQuery, pre.acceptedSet())
+		if sources.empty() {
 			continue
 		}
 		translated := original
@@ -224,13 +224,20 @@ func (d *dockerAnalyzer) analyzeMapping(natTable *models.Table, dnat models.Rule
 			}
 		}
 		outcome := candidateOutcome{candidate: candidate, forward: forward, input: input, natUncertain: natUncertain}
-		accepted := forward.acceptedPrefixes()
-		outcome.bypass = subtractPrefixes(accepted, input.definitePrefixes())
-		outcome.definiteBypass = subtractPrefixes(forward.definitePrefixes(), input.acceptedPrefixes())
+		// A source bypasses INPUT when FORWARD accepts it and INPUT does not
+		// accept it in full.
+		var certain []decisionSegment
+		for _, segment := range forward.Accepted {
+			if !segment.Possible {
+				certain = append(certain, segment)
+			}
+		}
+		outcome.bypass = segmentsMinus(forward.Accepted, input.unconditionalSet())
+		outcome.definiteBypass = segmentsMinus(certain, input.acceptedSet())
 		outcomes = append(outcomes, outcome)
-		forwardUnion = append(forwardUnion, accepted...)
-		inputUnion = append(inputUnion, input.acceptedPrefixes()...)
-		if len(accepted) > 0 {
+		forwardSegments = append(forwardSegments, forward.Accepted...)
+		inputSegments = append(inputSegments, input.Accepted...)
+		if len(forward.Accepted) > 0 {
 			d.checkForwardRules(mapping, original, translated, forward)
 		}
 	}
@@ -239,16 +246,15 @@ func (d *dockerAnalyzer) analyzeMapping(natTable *models.Table, dnat models.Rule
 	if len(outcomes) == 0 {
 		return
 	}
-	forwardUnion = normalizePrefixes(forwardUnion)
-	mapping.ForwardScope = classifyPrefixes(forwardUnion)
-	mapping.InputScope = classifyPrefixes(normalizePrefixes(inputUnion))
+	mapping.ForwardScope, _, _ = classifySegments(forwardSegments)
+	mapping.InputScope, _, _ = classifySegments(inputSegments)
 	var reachable []ingressCandidate
 	definite := false
 	for _, outcome := range outcomes {
 		if len(outcome.forward.Accepted) > 0 {
 			reachable = append(reachable, outcome.candidate)
 		}
-		if len(outcome.forward.definitePrefixes()) > 0 && !outcome.candidate.assumed {
+		if !outcome.forward.definiteSet().empty() && !outcome.candidate.assumed {
 			definite = true
 		}
 	}
@@ -257,7 +263,10 @@ func (d *dockerAnalyzer) analyzeMapping(natTable *models.Table, dnat models.Rule
 	}
 	mapping.Interfaces = candidateLabels(reachable, d.candidates)
 	d.published = append(d.published, mapping)
-	d.forwardAccepted[endpoint] = normalizePrefixes(append(d.forwardAccepted[endpoint], forwardUnion...))
+	if d.forwardAccepted[endpoint] == nil {
+		d.forwardAccepted[endpoint] = labelSets{}
+	}
+	d.forwardAccepted[endpoint].add(forwardSegments)
 
 	if finding, ok := d.classifyMapping(mapping, outcomes); ok {
 		explicit := finding.Fix == "true"
@@ -290,13 +299,16 @@ func (d *dockerAnalyzer) classifyMapping(mapping models.PublishedPort, outcomes 
 		if len(bypass) == 0 {
 			bypass, possible = outcome.bypass, true
 		}
-		bypassScope := classifyPrefixes(bypass)
-		inputRule, explicit := explicitInputRestriction(outcome.input, bypass)
-		forwardScope, _, forwardCertainty := outcome.forward.classify()
+		bypassScope, _, _ := classifySegments(bypass)
+		inputRule, explicit := explicitInputRestriction(outcome.input, segmentsUnion(bypass, nil))
+		forwardClass := outcome.forward.classify()
+		forwardScope, forwardCertainty := forwardClass.scope, forwardClass.certainty
 		switch {
 		// A default-deny INPUT policy bypassed only for sources that the DNAT
 		// itself restricts is the operator's own access control, not a bypass.
-		case len(bypass) > 0 && (explicit || bypassScope == models.ScopeExposed):
+		// A port forward that the administrator wrote is meant to pass INPUT
+		// by; it is a bypass only of an INPUT rule that names the port.
+		case len(bypass) > 0 && (explicit || (bypassScope == models.ScopeExposed && dockerRule(&mapping.NATRule))):
 			current = verdict{code: models.FindingDockerBypass, scope: bypassScope, inputRule: inputRule, explicit: explicit}
 			if explicit && bypassScope == models.ScopeExposed {
 				current.severity = models.SeverityCritical
@@ -356,13 +368,13 @@ func (d *dockerAnalyzer) classifyMapping(mapping models.PublishedPort, outcomes 
 // explicitInputRestriction reports the INPUT rule that refuses the bypassing
 // sources. A refusal by a port- or source-specific rule, or a source-restricted
 // allow, is explicit; a refusal only by the policy or a catch-all DROP is not.
-func explicitInputRestriction(input pathResult, bypass []netip.Prefix) (*models.Rule, bool) {
+func explicitInputRestriction(input pathResult, bypass addrSet) (*models.Rule, bool) {
 	var fallback *models.Rule
 	for _, segment := range input.Dropped {
-		if !prefixesOverlap(segment.Prefix, bypass) || segment.Rule == nil {
+		if segment.Rule == nil || !segment.Set.overlaps(bypass) {
 			continue
 		}
-		if !IsCatchAll(segment.Rule) {
+		if namesDestination(segment.Rule) {
 			return segment.Rule, true
 		}
 		if fallback == nil {
@@ -370,20 +382,34 @@ func explicitInputRestriction(input pathResult, bypass []netip.Prefix) (*models.
 		}
 	}
 	for _, segment := range input.Accepted {
-		if segment.Rule != nil && !IsCatchAll(segment.Rule) {
+		if segment.Rule != nil && namesDestination(segment.Rule) {
 			return segment.Rule, true
 		}
 	}
 	return fallback, false
 }
 
-func prefixesOverlap(prefix netip.Prefix, set []netip.Prefix) bool {
-	for _, candidate := range set {
-		if _, overlaps := intersectPrefix(prefix, candidate); overlaps {
-			return true
-		}
+// namesDestination reports whether a rule was written for a destination: it
+// has a port or a destination-address predicate. A rule that only names
+// sources or interfaces ("accept everything from the LAN", a blocklist entry)
+// says nothing about one published port, so traffic that passes it by is not
+// a bypass of an explicit restriction.
+func namesDestination(rule *models.Rule) bool {
+	if namesPorts(rule) {
+		return true
 	}
-	return false
+	return rule.DstAddr != "" && rule.DstAddr != "0.0.0.0/0" && rule.DstAddr != "::/0"
+}
+
+// dockerRule reports whether Docker wrote a NAT rule. Other DNAT rules are
+// port forwards of the administrator, of kube-proxy or of libvirt.
+func dockerRule(rule *models.Rule) bool {
+	return strings.HasPrefix(rule.Chain, "DOCKER")
+}
+
+// IsDockerRule reports whether a NAT rule is in a chain that Docker manages.
+func IsDockerRule(rule *models.Rule) bool {
+	return rule != nil && dockerRule(rule)
 }
 
 func mappingReason(finding models.DockerBypassFinding, explicit, plural bool) string {
@@ -408,8 +434,12 @@ func mappingReason(finding models.DockerBypassFinding, explicit, plural bool) st
 		return fmt.Sprintf("%s %s %s/%s would be refused by the default-deny filter/INPUT policy, but %s DNATs the traffic to %s and filter/FORWARD accepts it from %s%s.",
 			stack, noun, finding.ExposedPort, finding.NATRule.Protocol, nat, finding.ContainerDest, audience, via)
 	default:
-		return fmt.Sprintf("%s %s %s/%s %s published by %s to %s and accepted through filter/FORWARD from %s%s; host INPUT rules do not apply.",
-			stack, noun, finding.ExposedPort, finding.NATRule.Protocol, verb, nat, finding.ContainerDest, audience, via)
+		published := "published"
+		if !dockerRule(&finding.NATRule) {
+			published = "forwarded"
+		}
+		return fmt.Sprintf("%s %s %s/%s %s %s by %s to %s and accepted through filter/FORWARD from %s%s; host INPUT rules do not apply.",
+			stack, noun, finding.ExposedPort, finding.NATRule.Protocol, verb, published, nat, finding.ContainerDest, audience, via)
 	}
 }
 
@@ -421,6 +451,8 @@ func scopeAudience(scope models.AccessScope) string {
 		return "private networks"
 	case models.ScopeWhitelisted:
 		return "individual hosts"
+	case models.ScopeRestricted:
+		return "sources selected by a match that was not evaluated (ipset, MAC address)"
 	}
 	return "any source"
 }
@@ -553,7 +585,7 @@ func (d *dockerAnalyzer) userForwardRules() []*models.Rule {
 // for this published port but never take effect: rules that match the
 // pre-DNAT destination, and rules that Docker's earlier ACCEPT shadows.
 func (d *dockerAnalyzer) checkForwardRules(mapping models.PublishedPort, original, translated packetQuery, forward pathResult) {
-	accepted := forward.acceptedPrefixes()
+	accepted := forward.acceptedSet()
 	dropped := map[*models.Rule]bool{}
 	for _, segment := range forward.Dropped {
 		if segment.Rule != nil {
@@ -565,8 +597,7 @@ func (d *dockerAnalyzer) checkForwardRules(mapping models.PublishedPort, origina
 	preDNAT.DstPort = original.DstPort
 	preDNAT.DstType = "LOCAL"
 	for _, rule := range d.forwardRules {
-		matched, _, _ := splitBySource(accepted, rule, translated)
-		if len(matched) == 0 {
+		if !sourceMayMatch(accepted, rule, translated) {
 			continue
 		}
 		afterDNAT := ruleMatchesQuery(rule, translated)
@@ -758,7 +789,7 @@ func (d *dockerAnalyzer) analyzeDirectRouting() {
 		return endpoints[i].port < endpoints[j].port
 	})
 
-	root := []netip.Prefix{rootPrefix(d.rs.IPVersion)}
+	root := rootSet(d.rs.IPVersion)
 	reportedOpen := map[string]bool{}
 	for _, e := range endpoints {
 		addr, err := netip.ParseAddr(e.addr)
@@ -767,7 +798,7 @@ func (d *dockerAnalyzer) analyzeDirectRouting() {
 		}
 		bridge := d.topo.bridgeFor(e.addr)
 		var reachable []ingressCandidate
-		var accepted []netip.Prefix
+		var accepted []decisionSegment
 		definitePath := false
 		for _, candidate := range d.candidates {
 			query := packetQuery{
@@ -786,18 +817,17 @@ func (d *dockerAnalyzer) analyzeDirectRouting() {
 				Ctx:             d.ctx,
 			}
 			pre := evaluatePath(d.rs, preroutingPath(query), root)
-			forward := evaluatePath(d.rs, forwardPath(query), pre.acceptedPrefixes())
+			forward := evaluatePath(d.rs, forwardPath(query), pre.acceptedSet())
 			if len(forward.Accepted) == 0 {
 				continue
 			}
 			reachable = append(reachable, candidate)
-			accepted = append(accepted, forward.acceptedPrefixes()...)
-			definitePath = definitePath || len(forward.definitePrefixes()) > 0
+			accepted = append(accepted, forward.Accepted...)
+			definitePath = definitePath || !forward.definiteSet().empty()
 		}
 		if len(reachable) == 0 {
 			continue
 		}
-		accepted = normalizePrefixes(accepted)
 		key := endpointKey(e.protocol, e.addr, e.port)
 		finding := models.DockerBypassFinding{
 			Code:          models.FindingDockerDirectRoute,
@@ -806,7 +836,7 @@ func (d *dockerAnalyzer) analyzeDirectRouting() {
 			ExposedPort:   strconv.Itoa(e.port),
 			ContainerDest: joinHostPort(e.addr, strconv.Itoa(e.port)),
 			Bridge:        bridge,
-			Scope:         classifyPrefixes(accepted),
+			Scope:         segmentsScope(accepted),
 			Interfaces:    candidateLabels(reachable, d.candidates),
 		}
 		mode := d.topo.gatewayMode(bridge)
@@ -830,11 +860,11 @@ func (d *dockerAnalyzer) analyzeDirectRouting() {
 				finding.ContainerDest, e.protocol, d.loopbackOnly[key], route)
 			finding.Fix = "Upgrade Docker to 28.0 or later, which drops direct-routed packets in raw/PREROUTING, or add that protection manually."
 		case d.publishedTo[key]:
-			extra := subtractPrefixes(accepted, d.forwardAccepted[key])
+			extra := segmentsBeyond(accepted, d.forwardAccepted[key])
 			if len(extra) == 0 {
 				continue // already as reachable through the published port
 			}
-			finding.Scope = classifyPrefixes(extra)
+			finding.Scope = segmentsScope(extra)
 			finding.Severity = models.SeverityHigh
 			finding.Reason = fmt.Sprintf("Restrictions on the published port for %s/%s can be bypassed: packets routed directly to the container address are forwarded from %s, and rules matching --ctorigdstport do not see them.",
 				finding.ContainerDest, e.protocol, route)
@@ -858,6 +888,11 @@ func (d *dockerAnalyzer) analyzeDirectRouting() {
 		}
 		d.directFindings = append(d.directFindings, finding)
 	}
+}
+
+func segmentsScope(segments []decisionSegment) models.AccessScope {
+	scope, _, _ := classifySegments(segments)
+	return scope
 }
 
 func bridgeLabel(bridge string) string {
@@ -957,37 +992,74 @@ func DockerIPv6Gaps(ipv4, ipv6 *models.Ruleset) []models.DockerBypassFinding {
 }
 
 // DockerAssessmentDiagnostics reports translations that cannot be evaluated
-// completely instead of silently omitting them.
+// completely instead of silently omitting them. Rules with the same gap are
+// one note: kube-proxy alone writes hundreds of DNAT rules without a port.
 func DockerAssessmentDiagnostics(rs *models.Ruleset) []models.AssessmentDiagnostic {
 	if rs == nil || rs.Tables["nat"] == nil {
 		return nil
 	}
-	var diagnostics []models.AssessmentDiagnostic
-	add := func(message string) {
-		diagnostics = append(diagnostics, models.AssessmentDiagnostic{Area: "docker", Message: message})
+	type group struct {
+		area      string
+		reason    string
+		locations []string
 	}
-	for _, rule := range allDNATRules(rs.Tables["nat"]) {
-		location := fmt.Sprintf("IPv%d nat/%s rule #%d", rs.IPVersion, rule.Chain, rule.RuleNum)
+	var groups []*group
+	add := func(area, reason, location string) {
+		for _, g := range groups {
+			if g.reason == reason {
+				g.locations = append(g.locations, location)
+				return
+			}
+		}
+		groups = append(groups, &group{area: area, reason: reason, locations: []string{location}})
+	}
+	nat := rs.Tables["nat"]
+	for _, rule := range allDNATRules(nat) {
+		location := fmt.Sprintf("nat/%s rule #%d", rule.Chain, rule.RuleNum)
 		switch {
 		case rule.DstPort == "":
-			add(location + ": DNAT has no destination-port predicate; published-port exposure was not assessed")
+			add("docker", "DNAT has no destination-port predicate; published-port exposure was not assessed", location)
 		case rule.Protocol == "" || rule.Protocol == models.ProtoAll:
-			add(location + ": DNAT has no specific transport protocol; published-port exposure was not assessed")
+			add("docker", "DNAT has no specific transport protocol; published-port exposure was not assessed", location)
 		case len(portsInSpec(rule.DstPort)) == 0:
-			add(location + ": DNAT has an invalid destination-port predicate; published-port exposure was not assessed")
+			add("docker", "DNAT has an invalid destination-port predicate; published-port exposure was not assessed", location)
 		case rule.Negations["dport"]:
-			add(location + ": DNAT matches a negated destination port; published-port exposure was not assessed")
+			add("docker", "DNAT matches a negated destination port; published-port exposure was not assessed", location)
 		case rule.DNATTarget == "":
-			add(location + ": DNAT target is missing; translation was not assessed")
+			add("docker", "DNAT target is missing; translation was not assessed", location)
 		default:
 			translation, err := parseDNATTranslation(rule.DNATTarget)
 			if err != nil {
-				add(location + ": " + err.Error())
+				add("docker", err.Error(), location)
 			} else if translation.HasPort && translation.PortEnd > translation.PortStart &&
 				translation.PortEnd-translation.PortStart+1 < len(portsInSpec(rule.DstPort)) {
-				add(location + ": translated port range is shorter than the original port range; part of the mapping was not assessed")
+				add("docker", "translated port range is shorter than the original port range; part of the mapping was not assessed", location)
 			}
 		}
+	}
+	// A redirect sends a port to another local port. The listener is then
+	// reachable through the redirected port as well, which the analysis of
+	// INPUT does not follow yet.
+	for _, chainName := range sortedChainNames(nat) {
+		if chainName == "OUTPUT" || chainName == "POSTROUTING" {
+			continue
+		}
+		for _, rule := range nat.Chains[chainName].Rules {
+			if rule.Target == "REDIRECT" {
+				add("nat", "REDIRECT to a local port is not followed; the service behind it is also reachable through the redirected port",
+					fmt.Sprintf("nat/%s rule #%d", rule.Chain, rule.RuleNum))
+			}
+		}
+	}
+
+	diagnostics := make([]models.AssessmentDiagnostic, 0, len(groups))
+	for _, g := range groups {
+		where := abbreviateList(g.locations, 3)
+		if n := len(g.locations); n > 1 {
+			where = fmt.Sprintf("%d rules (%s)", n, where)
+		}
+		diagnostics = append(diagnostics, models.AssessmentDiagnostic{Area: g.area,
+			Message: fmt.Sprintf("IPv%d %s: %s", rs.IPVersion, where, g.reason)})
 	}
 	return diagnostics
 }
@@ -1005,20 +1077,20 @@ func allDNATRules(table *models.Table) []models.Rule {
 }
 
 type natWalkResult struct {
-	Reached   []netip.Prefix
-	Returned  []netip.Prefix
+	Reached   addrSet
+	Returned  addrSet
 	Uncertain bool
 }
 
-func sourcesReachingDNAT(rs *models.Ruleset, table *models.Table, target models.Rule, query packetQuery, sources []netip.Prefix) ([]netip.Prefix, bool) {
-	if sources == nil {
-		sources = []netip.Prefix{rootPrefix(rs.IPVersion)}
-	}
+// sourcesReachingDNAT returns the sources whose packets reach the DNAT rule
+// target in nat/PREROUTING, and whether that depends on an undecidable
+// predicate.
+func sourcesReachingDNAT(table *models.Table, target models.Rule, query packetQuery, sources addrSet) (addrSet, bool) {
 	result := walkNATChain(table, "PREROUTING", sources, target, query, newChainWalk(query))
-	return normalizePrefixes(result.Reached), result.Uncertain
+	return result.Reached, result.Uncertain
 }
 
-func walkNATChain(table *models.Table, chainName string, input []netip.Prefix, target models.Rule, query packetQuery, walk *chainWalk) natWalkResult {
+func walkNATChain(table *models.Table, chainName string, input addrSet, target models.Rule, query packetQuery, walk *chainWalk) natWalkResult {
 	chain := table.Chains[chainName]
 	if chain == nil || walk.path[chainName] {
 		return natWalkResult{}
@@ -1030,10 +1102,10 @@ func walkNATChain(table *models.Table, chainName string, input []netip.Prefix, t
 	walk.path[chainName] = true
 	defer delete(walk.path, chainName)
 
-	remaining := normalizePrefixes(input)
+	remaining := input
 	var result natWalkResult
 	for _, i := range ruleOrder(chain, query) {
-		if len(remaining) == 0 {
+		if remaining.empty() {
 			break
 		}
 		rule := &chain.Rules[i]
@@ -1042,38 +1114,39 @@ func walkNATChain(table *models.Table, chainName string, input []netip.Prefix, t
 			continue
 		}
 		matched, unmatched, sourceKnown := splitBySource(remaining, rule, query)
-		if len(matched) == 0 {
+		if matched.empty() {
 			continue
 		}
 		if certainty == matchMaybe || !sourceKnown {
-			unmatched = append(unmatched, matched...)
+			unmatched = remaining
 			result.Uncertain = true
 		}
-		remaining = normalizePrefixes(unmatched)
 
 		if rule.Table == target.Table && rule.Chain == target.Chain && rule.RuleNum == target.RuleNum {
-			result.Reached = append(result.Reached, matched...)
+			result.Reached = result.Reached.union(matched)
+			remaining = unmatched
 			continue
 		}
 		if _, isChain := table.Chains[rule.Target]; isChain {
 			child := walkNATChain(table, rule.Target, matched, target, query, walk)
-			result.Reached = append(result.Reached, child.Reached...)
+			result.Reached = result.Reached.union(child.Reached)
 			result.Uncertain = result.Uncertain || child.Uncertain
+			remaining = unmatched
 			if !rule.Goto {
-				remaining = normalizePrefixes(append(remaining, child.Returned...))
+				remaining = remaining.union(child.Returned)
 			}
 			continue
 		}
 		switch rule.Target {
 		case "RETURN":
-			result.Returned = append(result.Returned, matched...)
+			result.Returned = result.Returned.union(matched)
+			remaining = unmatched
 		case "ACCEPT", "DROP", "REJECT", "DNAT", "REDIRECT":
 			// These verdicts consume the matching branch in this hook.
-		default:
-			remaining = normalizePrefixes(append(remaining, matched...))
+			remaining = unmatched
 		}
 	}
-	result.Returned = normalizePrefixes(append(result.Returned, remaining...))
+	result.Returned = result.Returned.union(remaining)
 	return result
 }
 

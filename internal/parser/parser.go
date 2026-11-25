@@ -29,7 +29,11 @@ func Parse(data string, ipVersion models.IPVersion) (*models.Ruleset, error) {
 		// Control characters in comments or names would reach the terminal
 		// and copied commands; escaping keeps the tokenization unchanged.
 		line := textsafe.Escape(strings.TrimSpace(scanner.Text()))
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			noteSaveComment(rs, line)
 			continue
 		}
 		normalizedLine, counterErr := stripRuleCounters(line)
@@ -144,6 +148,49 @@ func Parse(data string, ipVersion models.IPVersion) (*models.Ruleset, error) {
 	return rs, errors.Join(parseErrs...)
 }
 
+// ParseNoTables returns the ruleset of iptables-save output that holds no
+// table at all: only blank lines and comments. This is what iptables-save
+// prints when no rules are loaded, so every chain accepts. ok is false for
+// any other input, which Parse must read.
+func ParseNoTables(data string, ipVersion models.IPVersion) (rs *models.Ruleset, ok bool) {
+	rs = &models.Ruleset{IPVersion: ipVersion, Tables: make(map[string]*models.Table)}
+	scanner := bufio.NewScanner(strings.NewReader(data))
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := textsafe.Escape(strings.TrimSpace(scanner.Text()))
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "#") {
+			return nil, false
+		}
+		noteSaveComment(rs, line)
+	}
+	if scanner.Err() != nil {
+		return nil, false
+	}
+	return rs, true
+}
+
+// noteSaveComment records the two comments with which the nf_tables variant
+// of iptables-save reports rules that it does not print.
+func noteSaveComment(rs *models.Ruleset, line string) {
+	switch {
+	case strings.Contains(line, "is incompatible, use 'nft' tool"):
+		// # Table `filter' is incompatible, use 'nft' tool.
+		name := "?"
+		if start := strings.Index(line, "`"); start >= 0 {
+			if end := strings.Index(line[start+1:], "'"); end >= 0 {
+				name = line[start+1 : start+1+end]
+			}
+		}
+		rs.Unreadable = append(rs.Unreadable, name)
+	case strings.Contains(line, "tables-legacy tables present"):
+		// # Warning: iptables-legacy tables present, use iptables-legacy-save to see them
+		rs.Warnings = append(rs.Warnings, strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(line, "#"), " Warning:")))
+	}
+}
+
 func stripRuleCounters(line string) (string, error) {
 	if !strings.HasPrefix(line, "[") {
 		return line, nil
@@ -223,6 +270,65 @@ func isBuiltinChain(tableName, chainName string) bool {
 	return builtins[tableName][chainName]
 }
 
+// token is one argument of a rule line. A quoted argument is always a value:
+// it is never an option name or a negation, whatever its text is.
+type token struct {
+	text   string
+	quoted bool
+}
+
+func (t token) isOption() bool { return !t.quoted && len(t.text) > 1 && t.text[0] == '-' }
+func (t token) isBang() bool   { return !t.quoted && t.text == "!" }
+func (t token) isMainFlag() bool {
+	return !t.quoted && isMainFlag(t.text)
+}
+
+// freeTextOptions take exactly one argument that cannot be recognized by its
+// form: iptables-save only quotes values that contain characters other than
+// letters, digits, "-" and "_", so a comment may be written as --comment -x-.
+var freeTextOptions = map[string]bool{
+	"--comment": true, "--log-prefix": true, "--nflog-prefix": true,
+	"--string": true, "--hex-string": true, "--name": true, "--hashlimit-name": true,
+	"--helper": true, "--u32": true, "--bytecode": true, "--object-pinned": true,
+	"--path": true, "--label": true, "--condition": true, "--nfacct-name": true,
+}
+
+// pairOptions take exactly two arguments.
+var pairOptions = map[string]bool{
+	"--tcp-flags": true, "--match-set": true,
+	"--add-set": true, "--del-set": true, "--map-set": true,
+}
+
+// optionValues returns the arguments of the option at tokens[i] and the index
+// of the token after them. Options that are not in the tables above take the
+// next token unless it looks like an option or a negation.
+func optionValues(tokens []token, i int) ([]string, int, error) {
+	option := tokens[i].text
+	count := 0
+	switch {
+	case pairOptions[option]:
+		count = 2
+	case freeTextOptions[option]:
+		count = 1
+	default:
+		if i+1 < len(tokens) && !tokens[i+1].isOption() && !tokens[i+1].isBang() {
+			return []string{tokens[i+1].text}, i + 2, nil
+		}
+		return nil, i + 1, nil
+	}
+	if i+count >= len(tokens) {
+		if count == 1 {
+			return nil, 0, fmt.Errorf("%s requires a value", option)
+		}
+		return nil, 0, fmt.Errorf("%s requires %d values", option, count)
+	}
+	values := make([]string, 0, count)
+	for k := 1; k <= count; k++ {
+		values = append(values, tokens[i+k].text)
+	}
+	return values, i + count + 1, nil
+}
+
 func parseRule(line string, tableName string, ipVersion models.IPVersion) (models.Rule, error) {
 	rule := models.Rule{
 		Table:     tableName,
@@ -231,282 +337,136 @@ func parseRule(line string, tableName string, ipVersion models.IPVersion) (model
 		Negations: make(map[string]bool),
 	}
 
-	tokens, err := tokenizeChecked(line)
+	tokens, err := tokenizeQuoted(line)
 	if err != nil {
 		return rule, err
 	}
-	if len(tokens) < 2 || tokens[0] != "-A" {
+	if len(tokens) < 2 || tokens[0].quoted || tokens[0].text != "-A" {
 		return rule, fmt.Errorf("invalid rule: %s", line)
 	}
 
-	rule.Chain = tokens[1]
+	rule.Chain = tokens[1].text
+
+	// field maps an address, port or interface option to the rule field it
+	// sets and the key of its negation.
+	field := func(option string) (*string, string) {
+		switch option {
+		case "-s", "--source":
+			return &rule.SrcAddr, "src"
+		case "-d", "--destination":
+			return &rule.DstAddr, "dst"
+		case "--sport", "--source-port", "--sports":
+			return &rule.SrcPort, "sport"
+		case "--dport", "--destination-port", "--dports":
+			return &rule.DstPort, "dport"
+		case "-i", "--in-interface":
+			return &rule.InIface, "in-iface"
+		case "-o", "--out-interface":
+			return &rule.OutIface, "out-iface"
+		}
+		return nil, ""
+	}
 
 	i := 2
 	negateNext := false
+	// value returns the argument of the main option at i.
+	value := func() (string, error) {
+		if i+1 >= len(tokens) {
+			return "", fmt.Errorf("%s requires a value", tokens[i].text)
+		}
+		return tokens[i+1].text, nil
+	}
 
 	for i < len(tokens) {
 		tok := tokens[i]
 
-		if tok == "!" {
+		if tok.isBang() {
 			negateNext = true
 			i++
 			continue
 		}
+		if tok.quoted {
+			// A quoted value without an option in front of it.
+			negateNext = false
+			i++
+			continue
+		}
 
-		switch tok {
+		switch tok.text {
 		case "-p", "--protocol":
-			if i+1 < len(tokens) {
-				rule.Protocol = models.Protocol(strings.ToLower(tokens[i+1]))
-				if negateNext {
-					rule.Negations["protocol"] = true
-					negateNext = false
-				}
-				i += 2
-			} else {
-				return rule, fmt.Errorf("%s requires a value", tok)
+			val, err := value()
+			if err != nil {
+				return rule, err
 			}
+			rule.Protocol = models.Protocol(strings.ToLower(val))
+			if negateNext {
+				rule.Negations["protocol"] = true
+				negateNext = false
+			}
+			i += 2
 
-		case "-s", "--source":
-			if i+1 < len(tokens) {
-				rule.SrcAddr = tokens[i+1]
-				if negateNext {
-					rule.Negations["src"] = true
-					negateNext = false
-				}
-				i += 2
-			} else {
-				return rule, fmt.Errorf("%s requires a value", tok)
+		case "-s", "--source", "-d", "--destination",
+			"--sport", "--source-port", "--sports",
+			"--dport", "--destination-port", "--dports",
+			"-i", "--in-interface", "-o", "--out-interface":
+			val, err := value()
+			if err != nil {
+				return rule, err
 			}
+			target, negation := field(tok.text)
+			*target = val
+			if negateNext {
+				rule.Negations[negation] = true
+				negateNext = false
+			}
+			i += 2
 
-		case "-d", "--destination":
-			if i+1 < len(tokens) {
-				rule.DstAddr = tokens[i+1]
-				if negateNext {
-					rule.Negations["dst"] = true
-					negateNext = false
-				}
-				i += 2
-			} else {
-				return rule, fmt.Errorf("%s requires a value", tok)
+		case "-j", "--jump", "-g", "--goto":
+			val, err := value()
+			if err != nil {
+				return rule, err
 			}
-
-		case "--sport", "--source-port":
-			if i+1 < len(tokens) {
-				rule.SrcPort = tokens[i+1]
-				if negateNext {
-					rule.Negations["sport"] = true
-					negateNext = false
-				}
-				i += 2
-			} else {
-				return rule, fmt.Errorf("%s requires a value", tok)
-			}
-
-		case "--dport", "--destination-port":
-			if i+1 < len(tokens) {
-				rule.DstPort = tokens[i+1]
-				if negateNext {
-					rule.Negations["dport"] = true
-					negateNext = false
-				}
-				i += 2
-			} else {
-				return rule, fmt.Errorf("%s requires a value", tok)
-			}
-
-		case "--dports":
-			if i+1 < len(tokens) {
-				rule.DstPort = tokens[i+1]
-				if negateNext {
-					rule.Negations["dport"] = true
-					negateNext = false
-				}
-				i += 2
-			} else {
-				return rule, fmt.Errorf("%s requires a value", tok)
-			}
-
-		case "--sports":
-			if i+1 < len(tokens) {
-				rule.SrcPort = tokens[i+1]
-				if negateNext {
-					rule.Negations["sport"] = true
-					negateNext = false
-				}
-				i += 2
-			} else {
-				return rule, fmt.Errorf("%s requires a value", tok)
-			}
-
-		case "-i", "--in-interface":
-			if i+1 < len(tokens) {
-				rule.InIface = tokens[i+1]
-				if negateNext {
-					rule.Negations["in-iface"] = true
-					negateNext = false
-				}
-				i += 2
-			} else {
-				return rule, fmt.Errorf("%s requires a value", tok)
-			}
-
-		case "-o", "--out-interface":
-			if i+1 < len(tokens) {
-				rule.OutIface = tokens[i+1]
-				if negateNext {
-					rule.Negations["out-iface"] = true
-					negateNext = false
-				}
-				i += 2
-			} else {
-				return rule, fmt.Errorf("%s requires a value", tok)
-			}
-
-		case "-j", "--jump":
-			if i+1 < len(tokens) {
-				rule.Target = tokens[i+1]
-				rule.Goto = false
-				i += 2
-			} else {
-				return rule, fmt.Errorf("%s requires a value", tok)
-			}
-
-		case "-g", "--goto":
-			if i+1 < len(tokens) {
-				rule.Target = tokens[i+1]
-				rule.Goto = true
-				i += 2
-			} else {
-				return rule, fmt.Errorf("%s requires a value", tok)
-			}
+			rule.Target = val
+			rule.Goto = tok.text == "-g" || tok.text == "--goto"
+			i += 2
 
 		case "-m", "--match":
-			if i+1 < len(tokens) {
-				mod := tokens[i+1]
-				ext := models.MatchExt{
-					Module:    mod,
-					Params:    make(map[string]string),
-					Negations: make(map[string]bool),
-				}
-				i += 2
-				paramsStart := i
-				// Consume module params until next flag
-				for i < len(tokens) && !isMainFlag(tokens[i]) {
-					param := tokens[i]
-					paramNegated := false
-					if param == "!" {
-						paramNegated = true
-						i++
-						if i >= len(tokens) {
-							return rule, fmt.Errorf("dangling negation in rule: %s", line)
-						}
-						param = tokens[i]
-					}
-					if strings.HasPrefix(param, "--") {
-						key := param
-						val := ""
-						if i+1 < len(tokens) && !strings.HasPrefix(tokens[i+1], "-") && tokens[i+1] != "!" {
-							val = tokens[i+1]
-							i++
-						}
-						if val == "" && moduleParamRequiresValue(key) {
-							return rule, fmt.Errorf("%s requires a value", key)
-						}
-						ext.Params[key] = val
-						if paramNegated {
-							ext.Negations[key] = true
-						}
-
-						// Extract well-known params to rule fields
-						switch key {
-						case "--ctstate", "--state":
-							rule.States = strings.Split(val, ",")
-							if paramNegated {
-								rule.Negations["state"] = true
-							}
-						case "--dport", "--destination-port":
-							if rule.DstPort == "" {
-								rule.DstPort = val
-							}
-							if paramNegated {
-								rule.Negations["dport"] = true
-							}
-						case "--sport", "--source-port":
-							if rule.SrcPort == "" {
-								rule.SrcPort = val
-							}
-							if paramNegated {
-								rule.Negations["sport"] = true
-							}
-						case "--dports", "--destination-ports":
-							if rule.DstPort == "" {
-								rule.DstPort = val
-							}
-							if paramNegated {
-								rule.Negations["dport"] = true
-							}
-						case "--sports", "--source-ports":
-							if rule.SrcPort == "" {
-								rule.SrcPort = val
-							}
-							if paramNegated {
-								rule.Negations["sport"] = true
-							}
-						case "--comment":
-							rule.Comment = strings.Trim(val, "\"")
-						case "--to-destination":
-							rule.DNATTarget = val
-						case "--to-source":
-							rule.DNATTarget = val
-						}
-					} else {
-						i++
-						continue
-					}
-					i++
-				}
-				ext.RawTokens = append(ext.RawTokens, tokens[paramsStart:i]...)
-				rule.Matches = append(rule.Matches, ext)
-				continue // don't increment i again
-			} else {
-				return rule, fmt.Errorf("%s requires a module name", tok)
+			if i+1 >= len(tokens) {
+				return rule, fmt.Errorf("%s requires a module name", tok.text)
 			}
-
-		case "--to-destination":
-			if i+1 < len(tokens) {
-				rule.DNATTarget = tokens[i+1]
-				i += 2
-			} else {
-				return rule, fmt.Errorf("%s requires a value", tok)
+			next, err := parseMatch(&rule, tokens, i, line)
+			if err != nil {
+				return rule, err
 			}
+			i = next
 
-		case "--to-source":
-			if i+1 < len(tokens) {
-				rule.DNATTarget = tokens[i+1]
-				i += 2
-			} else {
-				return rule, fmt.Errorf("%s requires a value", tok)
+		case "--to-destination", "--to-source":
+			val, err := value()
+			if err != nil {
+				return rule, err
 			}
+			rule.DNATTarget = val
+			i += 2
 
 		case "--comment":
-			if i+1 < len(tokens) {
-				rule.Comment = strings.Trim(tokens[i+1], "\"")
-				i += 2
-			} else {
-				return rule, fmt.Errorf("%s requires a value", tok)
+			val, err := value()
+			if err != nil {
+				return rule, err
 			}
+			rule.Comment = strings.Trim(val, "\"")
+			i += 2
 
 		case "--ctstate", "--state":
-			if i+1 < len(tokens) {
-				rule.States = strings.Split(tokens[i+1], ",")
-				if negateNext {
-					rule.Negations["state"] = true
-					negateNext = false
-				}
-				i += 2
-			} else {
-				return rule, fmt.Errorf("%s requires a value", tok)
+			val, err := value()
+			if err != nil {
+				return rule, err
 			}
+			rule.States = strings.Split(val, ",")
+			if negateNext {
+				rule.Negations["state"] = true
+				negateNext = false
+			}
+			i += 2
 
 		case "-f", "--fragment":
 			rule.Fragment = true
@@ -516,44 +476,148 @@ func parseRule(line string, tableName string, ipVersion models.IPVersion) (model
 			}
 			i++
 
+		case "-4", "--ipv4", "-6", "--ipv6":
+			i++
+
+		case "-c", "--set-counters":
+			// Packet and byte counters do not affect what the rule matches.
+			if i+2 >= len(tokens) {
+				return rule, fmt.Errorf("%s requires 2 values", tok.text)
+			}
+			i += 3
+
 		default:
-			if rule.Target != "" && strings.HasPrefix(tok, "-") && !negateNext {
-				// iptables-save emits target options after the target. They do
-				// not constrain which packets the rule matches.
-				rule.TargetArgs = append(rule.TargetArgs, tok)
-				for i+1 < len(tokens) && !strings.HasPrefix(tokens[i+1], "-") && tokens[i+1] != "!" {
-					rule.TargetArgs = append(rule.TargetArgs, tokens[i+1])
-					i++
-				}
+			if !tok.isOption() {
+				negateNext = false
 				i++
 				continue
 			}
-			if strings.HasPrefix(tok, "-") && !isTargetOption(tok) {
-				rawTokens := []string{tok}
-				if negateNext {
-					rawTokens = []string{"!", tok}
+			if rule.Target != "" && !negateNext {
+				// iptables-save emits target options after the target. They do
+				// not constrain which packets the rule matches.
+				values, next, err := optionValues(tokens, i)
+				if err != nil {
+					return rule, err
 				}
-				ext := models.MatchExt{Module: "raw", Params: map[string]string{}, Negations: map[string]bool{}, RawTokens: rawTokens}
-				val := ""
-				if i+1 < len(tokens) && !strings.HasPrefix(tokens[i+1], "-") && tokens[i+1] != "!" {
-					val = tokens[i+1]
-					ext.RawTokens = append(ext.RawTokens, val)
-					i++
+				rule.TargetArgs = append(rule.TargetArgs, tok.text)
+				rule.TargetArgs = append(rule.TargetArgs, values...)
+				for next < len(tokens) && !tokens[next].isOption() && !tokens[next].isBang() {
+					rule.TargetArgs = append(rule.TargetArgs, tokens[next].text)
+					next++
 				}
-				ext.Params[tok] = val
-				if negateNext {
-					ext.Negations[tok] = true
-				}
-				rule.Matches = append(rule.Matches, ext)
+				i = next
+				continue
 			}
+			if isTargetOption(tok.text) {
+				negateNext = false
+				i++
+				continue
+			}
+			rawTokens := []string{tok.text}
+			if negateNext {
+				rawTokens = []string{"!", tok.text}
+			}
+			ext := models.MatchExt{Module: "raw", Params: map[string]string{}, Negations: map[string]bool{}, RawTokens: rawTokens}
+			values, next, err := optionValues(tokens, i)
+			if err != nil {
+				return rule, err
+			}
+			ext.RawTokens = append(ext.RawTokens, values...)
+			ext.Params[tok.text] = strings.Join(values, " ")
+			if negateNext {
+				ext.Negations[tok.text] = true
+			}
+			rule.Matches = append(rule.Matches, ext)
 			negateNext = false
-			i++
+			i = next
 		}
 	}
 	if negateNext {
 		return rule, fmt.Errorf("dangling negation in rule: %s", line)
 	}
 	return rule, nil
+}
+
+// parseMatch parses "-m module" at tokens[i] with the options that follow it,
+// up to the next option of the rule itself. It returns the index of the first
+// token it did not consume.
+func parseMatch(rule *models.Rule, tokens []token, i int, line string) (int, error) {
+	ext := models.MatchExt{
+		Module:    tokens[i+1].text,
+		Params:    make(map[string]string),
+		Negations: make(map[string]bool),
+	}
+	i += 2
+	start := i
+	for i < len(tokens) {
+		tok := tokens[i]
+		negated := false
+		if tok.isBang() {
+			if i+1 >= len(tokens) {
+				return i, fmt.Errorf("dangling negation in rule: %s", line)
+			}
+			if tokens[i+1].isMainFlag() {
+				break // "! -i eth0" negates an option of the rule, not of the module
+			}
+			negated = true
+			i++
+			tok = tokens[i]
+		} else if tok.isMainFlag() {
+			break
+		}
+		if !tok.isOption() || !strings.HasPrefix(tok.text, "--") {
+			// An argument this parser does not attribute to an option. It stays
+			// in RawTokens, so the rule is not mistaken for an unconditional one.
+			i++
+			continue
+		}
+		key := tok.text
+		values, next, err := optionValues(tokens, i)
+		if err != nil {
+			return i, err
+		}
+		val := strings.Join(values, " ")
+		if val == "" && moduleParamRequiresValue(key) {
+			return i, fmt.Errorf("%s requires a value", key)
+		}
+		ext.Params[key] = val
+		if negated {
+			ext.Negations[key] = true
+		}
+
+		// Extract well-known params to rule fields
+		switch key {
+		case "--ctstate", "--state":
+			rule.States = strings.Split(val, ",")
+			if negated {
+				rule.Negations["state"] = true
+			}
+		case "--dport", "--destination-port", "--dports", "--destination-ports":
+			if rule.DstPort == "" {
+				rule.DstPort = val
+			}
+			if negated {
+				rule.Negations["dport"] = true
+			}
+		case "--sport", "--source-port", "--sports", "--source-ports":
+			if rule.SrcPort == "" {
+				rule.SrcPort = val
+			}
+			if negated {
+				rule.Negations["sport"] = true
+			}
+		case "--comment":
+			rule.Comment = strings.Trim(val, "\"")
+		case "--to-destination", "--to-source":
+			rule.DNATTarget = val
+		}
+		i = next
+	}
+	for _, tok := range tokens[start:i] {
+		ext.RawTokens = append(ext.RawTokens, tok.text)
+	}
+	rule.Matches = append(rule.Matches, ext)
+	return i, nil
 }
 
 func moduleParamRequiresValue(param string) bool {
@@ -563,7 +627,8 @@ func moduleParamRequiresValue(param string) bool {
 		"--to-destination", "--to-source", "--seconds", "--hitcount", "--limit",
 		"--limit-burst", "--icmp-type", "--icmpv6-type", "--dst-type", "--src-type",
 		"--mark", "--match-set", "--probability", "--every", "--mode",
-		"--ctorigdstport", "--ctorigdst", "--ctdir":
+		"--ctorigdstport", "--ctorigdst", "--ctdir", "--tcp-flags",
+		"--src-range", "--dst-range", "--mac-source":
 		return true
 	default:
 		return false
@@ -608,7 +673,21 @@ func tokenize(line string) []string {
 }
 
 func tokenizeChecked(line string) ([]string, error) {
-	var tokens []string
+	tokens, err := tokenizeQuoted(line)
+	if err != nil {
+		return nil, err
+	}
+	texts := make([]string, len(tokens))
+	for i, tok := range tokens {
+		texts[i] = tok.text
+	}
+	return texts, nil
+}
+
+// tokenizeQuoted splits a rule line into tokens and records which of them
+// were quoted.
+func tokenizeQuoted(line string) ([]token, error) {
+	var tokens []token
 	var current strings.Builder
 	inQuote := false
 	quoteChar := byte(0)
@@ -629,7 +708,7 @@ func tokenizeChecked(line string) ([]string, error) {
 			}
 			if ch == quoteChar {
 				inQuote = false
-				tokens = append(tokens, current.String())
+				tokens = append(tokens, token{text: current.String(), quoted: true})
 				current.Reset()
 			} else {
 				current.WriteByte(ch)
@@ -638,12 +717,12 @@ func tokenizeChecked(line string) ([]string, error) {
 			inQuote = true
 			quoteChar = ch
 			if current.Len() > 0 {
-				tokens = append(tokens, current.String())
+				tokens = append(tokens, token{text: current.String()})
 				current.Reset()
 			}
 		case ch == ' ' || ch == '\t':
 			if current.Len() > 0 {
-				tokens = append(tokens, current.String())
+				tokens = append(tokens, token{text: current.String()})
 				current.Reset()
 			}
 		default:
@@ -654,7 +733,7 @@ func tokenizeChecked(line string) ([]string, error) {
 		return nil, fmt.Errorf("unterminated quoted string in rule: %s", line)
 	}
 	if current.Len() > 0 {
-		tokens = append(tokens, current.String())
+		tokens = append(tokens, token{text: current.String()})
 	}
 	return tokens, nil
 }

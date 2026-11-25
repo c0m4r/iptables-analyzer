@@ -10,10 +10,11 @@ import (
 
 func TestShadowDetection(t *testing.T) {
 	data := `*filter
-:INPUT ACCEPT [0:0]
--A INPUT -j ACCEPT
+:INPUT DROP [0:0]
+-A INPUT -p tcp -j ACCEPT
 -A INPUT -p tcp --dport 80 -j DROP
 -A INPUT -p tcp --dport 3306 -j DROP
+-A INPUT -p udp --dport 53 -j ACCEPT
 COMMIT
 `
 	rs, err := parser.Parse(data, models.IPv4)
@@ -26,13 +27,45 @@ COMMIT
 		t.Fatalf("expected 2 shadowed rules, got %d", len(findings))
 	}
 
-	// Both should be shadowed by rule #1 (ACCEPT all)
+	// Both should be shadowed by rule #1 (ACCEPT all TCP)
 	for _, f := range findings {
 		if f.ShadowingRule.RuleNum != 1 {
 			t.Errorf("expected shadowing rule #1, got #%d", f.ShadowingRule.RuleNum)
 		}
 		if f.Severity != models.SeverityHigh {
 			t.Errorf("expected HIGH severity (opposite actions), got %s", f.Severity.String())
+		}
+	}
+}
+
+// Rules behind a rule that ends the chain for every packet are one
+// "unreachable rules" finding, not a shadow finding and a dead-rule finding
+// for each of them (audit B12).
+func TestRulesBehindCatchAllAreOneFinding(t *testing.T) {
+	rs := parseRules(t, `*filter
+:INPUT ACCEPT [0:0]
+-A INPUT -p tcp --dport 22 -j ACCEPT
+-A INPUT -j ACCEPT
+-A INPUT -p tcp --dport 80 -j DROP
+-A INPUT -p tcp --dport 3306 -j DROP
+-A INPUT -s 10.0.0.0/8 -p tcp --dport 5432 -j ACCEPT
+COMMIT
+`, models.IPv4)
+	if findings := DetectShadowedRules(rs); len(findings) != 0 {
+		t.Fatalf("rules behind the catch-all were also reported as shadowed: %+v", findings)
+	}
+	var dead []models.EffectivenessFinding
+	for _, finding := range CheckEffectiveness(rs) {
+		if finding.Code == models.FindingDeadRule {
+			dead = append(dead, finding)
+		}
+	}
+	if len(dead) != 1 || dead[0].Severity != models.SeverityHigh || dead[0].Rule == nil || dead[0].Rule.RuleNum != 2 {
+		t.Fatalf("expected one HIGH finding caused by rule #2: %+v", dead)
+	}
+	for _, wanted := range []string{"Rules #3-#5 (3 rules)", "rule #2", "2 of them are DROP or REJECT"} {
+		if !strings.Contains(dead[0].Detail, wanted) {
+			t.Errorf("detail lacks %q: %s", wanted, dead[0].Detail)
 		}
 	}
 }
@@ -117,15 +150,7 @@ func TestDeadRuleDetection(t *testing.T) {
 COMMIT
 `
 	rs, _ := parser.Parse(data, models.IPv4)
-	findings := CheckEffectiveness(rs)
-
-	hasDeadRule := false
-	for _, f := range findings {
-		if f.Title == "Dead rule in filter/INPUT" {
-			hasDeadRule = true
-		}
-	}
-	if !hasDeadRule {
+	if !hasEffectiveness(CheckEffectiveness(rs), models.FindingDeadRule) {
 		t.Error("expected to find dead rule after catch-all DROP")
 	}
 }
@@ -432,10 +457,8 @@ COMMIT
 	if findings := DetectShadowedRules(rs); len(findings) != 0 {
 		t.Fatalf("unknown set match must not prove shadowing: %+v", findings)
 	}
-	for _, finding := range CheckEffectiveness(rs) {
-		if finding.Title == "Dead rule in filter/INPUT" {
-			t.Fatalf("probabilistic DROP must not make later rules dead: %+v", finding)
-		}
+	if hasEffectiveness(CheckEffectiveness(rs), models.FindingDeadRule) {
+		t.Fatal("probabilistic DROP must not make later rules dead")
 	}
 }
 
@@ -798,12 +821,14 @@ COMMIT
 	}
 }
 
+// A match that the analysis cannot judge at all leaves the exposure possible.
 func TestUndecidableAcceptIsPossible(t *testing.T) {
-	rs := parseRules(t, "*filter\n:INPUT DROP [0:0]\n-A INPUT -p tcp --dport 8080 -m set --match-set admins src -j ACCEPT\nCOMMIT\n", models.IPv4)
+	rs := parseRules(t, "*filter\n:INPUT DROP [0:0]\n-A INPUT -p tcp --dport 8080 -m mark --mark 0x1 -j ACCEPT\nCOMMIT\n", models.IPv4)
 	result := Analyze(rs, nil)
 	CrossReferenceServices(result, []models.ListeningService{testService()})
-	if len(result.ExposedServices) != 1 || result.ExposedServices[0].Certainty != models.CertaintyPossible {
-		t.Fatalf("an ipset-dependent accept is only possible: %+v", result.ExposedServices)
+	if len(result.ExposedServices) != 1 || result.ExposedServices[0].Certainty != models.CertaintyPossible ||
+		result.ExposedServices[0].Scope != models.ScopeExposed {
+		t.Fatalf("a mark-dependent accept is only possible: %+v", result.ExposedServices)
 	}
 }
 

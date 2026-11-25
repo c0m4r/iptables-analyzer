@@ -16,12 +16,15 @@ A command-line tool that examines iptables and ip6tables rules and finds securit
 
 The tool reads iptables and ip6tables rules and finds these problems:
 
+- Chains that accept all traffic by default, by their policy or by a rule.
+- Ports and port ranges that are open to all sources, also when no service listens on them.
+- Listening services that the firewall does not protect.
+- Ports that are open on IPv6 and restricted on IPv4.
 - Rules that never match, because an earlier rule matches the same packets.
 - Docker published ports that bypass the INPUT rules.
 - DOCKER-USER and FORWARD rules that have no effect on Docker traffic.
 - Containers that other hosts can reach by direct routing.
-- Listening services that the firewall does not protect.
-- ACCEPT default policies, a missing conntrack rule, and blocked IPv6 neighbor discovery.
+- Dropped replies, dropped loopback traffic, and blocked IPv6 neighbor discovery.
 
 The tool gives a security score from 0 to 100 and a grade from A to F.
 It also gives recommendations and a recommended baseline firewall for IPv4 and IPv6.
@@ -103,7 +106,10 @@ sudo iptables-analyzer
    ```
 
 Without a services file, the tool cannot examine the service exposure.
-The grade is then `INCOMPLETE`.
+The grade is then `INCOMPLETE`. The report still shows the ports that the rules open.
+
+Without `--file6`, the tool examines only IPv4, and the report says so.
+An empty rules file means that no rules are loaded: all traffic is accepted.
 
 ### Options
 

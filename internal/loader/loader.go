@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/c0m4r/iptables-analyzer/internal/models"
@@ -22,13 +23,14 @@ type Config struct {
 	IPv6Only bool
 }
 
-// Source is the unparsed iptables-save text of one address family.
-// A nil *Source means the family was excluded; an empty Data with
-// Empty set means that no rules were supplied for it.
+// Source is the unparsed iptables-save text of one address family. A nil
+// *Source means that there is no input for the family: it was excluded, or
+// file analysis got no file for it.
 type Source struct {
 	Version models.IPVersion
 	Data    string
-	Empty   bool
+	// Warnings are messages of the live tool about rules it does not print.
+	Warnings []string
 }
 
 // Sources holds the collected, still unparsed input of both families.
@@ -93,23 +95,38 @@ func readOne(filePath string, live bool, command string, ver models.IPVersion) (
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		out, err := safeio.Run(ctx, command, nil, safeio.MaxRulesSize)
+		out, stderr, err := safeio.RunOutput(ctx, command, nil, safeio.MaxRulesSize)
 		if err != nil {
 			return nil, err
 		}
-		return &Source{Version: ver, Data: string(out)}, nil
+		src := &Source{Version: ver, Data: string(out)}
+		for _, line := range strings.Split(stderr, "\n") {
+			// "# Warning: iptables-legacy tables present, use iptables-legacy-save to see them"
+			if strings.Contains(line, "tables-legacy tables present") {
+				src.Warnings = append(src.Warnings, strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(line), "#"), " Warning:")))
+			}
+		}
+		return src, nil
 	}
-	return &Source{Version: ver, Empty: true}, nil
+	return nil, nil
 }
 
+// parseOne parses one family. Output without any table is what iptables-save
+// prints when no rules are loaded: it is a ruleset in which every chain
+// accepts, not an error.
 func parseOne(src *Source) (*models.Ruleset, error) {
 	if src == nil {
 		return nil, nil
 	}
-	if src.Empty {
-		return &models.Ruleset{IPVersion: src.Version, Tables: make(map[string]*models.Table)}, nil
+	rs, ok := parser.ParseNoTables(src.Data, src.Version)
+	if !ok {
+		var err error
+		if rs, err = parser.Parse(src.Data, src.Version); err != nil {
+			return rs, err
+		}
 	}
-	return parser.Parse(src.Data, src.Version)
+	rs.Warnings = append(rs.Warnings, src.Warnings...)
+	return rs, nil
 }
 
 // IsRoot returns true if the process is running as root

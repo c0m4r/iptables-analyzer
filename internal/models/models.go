@@ -24,17 +24,24 @@ const (
 type FindingCode string
 
 const (
+	// FindingPolicyAccept: a built-in chain accepts the traffic that no rule
+	// names, by its policy or by a rule that accepts everything.
 	FindingPolicyAccept     FindingCode = "policy_accept"
 	FindingDeadRule         FindingCode = "dead_rule"
 	FindingMissingConntrack FindingCode = "missing_conntrack"
-	FindingLateConntrack    FindingCode = "late_conntrack"
-	FindingMissingFinalDrop FindingCode = "missing_final_drop"
 	FindingShadowedRule     FindingCode = "shadowed_rule"
-	FindingDockerBypass     FindingCode = "docker_bypass"
-	FindingExposedService   FindingCode = "exposed_service"
-	FindingUnusedRule       FindingCode = "unused_rule"
-	FindingMissingLoopback  FindingCode = "missing_loopback"
-	FindingIPv6NDPBlocked   FindingCode = "ipv6_ndp_blocked"
+	// FindingBroadAccept: a wide range of ports is open to any source.
+	FindingBroadAccept FindingCode = "broad_accept"
+	// FindingFamilyBlocked: INPUT accepts nothing at all for this family.
+	FindingFamilyBlocked FindingCode = "family_blocked"
+	// FindingIPv6Wider: a port is open to any source on IPv6 that IPv4
+	// restricts or filters.
+	FindingIPv6Wider       FindingCode = "ipv6_wider_than_ipv4"
+	FindingDockerBypass    FindingCode = "docker_bypass"
+	FindingExposedService  FindingCode = "exposed_service"
+	FindingUnusedRule      FindingCode = "unused_rule"
+	FindingMissingLoopback FindingCode = "missing_loopback"
+	FindingIPv6NDPBlocked  FindingCode = "ipv6_ndp_blocked"
 
 	// Docker-specific findings. FindingDockerBypass is reserved for published
 	// ports that filter/INPUT (or its default policy) would have refused.
@@ -78,6 +85,9 @@ const (
 	ServiceFiltered    ServiceStatus = "FILTERED"
 	ServiceReachable   ServiceStatus = "REACHABLE"
 	ServiceLocalhost   ServiceStatus = "LOCALHOST"
+	// ServiceInternal marks a listener that only guests of this host reach:
+	// containers and virtual machines behind a bridge such as docker0 or virbr0.
+	ServiceInternal ServiceStatus = "INTERNAL"
 	// ServiceDocker marks a listener whose port Docker DNATs before INPUT;
 	// its reachability is that of the published port.
 	ServiceDocker ServiceStatus = "DOCKER_PUBLISHED"
@@ -214,15 +224,46 @@ type Table struct {
 type Ruleset struct {
 	IPVersion IPVersion
 	Tables    map[string]*Table
+	// Warnings repeat what iptables-save reported about rules that are in
+	// effect but not part of its output (tables of the other backend).
+	Warnings []string `json:",omitempty"`
+	// Unreadable names tables that hold native nftables rules, which
+	// iptables-save cannot print. Their filtering is unknown.
+	Unreadable []string `json:",omitempty"`
 }
+
+// FamilyStatus tells how much is known about the rules of one address family.
+type FamilyStatus string
+
+const (
+	// FamilyAnalyzed: tables were read and analyzed.
+	FamilyAnalyzed FamilyStatus = "ANALYZED"
+	// FamilyNoRules: the rules were read and nothing is loaded, so every
+	// packet of this family is accepted.
+	FamilyNoRules FamilyStatus = "NO_RULES"
+	// FamilyExcluded: left out on request (-4 or -6).
+	FamilyExcluded FamilyStatus = "EXCLUDED"
+	// FamilyNotSupplied: file analysis without a file for this family.
+	FamilyNotSupplied FamilyStatus = "NOT_SUPPLIED"
+	// FamilyUnreadable: the rules are native nftables rules that
+	// iptables-save cannot print.
+	FamilyUnreadable FamilyStatus = "UNREADABLE"
+)
 
 // ListeningService from ss output
 type ListeningService struct {
-	Protocol   Protocol
-	Address    string
-	Port       int
-	Process    string
-	PID        int
+	Protocol Protocol
+	Address  string
+	// Device is the interface of an address shown as "addr%dev": the socket is
+	// bound to that device, or the address is link-local on it. Such a socket
+	// only receives packets that arrive on the device.
+	Device  string `json:",omitempty"`
+	Port    int
+	Process string
+	PID     int
+	// Processes names every process that holds the socket. A socket-activated
+	// daemon shares it with systemd.
+	Processes  []string `json:",omitempty"`
 	IsIPv6     bool
 	IsWildcard bool // bound to 0.0.0.0 or ::
 	Family     SocketFamily
@@ -233,22 +274,45 @@ type ListeningService struct {
 type AnalysisResult struct {
 	IPv4Rules         *Ruleset
 	IPv6Rules         *Ruleset
-	IPv4Only          bool // set when -4 flag is used; IPv6 stack was not analyzed
-	IPv6Only          bool // set when -6 flag is used; IPv4 stack was not analyzed
+	IPv4Only          bool // the IPv6 stack was not analyzed (-4, or no IPv6 input)
+	IPv6Only          bool // the IPv4 stack was not analyzed (-6, or no IPv4 input)
+	IPv4Status        FamilyStatus
+	IPv6Status        FamilyStatus
 	ServiceAssessment AssessmentStatus
 	Diagnostics       []AssessmentDiagnostic
+	Notes             []string `json:",omitempty"` // scope of the analysis; not a defect of it
 	Services          []ListeningService
 	Host              *HostContext
 	ShadowedRules     []ShadowFinding
 	DockerBypasses    []DockerBypassFinding
 	PublishedPorts    []PublishedPort
 	ExposedServices   []ExposedServiceFinding
+	OpenPorts         []OpenPort
 	UnusedRules       []UnusedRuleFinding
 	EffectiveIssues   []EffectivenessFinding
 	Recommendations   []Recommendation
 	Baseline          Baseline
 	Score             ScoreResult
 	Sandbox           *SandboxStatus `json:",omitempty"`
+}
+
+// FamilyState returns the status of an address family. Results that were
+// built without a status get one from their rulesets: no ruleset, or one
+// without tables, means that nothing filters the family.
+func (r *AnalysisResult) FamilyState(version IPVersion) FamilyStatus {
+	status, rs, excluded := r.IPv4Status, r.IPv4Rules, r.IPv6Only
+	if version == IPv6 {
+		status, rs, excluded = r.IPv6Status, r.IPv6Rules, r.IPv4Only
+	}
+	switch {
+	case status != "":
+		return status
+	case excluded:
+		return FamilyExcluded
+	case rs == nil || len(rs.Tables) == 0:
+		return FamilyNoRules
+	}
+	return FamilyAnalyzed
 }
 
 // SandboxStatus records the confinement in effect while the collected input
@@ -310,6 +374,25 @@ type PublishedPort struct {
 	Interfaces    []string
 }
 
+// OpenPort is a range of destination ports for which the firewall accepts
+// new connections to the host itself, whether or not a service listens.
+// Ports that nat/PREROUTING translates are listed as published ports instead.
+type OpenPort struct {
+	IPVersion   IPVersion
+	Protocol    Protocol
+	First       int
+	Last        int
+	Scope       AccessScope
+	Certainty   Certainty
+	Condition   string   `json:",omitempty"` // e.g. "rate limit"
+	Restriction string   `json:",omitempty"` // for RESTRICTED: e.g. "ipset trusted"
+	Interfaces  []string `json:",omitempty"` // empty means every interface
+	Rule        *Rule    `json:",omitempty"` // nil when a chain policy accepts
+	// Unnamed is true for ports that no rule names: they show what the
+	// firewall does by default.
+	Unnamed bool `json:",omitempty"`
+}
+
 // HostInterface describes one network interface of the analyzed host.
 type HostInterface struct {
 	Name  string
@@ -336,6 +419,7 @@ type AccessScope string
 const (
 	ScopeExposed     AccessScope = "EXPOSED"     // reachable from any source
 	ScopeSubnet      AccessScope = "SUBNET"      // reachable only from specific public networks (at most a /16 or an IPv6 /48 in total)
+	ScopeRestricted  AccessScope = "RESTRICTED"  // reachable only from sources that a match selects which the analysis cannot evaluate (ipset, MAC address)
 	ScopeLocalnet    AccessScope = "LOCALNET"    // reachable only from private IP ranges
 	ScopeWhitelisted AccessScope = "WHITELISTED" // reachable only from specific /32 hosts
 )
@@ -350,7 +434,13 @@ type ExposedServiceFinding struct {
 	Severity     Severity
 	Scope        AccessScope
 	Interfaces   []string // ingress interfaces with this exposure; empty means any
-	Reason       string
+	// Condition names what a packet must meet to be accepted from the scope,
+	// for example "rate limit" or "source port 67". Empty when unconditional.
+	Condition string `json:",omitempty"`
+	// Restriction names what selects the sources of a RESTRICTED scope,
+	// for example "ipset trusted".
+	Restriction string `json:",omitempty"`
+	Reason      string
 }
 
 // UnusedRuleFinding represents a firewall rule with no matching service
@@ -371,6 +461,10 @@ type EffectivenessFinding struct {
 	Chain     string
 	Table     string
 	IPVersion IPVersion
+	Rule      *Rule `json:",omitempty"` // the rule that causes the finding, when one does
+	// Unrestricted marks a default accept that holds for every interface,
+	// both transport protocols and every packet: the chain filters nothing.
+	Unrestricted bool `json:",omitempty"`
 }
 
 // Recommendation is a security improvement suggestion
@@ -388,4 +482,6 @@ type ScoreResult struct {
 	Grade      string
 	Complete   bool
 	Unassessed []string
+	// Cap explains a grade that is lower than the points alone would give.
+	Cap string `json:",omitempty"`
 }

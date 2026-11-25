@@ -187,13 +187,17 @@ func runAnalysis(cmd *cobra.Command, opts *commandOptions, deps commandDependenc
 		capture = deps.collectServices()
 	}
 
+	// File analysis without a file for one family says nothing about that
+	// family: it is left out like with -4 or -6, and the report says so.
+	ipv4Missing := !live && opts.ipv4File == "" && !opts.ipv6Only
+	ipv6Missing := !live && opts.ipv6File == "" && !opts.ipv4Only
 	renderOpts := ui.RenderOptions{
 		NoColor:  opts.noColor,
 		Verbose:  opts.verbose,
 		JSON:     opts.jsonOutput,
 		LiveMode: live,
-		IPv4Only: opts.ipv4Only,
-		IPv6Only: opts.ipv6Only,
+		IPv4Only: opts.ipv4Only || ipv6Missing,
+		IPv6Only: opts.ipv6Only || ipv4Missing,
 		Version:  Version,
 		Writer:   cmd.OutOrStdout(),
 	}
@@ -210,8 +214,16 @@ func runAnalysis(cmd *cobra.Command, opts *commandOptions, deps commandDependenc
 		return fmt.Errorf("loading rules: %w", err)
 	}
 	result := analyzer.AnalyzeHost(ipv4Rules, ipv6Rules, host)
-	result.IPv4Only = opts.ipv4Only
-	result.IPv6Only = opts.ipv6Only
+	result.IPv4Only = renderOpts.IPv4Only
+	result.IPv6Only = renderOpts.IPv6Only
+	if ipv4Missing {
+		result.IPv4Status = models.FamilyNotSupplied
+		result.Notes = append(result.Notes, "IPv4 rules were not supplied (--file): only IPv6 was analyzed.")
+	}
+	if ipv6Missing {
+		result.IPv6Status = models.FamilyNotSupplied
+		result.Notes = append(result.Notes, "IPv6 rules were not supplied (--file6): only IPv4 was analyzed. IPv4 rules do not filter IPv6.")
+	}
 	result.Sandbox = &status
 	if opts.servicesFile != "" {
 		svcs, err := services.ParseSSData(servicesData)

@@ -25,7 +25,9 @@ func TestConditionalFinalDropDoesNotHideAcceptPolicy(t *testing.T) {
 -A INPUT -m conntrack --ctstate INVALID -j DROP
 COMMIT
 `)
-	score := Calculate(&models.AnalysisResult{IPv4Rules: rs, IPv4Only: true})
+	result := analyzer.Analyze(rs, nil)
+	result.IPv4Only = true
+	score := Calculate(result)
 	if score.Breakdown["policy"] != -15 {
 		t.Fatalf("expected INPUT policy deduction, got %+v", score.Breakdown)
 	}
@@ -41,7 +43,8 @@ COMMIT
 	result := analyzer.Analyze(rs, nil)
 	result.IPv4Only = true
 	score := Calculate(result)
-	if score.Breakdown["policy"] != -25 || score.Breakdown["hygiene"] != 0 {
+	// INPUT -15; FORWARD -5 while nothing shows that the host routes packets.
+	if score.Breakdown["policy"] != -20 || score.Breakdown["hygiene"] != 0 {
 		t.Fatalf("unexpected breakdown: %+v", score.Breakdown)
 	}
 }
@@ -56,8 +59,10 @@ COMMIT
 	if err != nil {
 		t.Fatal(err)
 	}
-	score := Calculate(&models.AnalysisResult{IPv6Rules: rs, IPv6Only: true})
-	if score.Breakdown["policy"] != -25 || score.Breakdown["ipv6"] != 0 {
+	result := analyzer.Analyze(nil, rs)
+	result.IPv6Only = true
+	score := Calculate(result)
+	if score.Breakdown["policy"] != -20 || score.Breakdown["ipv6"] != 0 {
 		t.Fatalf("unexpected IPv6-only breakdown: %+v", score.Breakdown)
 	}
 }
@@ -133,5 +138,74 @@ func TestDockerFindingsAreScoredByKind(t *testing.T) {
 	}
 	if score.Breakdown["shadow"] != -17 {
 		t.Fatalf("bypass (-12) and ineffective rule (-5) expected: %+v", score.Breakdown)
+	}
+}
+
+func analyzed(t *testing.T, data string) *models.AnalysisResult {
+	t.Helper()
+	result := analyzer.Analyze(parseRules(t, data), nil)
+	result.IPv4Only = true
+	analyzer.CrossReferenceServices(result, nil)
+	return result
+}
+
+// Audit A1, E1: a firewall that accepts every connection cannot get a good
+// grade, whatever the policy line says and whether or not something listens.
+func TestAcceptAllRulesetIsGradedF(t *testing.T) {
+	for name, data := range map[string]string{
+		"rule under a DROP policy": "*filter\n:INPUT DROP [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\n-A INPUT -j ACCEPT\nCOMMIT\n",
+		"ACCEPT policy":            "*filter\n:INPUT ACCEPT [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\nCOMMIT\n",
+	} {
+		score := Calculate(analyzed(t, data))
+		if score.Grade != "F" || score.Breakdown["policy"] != -15 || score.Cap == "" {
+			t.Errorf("%s: grade %s, %+v, cap %q", name, score.Grade, score.Breakdown, score.Cap)
+		}
+	}
+}
+
+// Audit B2: an ACCEPT policy behind a final REJECT denies by default.
+func TestFinalRejectUnderAcceptPolicyIsDefaultDeny(t *testing.T) {
+	score := Calculate(analyzed(t, "*filter\n:INPUT ACCEPT [0:0]\n:FORWARD ACCEPT [0:0]\n:OUTPUT ACCEPT [0:0]\n"+
+		"-A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT\n-A INPUT -i lo -j ACCEPT\n"+
+		"-A INPUT -j REJECT --reject-with icmp-host-prohibited\n-A FORWARD -j REJECT --reject-with icmp-host-prohibited\nCOMMIT\n"))
+	if score.Total != 100 || score.Grade != "A" {
+		t.Fatalf("classic RHEL layout: %d %s %+v", score.Total, score.Grade, score.Breakdown)
+	}
+}
+
+// Audit A2: wide port ranges open to any source cost points without a
+// listener, and a host that routes packets pays more for an open FORWARD.
+func TestBroadAcceptAndRoutingAreScored(t *testing.T) {
+	broad := Calculate(analyzed(t, "*filter\n:INPUT DROP [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\n"+
+		"-A INPUT -i lo -j ACCEPT\n-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n"+
+		"-A INPUT -p udp -m udp --dport 1024:65535 -j ACCEPT\nCOMMIT\n"))
+	if broad.Breakdown["exposure"] != -10 {
+		t.Errorf("wide UDP range: %+v", broad.Breakdown)
+	}
+	router := Calculate(analyzed(t, "*nat\n:PREROUTING ACCEPT [0:0]\n:POSTROUTING ACCEPT [0:0]\n-A POSTROUTING -o eth0 -j MASQUERADE\nCOMMIT\n"+
+		"*filter\n:INPUT DROP [0:0]\n:FORWARD ACCEPT [0:0]\n:OUTPUT ACCEPT [0:0]\n"+
+		"-A INPUT -i lo -j ACCEPT\n-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\nCOMMIT\n"))
+	if router.Breakdown["policy"] != -10 {
+		t.Errorf("open FORWARD on a host that translates addresses: %+v", router.Breakdown)
+	}
+}
+
+// Audit E2: a finding that is only possible costs half.
+func TestPossibleFindingsCostHalf(t *testing.T) {
+	result := &models.AnalysisResult{
+		IPv4Only:          true,
+		ServiceAssessment: models.AssessmentComplete,
+		ExposedServices: []models.ExposedServiceFinding{
+			{Service: models.ListeningService{Protocol: models.ProtoTCP, Port: 22}, Scope: models.ScopeExposed, Certainty: models.CertaintyPossible},
+			{Service: models.ListeningService{Protocol: models.ProtoTCP, Port: 8080}, Scope: models.ScopeExposed, Certainty: models.CertaintyPossible},
+			{Service: models.ListeningService{Protocol: models.ProtoUDP, Port: 68}, Scope: models.ScopeExposed, Condition: "source port 67"},
+			{Service: models.ListeningService{Protocol: models.ProtoTCP, Port: 80}, Scope: models.ScopeRestricted},
+		},
+		DockerBypasses: []models.DockerBypassFinding{{Code: models.FindingDockerDirectRoute, Severity: models.SeverityHigh, Certainty: models.CertaintyPossible}},
+	}
+	score := Calculate(result)
+	// 22: 3 (half of 5), 8080: 1 (half of 2), 68: 1 (source port), 80: 0 (not exposed).
+	if score.Breakdown["exposure"] != -5 || score.Breakdown["shadow"] != -3 {
+		t.Fatalf("unexpected breakdown: %+v", score.Breakdown)
 	}
 }

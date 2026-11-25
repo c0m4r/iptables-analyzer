@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -84,7 +85,34 @@ func runSS(proto string) (string, error) {
 	return string(out), nil
 }
 
-var processRe = regexp.MustCompile(`users:\(\("([^"]*)",pid=(\d+)`)
+// processRe matches one entry of the users:(("name",pid=1,fd=3),...) column.
+var processRe = regexp.MustCompile(`\("([^"]*)",pid=(\d+)`)
+
+// socketProcesses returns the names and the process ids of the users column.
+// The column is matched in the whole row, because process names may contain
+// spaces.
+func socketProcesses(line string) (names []string, pids []int) {
+	start := strings.Index(line, "users:(")
+	if start < 0 {
+		return nil, nil
+	}
+	for _, match := range processRe.FindAllStringSubmatch(line[start:], -1) {
+		pid, _ := strconv.Atoi(match[2])
+		if !slices.Contains(names, match[1]) {
+			names = append(names, match[1])
+			pids = append(pids, pid)
+		}
+	}
+	return names, pids
+}
+
+// splitDevice separates the interface of an address written as addr%dev.
+func splitDevice(addr string) (string, string) {
+	if i := strings.LastIndex(addr, "%"); i >= 0 {
+		return addr[:i], addr[i+1:]
+	}
+	return addr, ""
+}
 
 func parseAddress(addr string) (string, int) {
 	// Handle formats:
@@ -213,11 +241,13 @@ func parseSSData(data, forcedProto string) ([]models.ListeningService, error) {
 			parseErrs = append(parseErrs, fmt.Errorf("line %d: invalid local address %q", lineNum, localAddr))
 			continue
 		}
-		family := socketFamily(localAddr)
+		addr, device := splitDevice(addr)
+		family := socketFamily(addr)
 
 		svc := models.ListeningService{
 			Protocol:   models.Protocol(proto),
 			Address:    addr,
+			Device:     device,
 			Port:       port,
 			IsIPv6:     family == models.SocketIPv6,
 			IsWildcard: addr == "0.0.0.0" || addr == "::" || addr == "*",
@@ -225,13 +255,13 @@ func parseSSData(data, forcedProto string) ([]models.ListeningService, error) {
 			Status:     models.ServiceNotAnalyzed,
 		}
 
-		// Parse process info if available
-		for _, f := range fields {
-			matches := processRe.FindStringSubmatch(f)
-			if len(matches) >= 3 {
-				svc.Process = matches[1]
-				svc.PID, _ = strconv.Atoi(matches[2])
-				break
+		// The first process names the service, except that systemd only holds
+		// the socket of a socket-activated daemon.
+		names, pids := socketProcesses(line)
+		svc.Processes = names
+		for i, name := range names {
+			if svc.Process == "" || (svc.Process == "systemd" && name != "systemd") {
+				svc.Process, svc.PID = name, pids[i]
 			}
 		}
 
@@ -248,11 +278,13 @@ func parseSSData(data, forcedProto string) ([]models.ListeningService, error) {
 	return services, errors.Join(parseErrs...)
 }
 
-func socketFamily(localAddr string) models.SocketFamily {
-	if strings.HasPrefix(localAddr, "*:") {
+// socketFamily returns the family of a parsed local address. ss shows a
+// wildcard socket that accepts both families as "*".
+func socketFamily(addr string) models.SocketFamily {
+	switch {
+	case addr == "*":
 		return models.SocketDual
-	}
-	if strings.HasPrefix(localAddr, "[") || strings.Count(localAddr, ":") > 1 {
+	case strings.Contains(addr, ":"):
 		return models.SocketIPv6
 	}
 	return models.SocketIPv4

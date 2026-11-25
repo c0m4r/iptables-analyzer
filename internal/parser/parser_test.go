@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/c0m4r/iptables-analyzer/internal/models"
@@ -311,5 +312,196 @@ func TestParseKeepsTargetOptionsOutOfMatches(t *testing.T) {
 	rule := rs.Tables["raw"].Chains["PREROUTING"].Rules[0]
 	if len(rule.Matches) != 0 || len(rule.TargetArgs) != 1 || rule.TargetArgs[0] != "--notrack" {
 		t.Fatalf("target options parsed as matches: matches=%+v args=%+v", rule.Matches, rule.TargetArgs)
+	}
+}
+
+func parseOneRule(t *testing.T, table, line string) models.Rule {
+	t.Helper()
+	chain := strings.Fields(line)[1]
+	rs, err := Parse("*"+table+"\n"+declare(table, chain)+line+"\nCOMMIT\n", models.IPv4)
+	if err != nil {
+		t.Fatalf("%s: %v", line, err)
+	}
+	return rs.Tables[table].Chains[chain].Rules[0]
+}
+
+// iptables-save only quotes values that contain characters other than
+// letters, digits, "-" and "_", so free text can look like an option.
+func TestParseFreeTextThatLooksLikeAnOption(t *testing.T) {
+	tests := []struct {
+		line    string
+		comment string
+	}{
+		{`-A INPUT -p tcp -m tcp --dport 22 -m comment --comment "-- ssh --" -j ACCEPT`, "-- ssh --"},
+		{`-A INPUT -p tcp -m tcp --dport 22 -m comment --comment -ssh- -j ACCEPT`, "-ssh-"},
+		{`-A INPUT -p tcp -m tcp --dport 22 -m comment --comment "!" -j ACCEPT`, "!"},
+		{`-A INPUT -p tcp -m tcp --dport 22 -m comment --comment -j -j ACCEPT`, "-j"},
+		{`-A INPUT -p tcp -m tcp --dport 22 -m comment --comment "-p udp" -j ACCEPT`, "-p udp"},
+	}
+	for _, tt := range tests {
+		rule := parseOneRule(t, "filter", tt.line)
+		if rule.Comment != tt.comment || rule.Target != "ACCEPT" || rule.DstPort != "22" ||
+			rule.Protocol != models.ProtoTCP || len(rule.Negations) != 0 {
+			t.Errorf("%s: comment=%q target=%q dport=%q proto=%q negations=%v",
+				tt.line, rule.Comment, rule.Target, rule.DstPort, rule.Protocol, rule.Negations)
+		}
+	}
+
+	rule := parseOneRule(t, "filter", `-A INPUT -j LOG --log-prefix "-- dropped: " --log-level 4`)
+	if rule.Target != "LOG" || len(rule.Matches) != 0 || strings.Join(rule.TargetArgs, "|") != "--log-prefix|-- dropped: |--log-level|4" {
+		t.Fatalf("target options with a dash value: %+v", rule)
+	}
+}
+
+func TestParseOptionsWithTwoArguments(t *testing.T) {
+	rule := parseOneRule(t, "filter", `-A INPUT -p tcp -m tcp --dport 22 --tcp-flags FIN,SYN,RST,ACK SYN -j ACCEPT`)
+	if got := rule.Matches[0].Params["--tcp-flags"]; got != "FIN,SYN,RST,ACK SYN" || rule.DstPort != "22" {
+		t.Fatalf("--tcp-flags lost its second argument: %q (%+v)", got, rule)
+	}
+	rule = parseOneRule(t, "filter", `-A INPUT -p tcp -m tcp ! --tcp-flags FIN,SYN,RST,ACK SYN -m conntrack --ctstate NEW -j DROP`)
+	if !rule.Matches[0].Negations["--tcp-flags"] || rule.Matches[0].Params["--tcp-flags"] != "FIN,SYN,RST,ACK SYN" ||
+		len(rule.Matches) != 2 || strings.Join(rule.States, ",") != "NEW" {
+		t.Fatalf("negated --tcp-flags: %+v", rule)
+	}
+	rule = parseOneRule(t, "filter", `-A INPUT -m set ! --match-set allowed src,dst -j DROP`)
+	if got := rule.Matches[0].Params["--match-set"]; got != "allowed src,dst" || !rule.Matches[0].Negations["--match-set"] {
+		t.Fatalf("--match-set: %q %+v", got, rule.Matches[0])
+	}
+	rule = parseOneRule(t, "filter", `-A INPUT -p tcp -m tcp --dport 22 -j SET --add-set ssh-seen src --exist`)
+	if rule.Target != "SET" || strings.Join(rule.TargetArgs, " ") != "--add-set ssh-seen src --exist" {
+		t.Fatalf("SET target options: %+v", rule.TargetArgs)
+	}
+	if _, err := Parse("*filter\n:INPUT DROP [0:0]\n-A INPUT -p tcp -m tcp --tcp-flags SYN\nCOMMIT\n", models.IPv4); err == nil {
+		t.Fatal("--tcp-flags with one argument must be an error")
+	}
+}
+
+// A negation in front of an option of the rule ends the options of the
+// preceding match; it must not be taken for one of them.
+func TestParseNegatedRuleOptionAfterMatch(t *testing.T) {
+	rule := parseOneRule(t, "filter", `-A FORWARD -m addrtype --dst-type LOCAL ! -i docker0 ! -s 10.0.0.0/8 -j DROP`)
+	if rule.InIface != "docker0" || !rule.Negations["in-iface"] || rule.SrcAddr != "10.0.0.0/8" || !rule.Negations["src"] {
+		t.Fatalf("negated rule options after a match were lost: %+v", rule)
+	}
+	if got := rule.Matches[0].RawTokens; len(got) != 2 || got[0] != "--dst-type" || got[1] != "LOCAL" {
+		t.Fatalf("match consumed options of the rule: %v", got)
+	}
+}
+
+func TestParseIgnoresCounterOption(t *testing.T) {
+	rule := parseOneRule(t, "filter", `-A INPUT -p tcp -m tcp --dport 22 -c 10 600 -j ACCEPT`)
+	if len(rule.Matches) != 1 || rule.Target != "ACCEPT" {
+		t.Fatalf("-c must not become a match: %+v", rule)
+	}
+}
+
+// One line per extension, as iptables-save 1.8 prints it.
+func TestParseRealSaveLines(t *testing.T) {
+	tests := []struct {
+		table, line string
+		check       func(models.Rule) bool
+	}{
+		{"filter", `-A INPUT -p tcp -m multiport --dports 80,443,8000:8100 -j ACCEPT`,
+			func(r models.Rule) bool { return r.DstPort == "80,443,8000:8100" }},
+		{"filter", `-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m recent --set --name SSH --mask 255.255.255.255 --rsource`,
+			func(r models.Rule) bool {
+				return r.Target == "" && len(r.Matches) == 3 && r.Matches[2].Params["--name"] == "SSH"
+			}},
+		{"filter", `-A INPUT -p tcp -m tcp --dport 22 -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh4-22 -j DROP`,
+			func(r models.Rule) bool {
+				return r.Matches[1].Params["--hashlimit-name"] == "ssh4-22" && r.Target == "DROP"
+			}},
+		{"filter", `-A INPUT -m iprange --src-range 192.168.1.10-192.168.1.20 -j ACCEPT`,
+			func(r models.Rule) bool { return r.Matches[0].Params["--src-range"] == "192.168.1.10-192.168.1.20" }},
+		{"filter", `-A INPUT -m mac --mac-source 00:11:22:33:44:55 -j ACCEPT`,
+			func(r models.Rule) bool { return r.Matches[0].Params["--mac-source"] == "00:11:22:33:44:55" }},
+		{"filter", `-A INPUT -p icmp -m icmp --icmp-type 8 -m limit --limit 10/sec --limit-burst 20 -j ACCEPT`,
+			func(r models.Rule) bool {
+				return r.Matches[0].Params["--icmp-type"] == "8" && r.Matches[1].Params["--limit"] == "10/sec"
+			}},
+		{"filter", `-A INPUT -j REJECT --reject-with icmp-host-prohibited`,
+			func(r models.Rule) bool { return r.Target == "REJECT" && len(r.Matches) == 0 && len(r.TargetArgs) == 2 }},
+		{"filter", `-A FORWARD -o docker0 -m conntrack --ctstate NEW -m conntrack ! --ctstate DNAT -j DROP`,
+			func(r models.Rule) bool {
+				return len(r.Matches) == 2 && r.Matches[1].Negations["--ctstate"] && r.OutIface == "docker0"
+			}},
+		{"filter", `-A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8080 --ctdir ORIGINAL -j DROP`,
+			func(r models.Rule) bool { return r.Matches[0].Params["--ctorigdstport"] == "8080" && r.DstPort == "" }},
+		{"filter", `-A INPUT -m string --string "GET /admin" --algo bm --to 65535 -j DROP`,
+			func(r models.Rule) bool { return r.Matches[0].Params["--string"] == "GET /admin" && r.Target == "DROP" }},
+		{"filter", `-A INPUT -m mark --mark 0x8000/0x8000 -j DROP`,
+			func(r models.Rule) bool { return r.Matches[0].Params["--mark"] == "0x8000/0x8000" }},
+		{"nat", `-A PREROUTING -p tcp -m tcp --dport 80 -j REDIRECT --to-ports 8080`,
+			func(r models.Rule) bool {
+				return r.Target == "REDIRECT" && strings.Join(r.TargetArgs, " ") == "--to-ports 8080"
+			}},
+		{"nat", `-A DOCKER ! -i docker0 -p tcp -m tcp --dport 8080 -j DNAT --to-destination 172.17.0.2:80`,
+			func(r models.Rule) bool { return r.DNATTarget == "172.17.0.2:80" && r.Negations["in-iface"] }},
+		{"nat", `-A POSTROUTING -s 172.17.0.0/16 ! -o docker0 -j MASQUERADE`,
+			func(r models.Rule) bool {
+				return r.Target == "MASQUERADE" && r.Negations["out-iface"] && r.SrcAddr == "172.17.0.0/16"
+			}},
+		{"nat", `-A KUBE-SVC-ABC -m comment --comment "ns/svc -> 10.244.0.5:8080" -m statistic --mode random --probability 0.50000000000 -j KUBE-SEP-DEF`,
+			func(r models.Rule) bool {
+				return r.Comment == "ns/svc -> 10.244.0.5:8080" && r.Target == "KUBE-SEP-DEF"
+			}},
+		{"mangle", `-A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu`,
+			func(r models.Rule) bool {
+				return r.Matches[0].Params["--tcp-flags"] == "SYN,RST SYN" && r.Target == "TCPMSS"
+			}},
+		{"raw", `-A PREROUTING -d 172.17.0.2/32 ! -i docker0 -j DROP`,
+			func(r models.Rule) bool {
+				return r.DstAddr == "172.17.0.2/32" && r.Negations["in-iface"] && r.Target == "DROP"
+			}},
+	}
+	for _, tt := range tests {
+		chain := strings.Fields(tt.line)[1]
+		line := tt.line
+		rs, err := Parse("*"+tt.table+"\n"+declare(tt.table, chain)+line+"\nCOMMIT\n", models.IPv4)
+		if err != nil {
+			t.Errorf("%s: %v", line, err)
+			continue
+		}
+		if rule := rs.Tables[tt.table].Chains[chain].Rules[0]; !tt.check(rule) {
+			t.Errorf("%s: unexpected rule %+v", line, rule)
+		}
+	}
+}
+
+func declare(table, chain string) string {
+	if isBuiltinChain(table, chain) {
+		return ":" + chain + " ACCEPT [0:0]\n"
+	}
+	return ":" + chain + " - [0:0]\n"
+}
+
+func TestParseNotesRulesThatSaveDoesNotPrint(t *testing.T) {
+	rs, err := Parse("# Warning: iptables-legacy tables present, use iptables-legacy-save to see them\n"+
+		"# Table `nat' is incompatible, use 'nft' tool.\n*filter\n:INPUT DROP [0:0]\nCOMMIT\n", models.IPv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rs.Warnings) != 1 || !strings.HasPrefix(rs.Warnings[0], "iptables-legacy tables present") {
+		t.Fatalf("legacy warning was not kept: %q", rs.Warnings)
+	}
+	if len(rs.Unreadable) != 1 || rs.Unreadable[0] != "nat" {
+		t.Fatalf("incompatible table was not kept: %q", rs.Unreadable)
+	}
+}
+
+func TestParseNoTables(t *testing.T) {
+	for _, data := range []string{"", "\n\n", "# Generated by iptables-save v1.8.11 (nf_tables)\n# Table `filter' is incompatible, use 'nft' tool.\n"} {
+		rs, ok := ParseNoTables(data, models.IPv6)
+		if !ok || rs == nil || len(rs.Tables) != 0 || rs.IPVersion != models.IPv6 {
+			t.Fatalf("output without tables was not accepted: %q", data)
+		}
+	}
+	if rs, ok := ParseNoTables("# c\n# Table `filter' is incompatible, use 'nft' tool.\n", models.IPv4); !ok || len(rs.Unreadable) != 1 {
+		t.Fatalf("comments of output without tables were not read: %+v", rs)
+	}
+	for _, data := range []string{"*filter\n:INPUT DROP [0:0]\nCOMMIT\n", "this is not iptables-save output\n", "-A INPUT -j ACCEPT\n"} {
+		if _, ok := ParseNoTables(data, models.IPv4); ok {
+			t.Fatalf("input with content was taken for an empty ruleset: %q", data)
+		}
 	}
 }

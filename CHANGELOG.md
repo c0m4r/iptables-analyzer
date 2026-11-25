@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Types of changes: Added, Changed, Deprecated, Removed, Fixed, Security
 
+## [Unreleased]
+
+The changes of this release follow the audit in `docs/audit-0.7.1.md`; `ROADMAP.md` has the plan.
+
+### Added
+
+- open ports: the report lists the ports for which INPUT accepts new connections, with their sources, without a list of listening services (`OpenPorts` in JSON)
+- finding `broad_accept`: a range of 1,024 or more ports that is open to any source
+- finding `ipv6_wider_than_ipv4`: ports that IPv6 opens to any source while IPv4 restricts or filters them
+- finding `family_blocked`: an address family with a DROP policy and no accepting rule is one note instead of three findings
+- access scope `RESTRICTED` for sources that an ipset, a MAC address, a GeoIP match, a `recent` list or an IPsec policy selects; the finding names the set
+- conditions on exposure findings (`Condition`): rate limit, connection limit, time window, source port
+- service status `INTERNAL` for listeners that only containers or virtual machines of the host reach (`docker0`, `virbr0`, ...)
+- family status (`IPv4Status`, `IPv6Status`): analyzed, no rules loaded, excluded, not supplied, or unreadable (native nftables)
+- assessment notes for rules that `iptables-save` cannot show (`iptables-legacy tables present`, `is incompatible, use 'nft' tool`) and for `REDIRECT` rules
+- a grade limit: F when INPUT accepts all new connections, D when it accepts by default for one protocol or interface, C for a critical Docker bypass (`Cap` in JSON)
+- the baseline repeats the jumps of INPUT to chains of other programs (fail2ban, libvirt, Tailscale), lists the present `DOCKER-USER` rules as comments, keeps the FORWARD policy of hosts that route packets, and warns on hosts that ufw manages
+- modeled matches: `--syn` and `--tcp-flags` for the first packet of a connection, `iprange`, `multiport --ports`, `pkttype`
+
+### Changed
+
+- the checks for the default policy, the conntrack rule and unused rules use the packet-path evaluator instead of the form of the rules in `filter/INPUT`; they follow user-defined chains
+- `policy_accept` means that a chain accepts the traffic that no rule names, by its policy or by a rule; the title and the detail name the cause
+- rules after a rule that ends the chain are one `dead_rule` finding for the chain, and they are no longer reported as shadowed too
+- every deduction of the score comes from a finding; a `POSSIBLE` finding costs half; FORWARD ACCEPT costs 5 points while nothing shows that the host routes packets
+- OUTPUT ACCEPT is INFO
+- the SSH recommendation inserts a per-source `hashlimit` DROP in front of the accepting rule; it no longer replaces the rule with a global `-m limit`
+- a DNAT rule outside Docker's chains is a port forward: no Docker titles, no `DOCKER-USER` commands
+- a Docker bypass is CRITICAL only when an INPUT rule names the port or the destination address
+- assessment notes of one kind are one note with a count
+- source sets are sorted address ranges; the scope of sources follows from the addresses and no longer from the form of the rules
+
+### Removed
+
+- findings `missing_final_drop` and `late_conntrack`
+
+### Fixed
+
+- a ruleset that accepts all traffic by a rule (`-A INPUT -j ACCEPT` under a DROP policy) got grade A
+- wide accepts such as `-p tcp -j ACCEPT` were not reported without a matching listener
+- live analysis stopped with an error when `iptables-save` or `ip6tables-save` printed nothing, which is their output when no rules are loaded; an empty rules file was refused in the same way
+- a rules file for one address family counted as "no rules" for the other family (-10 points)
+- ufw rulesets got a HIGH finding "never accepts ESTABLISHED,RELATED traffic"
+- an ACCEPT policy in front of a final REJECT or DROP got HIGH policy findings while the score counted it as default deny
+- allowlists with `iprange`, `set` or `mac` were reported as "may be accessible from the network" and scored as exposure; an ipset allowlist written as a negated DROP was reported as definitely exposed
+- rate-limited accepts and `--syn` rules were reported as only possible
+- the DHCP client rule (`--sport 67 --dport 68`) was a HIGH exposure
+- a comment that starts with `-` or equals `!` stopped the analysis (`--comment requires a value`)
+- the second argument of `--tcp-flags` and `--match-set` was lost; a negation in front of a rule option after a match was taken for a match option
+- process names with spaces were lost; a socket-activated daemon was named `systemd`; a socket bound to a device (`0.0.0.0%virbr0`) was evaluated for every interface
+- analysis time grew with the square of the number of single-address rules (3,000 rules: 30 s); 20,000 rules now take approximately one second
+- unused-rule findings for negated port predicates named the wrong port, and a file without a filter table lost 25 points without a finding
+- the recommendation text named `--baseline 6`, which is not accepted
+
 ## [0.7.1] - 2026-11-09
 
 ### Added

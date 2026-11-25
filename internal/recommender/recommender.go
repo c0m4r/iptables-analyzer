@@ -33,31 +33,70 @@ func Generate(result *models.AnalysisResult) []models.Recommendation {
 
 func policyRecommendations(result *models.AnalysisResult) []models.Recommendation {
 	var recs []models.Recommendation
+	seen := map[string]bool{}
+	add := func(rec models.Recommendation) {
+		if !seen[rec.Title] {
+			seen[rec.Title] = true
+			recs = append(recs, rec)
+		}
+	}
 
 	for _, issue := range result.EffectiveIssues {
+		if issue.Code != models.FindingPolicyAccept || issue.Severity < models.SeverityMedium ||
+			(issue.Chain != "INPUT" && issue.Chain != "FORWARD") {
+			continue
+		}
 		command := firewallCommand(issue.IPVersion)
 		stack := stackLabel(issue.IPVersion)
-		if issue.Chain == "INPUT" && (issue.Code == models.FindingPolicyAccept || issue.Title == "INPUT default policy is ACCEPT") {
-			recs = append(recs, models.Recommendation{
-				Title: "Set " + stack + " INPUT chain default policy to DROP",
-				Detail: "Install and verify required allow rules first, with a tested rollback path, then change the INPUT policy to DROP. " +
-					"The Recommended Baseline section contains a complete, reviewed rule set for both IPv4 and IPv6.\n" +
-					"  Command: " + command + " -P INPUT DROP",
-				Severity: models.SeverityHigh,
+		switch {
+		case issue.Rule != nil:
+			// A rule accepts everything; the policy is not what decides.
+			rule := issue.Rule
+			add(models.Recommendation{
+				Title: "Remove or narrow the " + stack + " rule that accepts all traffic (" + rule.Table + "/" + rule.Chain +
+					" rule #" + strconv.Itoa(rule.RuleNum) + ")",
+				Detail: "The rule (" + analyzer.RuleSpec(rule) + ") accepts every packet that reaches it, so the rules after it and the " +
+					"policy of the chain decide nothing. Add rules for the traffic that is needed, with a tested way back, then delete it:\n" +
+					"  " + command + tableOption(rule.Table) + " -D " + textsafe.ShellQuote(rule.Chain) + " " + strconv.Itoa(rule.RuleNum),
+				Severity: issue.Severity,
 				Category: "policy",
 			})
-		}
-		if issue.Chain == "FORWARD" && (issue.Code == models.FindingPolicyAccept || issue.Title == "FORWARD default policy is ACCEPT") {
-			recs = append(recs, models.Recommendation{
+		case result.FamilyState(issue.IPVersion) == models.FamilyNoRules:
+			add(models.Recommendation{
+				Title: "Load " + stack + " firewall rules",
+				Detail: "No " + stack + " rules are loaded, so every port of the host is open over " + stack + ". " +
+					"The recommended baseline is a complete rule set for both address families (--baseline).",
+				Severity: issue.Severity,
+				Category: "policy",
+			})
+		case issue.Chain == "INPUT":
+			add(models.Recommendation{
+				Title: "Set " + stack + " INPUT chain default policy to DROP",
+				Detail: "Install and verify required allow rules first, with a tested rollback path, then change the INPUT policy to DROP. " +
+					"The recommended baseline is a complete rule set for both IPv4 and IPv6 (--baseline).\n" +
+					"  Command: " + command + " -P INPUT DROP",
+				Severity: issue.Severity,
+				Category: "policy",
+			})
+		default:
+			add(models.Recommendation{
 				Title:    "Set " + stack + " FORWARD chain default policy to DROP",
 				Detail:   "After verifying required forwarding paths, change the FORWARD policy to DROP.\n  Command: " + command + " -P FORWARD DROP",
-				Severity: models.SeverityHigh,
+				Severity: issue.Severity,
 				Category: "policy",
 			})
 		}
 	}
 
 	return recs
+}
+
+// tableOption returns the -t option for tables other than filter.
+func tableOption(table string) string {
+	if table == "" || table == "filter" {
+		return ""
+	}
+	return " -t " + textsafe.ShellQuote(table)
 }
 
 func dockerRecommendations(result *models.AnalysisResult) []models.Recommendation {
@@ -73,7 +112,7 @@ func dockerRecommendations(result *models.AnalysisResult) []models.Recommendatio
 		if finding.Severity > severity {
 			severity = finding.Severity
 		}
-		if finding.Code == models.FindingDockerBypass || finding.Code == models.FindingDockerPublished {
+		if (finding.Code == models.FindingDockerBypass || finding.Code == models.FindingDockerPublished) && analyzer.IsDockerRule(&finding.NATRule) {
 			published = true
 		}
 	}
@@ -123,6 +162,19 @@ func publishedPortRecommendation(finding models.DockerBypassFinding) *models.Rec
 	protocol := string(finding.NATRule.Protocol)
 	if protocol == "" || protocol == string(models.ProtoAll) {
 		protocol = "tcp"
+	}
+	if !analyzer.IsDockerRule(&finding.NATRule) {
+		// A port forward of the administrator: there is no DOCKER-USER chain.
+		nat := finding.NATRule.Table + "/" + finding.NATRule.Chain + " rule #" + strconv.Itoa(finding.NATRule.RuleNum)
+		return &models.Recommendation{
+			Title: "Restrict " + stackLabel(finding.IPVersion) + " forwarded port " + finding.ExposedPort + "/" + protocol + " (" + finding.ContainerDest + ")",
+			Detail: "The port is translated by " + nat + " and then passes filter/FORWARD, not filter/INPUT. " +
+				"If only known clients need it, add their sources (-s <trusted-cidr>) to that rule or to the FORWARD rule that accepts the " +
+				"traffic. In FORWARD the packet has the translated address and port; match the original port with " +
+				"'-m conntrack --ctorigdstport " + strings.ReplaceAll(finding.ExposedPort, "-", ":") + " --ctdir ORIGINAL'.",
+			Severity: finding.Severity,
+			Category: "nat",
+		}
 	}
 	command := firewallCommand(finding.IPVersion)
 	portSpec := strings.ReplaceAll(finding.ExposedPort, "-", ":")
@@ -265,8 +317,8 @@ func exposureRecommendations(result *models.AnalysisResult) []models.Recommendat
 	for _, exposed := range result.ExposedServices {
 		// Only recommend restrictions for truly exposed services.
 		// SUBNET, LOCALNET and WHITELISTED services already have source restrictions in place.
-		if exposed.Scope != models.ScopeExposed {
-			continue
+		if exposed.Scope != models.ScopeExposed || strings.HasPrefix(exposed.Condition, "source port") {
+			continue // a rule for replies (DHCP, DNS) is not an open service
 		}
 		svc := exposed.Service
 		command := firewallCommand(exposed.IPVersion)
@@ -296,54 +348,54 @@ func exposureRecommendations(result *models.AnalysisResult) []models.Recommendat
 
 func hygieneRecommendations(result *models.AnalysisResult) []models.Recommendation {
 	var recs []models.Recommendation
-	inputAcceptPolicy := map[models.IPVersion]bool{}
-	for _, issue := range result.EffectiveIssues {
-		if (issue.Code == models.FindingPolicyAccept && issue.Chain == "INPUT") || issue.Title == "INPUT default policy is ACCEPT" {
-			inputAcceptPolicy[issue.IPVersion] = true
-		}
-	}
 
 	for _, issue := range result.EffectiveIssues {
 		command := firewallCommand(issue.IPVersion)
 		stack := stackLabel(issue.IPVersion)
-		switch {
-		case issue.Code == models.FindingMissingConntrack || issue.Title == "No conntrack ESTABLISHED,RELATED rule in INPUT":
+		switch issue.Code {
+		case models.FindingMissingConntrack:
 			recs = append(recs, models.Recommendation{
 				Title:    "Add " + stack + " conntrack rule for established connections",
-				Detail:   "Add an early rule to accept established/related connections for better performance:\n  " + command + " -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
-				Severity: models.SeverityMedium,
+				Detail:   "Accept the packets of established and related connections near the top of INPUT:\n  " + command + " -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+				Severity: issue.Severity,
 				Category: "hygiene",
 			})
-		case issue.Code == models.FindingMissingFinalDrop || issue.Title == "No explicit DROP at end of INPUT chain with ACCEPT policy":
-			if inputAcceptPolicy[issue.IPVersion] {
-				continue // covered by the policy recommendation
+		case models.FindingBroadAccept:
+			detail := "Replace the wide range with rules for the ports that services use, and restrict them with -s where the clients are known."
+			if rule := issue.Rule; rule != nil {
+				detail += " The widest rule is " + rule.Table + "/" + rule.Chain + " rule #" + strconv.Itoa(rule.RuleNum) + " (" + analyzer.RuleSpec(rule) + ")."
 			}
 			recs = append(recs, models.Recommendation{
-				Title:    "Add explicit " + stack + " DROP at end of INPUT or change policy",
-				Detail:   "After verifying required allow rules and a rollback path, either change the INPUT policy to DROP or add a catch-all rule:\n  " + command + " -A INPUT -j DROP\n  Or: " + command + " -P INPUT DROP",
-				Severity: models.SeverityHigh,
-				Category: "hygiene",
+				Title:    "Narrow the " + stack + " port range that is open to any source",
+				Detail:   detail,
+				Severity: issue.Severity,
+				Category: "exposure",
+			})
+		case models.FindingIPv6Wider:
+			recs = append(recs, models.Recommendation{
+				Title: "Give IPv6 the restrictions of IPv4",
+				Detail: issue.Detail + " Write the ip6tables rules for these ports with the same sources as the iptables rules, " +
+					"or remove them when the service does not need IPv6.",
+				Severity: issue.Severity,
+				Category: "ipv6",
 			})
 		}
 	}
 
-	// Check for SSH rate limiting on each analyzed stack.
-	for _, rs := range []*models.Ruleset{result.IPv4Rules, result.IPv6Rules} {
-		if sshRule := findSSHWithoutRateLimit(rs); sshRule != nil {
-			detail := "Rate-limit the existing " + sshRule.Table + "/" + sshRule.Chain + " rule #" +
-				strconv.Itoa(sshRule.RuleNum) + " while retaining all of its interface, address, port, state, and extension predicates."
-			if command, safe := sshRateLimitCommand(rs, sshRule); safe {
-				detail += " Verify that attempts which exceed the limit fall through to DROP:\n  " + command
-			} else {
-				detail += " No replacement command is generated because an effective ESTABLISHED,RELATED accept path was not proven; adding a limit directly could disrupt established sessions."
-			}
-			recs = append(recs, models.Recommendation{
-				Title:    "Add rate limiting for " + stackLabel(rs.IPVersion) + " SSH",
-				Detail:   detail,
-				Severity: models.SeverityMedium,
-				Category: "hygiene",
-			})
+	// A rate limit for SSH that is open to any source.
+	for _, rule := range sshRulesWithoutRateLimit(result) {
+		detail := "SSH is open to any source without a limit on new connections (" + rule.Table + "/" + rule.Chain + " rule #" +
+			strconv.Itoa(rule.RuleNum) + "). Drop the connections of a source that opens more than 10 a minute, in front of that rule. " +
+			"The limit counts each source address by itself, so one client cannot lock out the others, and it does not touch established sessions."
+		if command, ok := sshLimiterCommand(rule); ok {
+			detail += "\n  " + command
 		}
+		recs = append(recs, models.Recommendation{
+			Title:    "Add rate limiting for " + stackLabel(rule.IPVersion) + " SSH",
+			Detail:   detail,
+			Severity: models.SeverityMedium,
+			Category: "hygiene",
+		})
 	}
 
 	return recs
@@ -366,12 +418,12 @@ func stackLabel(version models.IPVersion) string {
 func ipv6Recommendations(result *models.AnalysisResult) []models.Recommendation {
 	var recs []models.Recommendation
 
-	if !result.IPv4Only && (result.IPv6Rules == nil || len(result.IPv6Rules.Tables) == 0) {
+	if result.FamilyState(models.IPv6) == models.FamilyNoRules {
 		recs = append(recs, models.Recommendation{
 			Title: "Configure IPv6 firewall rules",
-			Detail: "No ip6tables rules detected. If IPv6 is enabled on this system, it may be completely unprotected: " +
+			Detail: "No ip6tables rules are loaded. If IPv6 is enabled on this system, it is completely unprotected: " +
 				"hosts usually obtain global IPv6 addresses automatically, and IPv4 rules do not apply to them. " +
-				"Apply the IPv6 part of the recommended baseline (see \"Recommended Baseline\" or --baseline 6); it keeps " +
+				"Apply the IPv6 part of the recommended baseline (--baseline=6); it keeps " +
 				"the ICMPv6 neighbor discovery that IPv6 needs to work.",
 			Severity: models.SeverityHigh,
 			Category: "ipv6",
@@ -381,69 +433,54 @@ func ipv6Recommendations(result *models.AnalysisResult) []models.Recommendation 
 	return recs
 }
 
-func findSSHWithoutRateLimit(rs *models.Ruleset) *models.Rule {
-	if rs == nil {
-		return nil
-	}
-	filterTable, ok := rs.Tables["filter"]
-	if !ok {
-		return nil
-	}
-	input, ok := filterTable.Chains["INPUT"]
-	if !ok {
-		return nil
-	}
-
-	limitedEarlier := false
-	for i := range input.Rules {
-		rule := &input.Rules[i]
-		if rule.Protocol != models.ProtoTCP || rule.Negations["protocol"] || rule.DstPort != "22" || rule.Negations["dport"] {
+// sshPorts returns the TCP ports of the listening sshd, or 22 when the
+// listeners are not known.
+func sshPorts(result *models.AnalysisResult) []int {
+	var ports []int
+	for _, svc := range result.Services {
+		if svc.Protocol != models.ProtoTCP || slices.Contains(ports, svc.Port) {
 			continue
 		}
-		// A preceding DROP with a rate-limiting match (hashlimit --hashlimit-above,
-		// recent --update --hitcount) limits the ACCEPT that follows it.
-		if rule.IsBlock() && hasRateLimit(rule) {
-			limitedEarlier = true
-			continue
-		}
-		if rule.IsAllow() && !hasRateLimit(rule) && !limitedEarlier {
-			return rule
+		if svc.Process == "sshd" || slices.Contains(svc.Processes, "sshd") || strings.HasPrefix(svc.Process, "sshd-") {
+			ports = append(ports, svc.Port)
 		}
 	}
-	return nil
+	if len(ports) == 0 {
+		ports = []int{22}
+	}
+	return ports
 }
 
-func hasRateLimit(rule *models.Rule) bool {
-	for _, m := range rule.Matches {
-		if m.Module == "limit" || m.Module == "hashlimit" || m.Module == "recent" {
-			return true
+// sshRulesWithoutRateLimit returns the rules that open an SSH port to any
+// source without a rate limit, one per address family and rule. The open
+// ports come from the evaluation of the whole INPUT path, so a limit in
+// front of the rule, or in a chain of ufw, counts.
+func sshRulesWithoutRateLimit(result *models.AnalysisResult) []*models.Rule {
+	var rules []*models.Rule
+	for _, port := range sshPorts(result) {
+		for i := range result.OpenPorts {
+			open := &result.OpenPorts[i]
+			if open.Protocol != models.ProtoTCP || port < open.First || port > open.Last ||
+				open.Scope != models.ScopeExposed || open.Unnamed || open.Rule == nil ||
+				strings.Contains(open.Condition, "rate limit") || strings.Contains(open.Condition, "connection limit") {
+				continue
+			}
+			if !slices.Contains(rules, open.Rule) {
+				rules = append(rules, open.Rule)
+			}
 		}
 	}
-	return false
+	return rules
 }
 
-func sshRateLimitCommand(rs *models.Ruleset, rule *models.Rule) (string, bool) {
-	matchesEstablished := len(rule.States) == 0 || rule.Negations["state"] ||
-		contains(rule.States, "ESTABLISHED") || contains(rule.States, "RELATED")
-	if matchesEstablished && !hasEstablishedAcceptBefore(rs, rule.RuleNum) {
-		return "", false
-	}
-	if !overLimitTrafficIsBlocked(rs, rule) {
-		return "", false
-	}
-	raw := strings.TrimSpace(rule.RawLine)
-	if strings.HasPrefix(raw, "[") {
-		if end := strings.Index(raw, "]"); end >= 0 {
-			raw = strings.TrimSpace(raw[end+1:])
-		}
-	}
-	prefix := "-A " + rule.Chain + " "
-	if !strings.HasPrefix(raw, prefix) {
-		return "", false
-	}
+// sshLimiterCommand builds the rule that drops new connections of a source
+// above 10 a minute, to be inserted in front of the accepting rule. It keeps
+// every match of that rule, so that it limits the same traffic and nothing
+// else.
+func sshLimiterCommand(rule *models.Rule) (string, bool) {
 	args := analyzer.RuleArgs(rule)
 	targetAt := -1
-	for i := 1; i+1 < len(args); i++ {
+	for i := 0; i+1 < len(args); i++ {
 		if (args[i] == "-j" || args[i] == "--jump") && args[i+1] == "ACCEPT" {
 			targetAt = i
 		}
@@ -451,9 +488,14 @@ func sshRateLimitCommand(rs *models.Ruleset, rule *models.Rule) (string, bool) {
 	if targetAt < 0 {
 		return "", false
 	}
-	limited := slices.Concat(args[:targetAt], []string{"-m", "limit", "--limit", "3/min", "--limit-burst", "5"}, args[targetAt:])
-	return firewallCommand(rule.IPVersion) + " -R " + textsafe.ShellQuote(rule.Chain) + " " + strconv.Itoa(rule.RuleNum) + " " +
-		textsafe.ShellJoin(limited), true
+	name := "ssh" + strconv.Itoa(int(rule.IPVersion))
+	limiter := slices.Concat(args[:targetAt], []string{
+		"-m", "conntrack", "--ctstate", "NEW",
+		"-m", "hashlimit", "--hashlimit-above", "10/min", "--hashlimit-burst", "20",
+		"--hashlimit-mode", "srcip", "--hashlimit-name", name, "-j", "DROP",
+	})
+	return firewallCommand(rule.IPVersion) + tableOption(rule.Table) + " -I " + textsafe.ShellQuote(rule.Chain) + " " +
+		strconv.Itoa(rule.RuleNum) + " " + textsafe.ShellJoin(limiter), true
 }
 
 // dportToOrigDstPort replaces "[-m tcp|udp] --dport N", which never matches
@@ -501,124 +543,4 @@ func isPortSpec(value string) bool {
 		}
 	}
 	return true
-}
-
-func overLimitTrafficIsBlocked(rs *models.Ruleset, candidate *models.Rule) bool {
-	if rs == nil || rs.Tables["filter"] == nil || rs.Tables["filter"].Chains["INPUT"] == nil {
-		return false
-	}
-	input := rs.Tables["filter"].Chains["INPUT"]
-	for _, rule := range input.Rules {
-		if rule.RuleNum <= candidate.RuleNum {
-			continue
-		}
-		// A later allow might accept an over-limit attempt. Stay conservative
-		// unless a definite catch-all block occurs first.
-		if rule.IsAllow() && rulesMayOverlap(candidate, &rule) {
-			return false
-		}
-		if rule.IsBlock() && isUnrestrictedExceptTarget(&rule) {
-			return true
-		}
-	}
-	return input.Policy == "DROP"
-}
-
-func rulesMayOverlap(a, b *models.Rule) bool {
-	if !a.Negations["protocol"] && !b.Negations["protocol"] &&
-		a.Protocol != "" && a.Protocol != models.ProtoAll &&
-		b.Protocol != "" && b.Protocol != models.ProtoAll && a.Protocol != b.Protocol {
-		return false
-	}
-	if !a.Negations["dport"] && !b.Negations["dport"] &&
-		a.DstPort != "" && b.DstPort != "" && !portSpecsOverlap(a.DstPort, b.DstPort) {
-		return false
-	}
-	if a.InIface != "" && b.InIface != "" && !a.Negations["in-iface"] && !b.Negations["in-iface"] &&
-		!strings.HasSuffix(a.InIface, "+") && !strings.HasSuffix(b.InIface, "+") && a.InIface != b.InIface {
-		return false
-	}
-	return true
-}
-
-func portSpecsOverlap(a, b string) bool {
-	aRanges, aOK := recommendationPortRanges(a)
-	bRanges, bOK := recommendationPortRanges(b)
-	if !aOK || !bOK {
-		return true
-	}
-	for _, ar := range aRanges {
-		for _, br := range bRanges {
-			if ar[0] <= br[1] && br[0] <= ar[1] {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func recommendationPortRanges(spec string) ([][2]int, bool) {
-	var ranges [][2]int
-	for _, part := range strings.Split(spec, ",") {
-		ends := strings.SplitN(strings.TrimSpace(part), ":", 2)
-		lo, err := strconv.Atoi(ends[0])
-		if err != nil || lo < 1 || lo > 65535 {
-			return nil, false
-		}
-		hi := lo
-		if len(ends) == 2 {
-			hi, err = strconv.Atoi(ends[1])
-			if err != nil || hi < lo || hi > 65535 {
-				return nil, false
-			}
-		}
-		ranges = append(ranges, [2]int{lo, hi})
-	}
-	return ranges, len(ranges) > 0
-}
-
-func hasEstablishedAcceptBefore(rs *models.Ruleset, before int) bool {
-	if rs == nil || rs.Tables["filter"] == nil || rs.Tables["filter"].Chains["INPUT"] == nil {
-		return false
-	}
-	for _, rule := range rs.Tables["filter"].Chains["INPUT"].Rules {
-		if rule.RuleNum >= before {
-			break
-		}
-		if !rule.IsAllow() || !contains(rule.States, "ESTABLISHED") || rule.Negations["state"] {
-			continue
-		}
-		clone := rule
-		clone.States = nil
-		clone.Matches = withoutStateMatches(clone.Matches)
-		if clone.IsAllow() && isUnrestrictedExceptTarget(&clone) {
-			return true
-		}
-	}
-	return false
-}
-
-func withoutStateMatches(matches []models.MatchExt) []models.MatchExt {
-	var result []models.MatchExt
-	for _, match := range matches {
-		if match.Module != "conntrack" && match.Module != "state" {
-			result = append(result, match)
-		}
-	}
-	return result
-}
-
-func isUnrestrictedExceptTarget(rule *models.Rule) bool {
-	return (rule.Protocol == "" || rule.Protocol == models.ProtoAll) && rule.SrcAddr == "" && rule.DstAddr == "" &&
-		rule.SrcPort == "" && rule.DstPort == "" && rule.InIface == "" && rule.OutIface == "" &&
-		!rule.Fragment && len(rule.Negations) == 0 && len(rule.Matches) == 0
-}
-
-func contains(values []string, wanted string) bool {
-	for _, value := range values {
-		if strings.EqualFold(strings.TrimSpace(value), wanted) {
-			return true
-		}
-	}
-	return false
 }

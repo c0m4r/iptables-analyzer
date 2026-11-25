@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"fmt"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -17,11 +18,12 @@ func Analyze(ipv4, ipv6 *models.Ruleset) *models.AnalysisResult {
 // as the interface list; nil means they are unknown (saved rulesets).
 func AnalyzeHost(ipv4, ipv6 *models.Ruleset, host *models.HostContext) *models.AnalysisResult {
 	result := &models.AnalysisResult{
-		IPv4Rules:         ipv4,
-		IPv6Rules:         ipv6,
 		Host:              host,
 		ServiceAssessment: models.AssessmentNotRequested,
 	}
+	ipv4, result.IPv4Status = assessable(result, ipv4, models.IPv4)
+	ipv6, result.IPv6Status = assessable(result, ipv6, models.IPv6)
+	result.IPv4Rules, result.IPv6Rules = ipv4, ipv6
 
 	// Shadow detection
 	result.ShadowedRules = append(result.ShadowedRules, DetectShadowedRules(ipv4)...)
@@ -37,11 +39,41 @@ func AnalyzeHost(ipv4, ipv6 *models.Ruleset, host *models.HostContext) *models.A
 	}
 	result.DockerBypasses = append(result.DockerBypasses, DockerIPv6Gaps(ipv4, ipv6)...)
 
-	// Effectiveness checks
-	result.EffectiveIssues = append(result.EffectiveIssues, CheckEffectiveness(ipv4)...)
-	result.EffectiveIssues = append(result.EffectiveIssues, CheckEffectiveness(ipv6)...)
+	// What the rules do by default, and which ports they open
+	for _, rs := range []*models.Ruleset{ipv4, ipv6} {
+		findings, open, diagnostics := checkEffectiveness(rs, host, result.PublishedPorts)
+		result.EffectiveIssues = append(result.EffectiveIssues, findings...)
+		result.OpenPorts = append(result.OpenPorts, open...)
+		result.Diagnostics = append(result.Diagnostics, diagnostics...)
+	}
+	result.EffectiveIssues = append(result.EffectiveIssues, checkFamilyParity(result)...)
 
 	return result
+}
+
+// assessable returns the ruleset to analyze for one family and its status,
+// and records what iptables-save could not show. A family whose tables hold
+// native nftables rules is not analyzed at all: treating the unseen rules as
+// absent would report a filtered host as open.
+func assessable(result *models.AnalysisResult, rs *models.Ruleset, version models.IPVersion) (*models.Ruleset, models.FamilyStatus) {
+	if rs == nil {
+		return nil, models.FamilyExcluded
+	}
+	stack := stackName(version)
+	for _, warning := range rs.Warnings {
+		result.Diagnostics = append(result.Diagnostics, models.AssessmentDiagnostic{Area: "rules", Message: fmt.Sprintf(
+			"%s: %s. Packets pass both rule sets, so the real firewall can be stricter than this report", stack, warning)})
+	}
+	if len(rs.Unreadable) > 0 {
+		result.Diagnostics = append(result.Diagnostics, models.AssessmentDiagnostic{Area: "rules", Message: fmt.Sprintf(
+			"%s was not analyzed: table %s holds native nftables rules that iptables-save cannot print. Inspect them with 'nft list ruleset'",
+			stack, strings.Join(rs.Unreadable, ", "))})
+		return nil, models.FamilyUnreadable
+	}
+	if len(rs.Tables) == 0 {
+		return rs, models.FamilyNoRules
+	}
+	return rs, models.FamilyAnalyzed
 }
 
 // CrossReferenceServices cross-references firewall rules with listening services
@@ -52,12 +84,10 @@ func CrossReferenceServices(result *models.AnalysisResult, services []models.Lis
 
 	for i := range result.Services {
 		svc := result.Services[i]
-		if !svc.IsWildcard {
-			// Services bound to localhost aren't exposed
-			if isLoopback(svc.Address) {
-				result.Services[i].Status = models.ServiceLocalhost
-				continue
-			}
+		// Services bound to localhost or to the loopback device aren't exposed
+		if svc.Device == "lo" || (!svc.IsWildcard && isLoopback(svc.Address)) {
+			result.Services[i].Status = models.ServiceLocalhost
+			continue
 		}
 
 		families := []models.IPVersion{}
@@ -75,6 +105,7 @@ func CrossReferenceServices(result *models.AnalysisResult, services []models.Lis
 		}
 		assessed := false
 		reachable := false
+		internal := false
 		published := false
 		for _, family := range families {
 			rs := result.IPv4Rules
@@ -113,7 +144,11 @@ func CrossReferenceServices(result *models.AnalysisResult, services []models.Lis
 				evaluators[rs] = evaluator
 			}
 			exposure := evaluator.classify(evaluated)
-			if exposure.scope != "" {
+			switch {
+			case exposure.scope == "":
+			case exposure.internal:
+				internal = true
+			default:
 				reachable = true
 				addServiceFinding(result, evaluated, exposure, label, family)
 			}
@@ -125,6 +160,8 @@ func CrossReferenceServices(result *models.AnalysisResult, services []models.Lis
 			result.Services[i].Status = models.ServiceDocker
 		case reachable:
 			result.Services[i].Status = models.ServiceReachable
+		case internal:
+			result.Services[i].Status = models.ServiceInternal
 		default:
 			result.Services[i].Status = models.ServiceFiltered
 		}
@@ -163,6 +200,7 @@ func deduplicateServices(services []models.ListeningService) []models.ListeningS
 	type serviceKey struct {
 		protocol   models.Protocol
 		address    string
+		device     string
 		port       int
 		process    string
 		pid        int
@@ -177,6 +215,7 @@ func deduplicateServices(services []models.ListeningService) []models.ListeningS
 		key := serviceKey{
 			protocol:   svc.Protocol,
 			address:    svc.Address,
+			device:     svc.Device,
 			port:       svc.Port,
 			process:    svc.Process,
 			pid:        svc.PID,
@@ -200,9 +239,19 @@ func addServiceFinding(result *models.AnalysisResult, svc models.ListeningServic
 		sev = models.SeverityMedium
 	}
 	audience := "the network"
-	if exposure.scope != models.ScopeExposed {
+	switch {
+	case exposure.scope == models.ScopeRestricted:
+		sev = models.SeverityLow
+		audience = "sources that match " + exposure.restriction + " (not evaluated)"
+	case exposure.scope != models.ScopeExposed:
 		sev = models.SeverityLow
 		audience = scopeAudience(exposure.scope)
+	case strings.HasPrefix(exposure.condition, "source port"):
+		// Only for senders that pick a privileged or a specific source port:
+		// the usual shape of DHCP and of replies in stateless rule sets.
+		sev = models.SeverityLow
+	case rateLimited(exposure.condition) && sev > models.SeverityMedium:
+		sev = models.SeverityMedium
 	}
 
 	reachability := "is accessible"
@@ -216,6 +265,9 @@ func addServiceFinding(result *models.AnalysisResult, svc models.ListeningServic
 	reason := "Service " + process + " listening on port " +
 		strconv.Itoa(svc.Port) + "/" + string(svc.Protocol) +
 		" (" + ipLabel + ") " + reachability + " from " + audience
+	if exposure.condition != "" {
+		reason += ", limited by: " + exposure.condition
+	}
 	if len(exposure.interfaces) > 0 {
 		reason += " via " + strings.Join(exposure.interfaces, ", ")
 	}
@@ -238,15 +290,26 @@ func addServiceFinding(result *models.AnalysisResult, svc models.ListeningServic
 		Severity:     sev,
 		Scope:        exposure.scope,
 		Interfaces:   exposure.interfaces,
+		Condition:    exposure.condition,
+		Restriction:  exposure.restriction,
 		Reason:       reason,
 	})
 }
 
+// rateLimited reports whether a condition is a limit on the rate or the
+// number of connections.
+func rateLimited(condition string) bool {
+	return strings.Contains(condition, "rate limit") || strings.Contains(condition, "connection limit")
+}
+
 type serviceExposure struct {
-	scope      models.AccessScope
-	allowRule  *models.Rule
-	certainty  models.Certainty
-	interfaces []string
+	scope       models.AccessScope
+	allowRule   *models.Rule
+	certainty   models.Certainty
+	interfaces  []string
+	internal    bool   // reachable only through guest bridges of this host
+	condition   string // what a packet must meet, e.g. "rate limit"
+	restriction string // what selects the sources of a RESTRICTED scope
 }
 
 // inputEvaluator evaluates the local-delivery path (raw/PREROUTING through
@@ -255,47 +318,105 @@ type inputEvaluator struct {
 	rs         *models.Ruleset
 	ctx        *evalContext
 	candidates []ingressCandidate
+	guests     []ingressCandidate
 }
 
 func newInputEvaluator(rs *models.Ruleset, host *models.HostContext) *inputEvaluator {
 	ctx := newEvalContext(rs, inferDockerTopology(rs), host)
-	return &inputEvaluator{rs: rs, ctx: ctx, candidates: ingressCandidates(rs, ctx, host)}
+	return &inputEvaluator{rs: rs, ctx: ctx, candidates: ingressCandidates(rs, ctx, host), guests: guestCandidates(rs, ctx, host)}
 }
 
+// classify returns the widest exposure of a listener to other hosts. A
+// listener that only guests of this host reach (through docker0, virbr0, ...)
+// is reported as internal. A socket bound to a device is evaluated for that
+// device alone.
 func (e *inputEvaluator) classify(svc models.ListeningService) serviceExposure {
-	root := []netip.Prefix{rootPrefix(e.rs.IPVersion)}
+	external, guests, all := e.candidates, e.guests, e.candidates
+	if svc.Device != "" {
+		external, guests, all = onDevice(external, svc.Device), onDevice(guests, svc.Device), nil
+		if len(external) == 0 && len(guests) == 0 {
+			// The socket proves that the device exists, whatever the rules name.
+			candidate := ingressCandidate{name: svc.Device}
+			if isBridgeInterface(svc.Device, e.ctx) {
+				guests = append(guests, candidate)
+			} else {
+				external = append(external, candidate)
+			}
+		}
+	}
+	exposure := e.classifyVia(svc, external, all)
+	if exposure.scope != "" {
+		return exposure
+	}
+	if internal := e.classifyVia(svc, guests, nil); internal.scope != "" {
+		internal.internal = true
+		return internal
+	}
+	return exposure
+}
+
+func onDevice(candidates []ingressCandidate, device string) []ingressCandidate {
+	var result []ingressCandidate
+	for _, candidate := range candidates {
+		if candidate.name == device {
+			result = append(result, candidate)
+		}
+	}
+	return result
+}
+
+// newConnection is the first packet of a connection from another host to a
+// local port. address is the local address, or the wildcard address.
+func (e *inputEvaluator) newConnection(protocol models.Protocol, port int, address string) packetQuery {
+	return packetQuery{
+		Protocol:        protocol,
+		DstPort:         port,
+		DstAddr:         address,
+		DstType:         "LOCAL",
+		State:           "NEW",
+		NATState:        noNAT,
+		OriginalDstAddr: address,
+		OriginalDstPort: port,
+		Direction:       "ORIGINAL",
+		External:        true,
+		Ctx:             e.ctx,
+	}
+}
+
+// classifyVia evaluates the listener for each given ingress interface.
+func (e *inputEvaluator) classifyVia(svc models.ListeningService, candidates, all []ingressCandidate) serviceExposure {
+	return e.classifyQuery(e.newConnection(svc.Protocol, svc.Port, svc.Address), candidates, all)
+}
+
+// classifyQuery evaluates a packet for each given ingress interface and
+// returns the widest scope that accepts it. all is the full candidate list:
+// an exposure through every one of them is reported without an interface list.
+func (e *inputEvaluator) classifyQuery(base packetQuery, candidates, all []ingressCandidate) serviceExposure {
+	root := rootSet(e.rs.IPVersion)
 	var best serviceExposure
 	var selected []ingressCandidate
 	uncertain := false
-	for _, candidate := range e.candidates {
-		query := packetQuery{
-			Protocol:        svc.Protocol,
-			DstPort:         svc.Port,
-			DstAddr:         svc.Address,
-			DstType:         "LOCAL",
-			InIface:         candidate.name,
-			State:           "NEW",
-			NATState:        noNAT,
-			OriginalDstAddr: svc.Address,
-			OriginalDstPort: svc.Port,
-			Direction:       "ORIGINAL",
-			External:        true,
-			Ctx:             e.ctx,
-		}
+	for _, candidate := range candidates {
+		query := base
+		query.InIface = candidate.name
 		path := evaluatePath(e.rs, inputPath(query), root)
-		scope, rule, certainty := path.classify()
-		if scope == "" {
+		class := path.classify()
+		if class.scope == "" {
 			continue
 		}
-		possible := certainty == models.CertaintyPossible
+		possible := class.certainty == models.CertaintyPossible
 		switch {
-		case scopeRank(scope) > scopeRank(best.scope):
-			best = serviceExposure{scope: scope, allowRule: rule}
+		case scopeRank(class.scope) > scopeRank(best.scope):
+			best = serviceExposure{scope: class.scope, allowRule: class.rule, condition: class.condition, restriction: class.restriction}
 			selected = []ingressCandidate{candidate}
 			uncertain = possible
-		case scope == best.scope:
+		case class.scope == best.scope:
 			selected = append(selected, candidate)
 			uncertain = uncertain && possible
+			if class.condition == "" {
+				// Without a condition through this interface.
+				best.condition = ""
+			}
 		}
 	}
 	if best.scope == "" {
@@ -305,7 +426,7 @@ func (e *inputEvaluator) classify(svc models.ListeningService) serviceExposure {
 	if uncertain || onlyAssumed(selected) {
 		best.certainty = models.CertaintyPossible
 	}
-	best.interfaces = candidateLabels(selected, e.candidates)
+	best.interfaces = candidateLabels(selected, all)
 	return best
 }
 
@@ -323,62 +444,67 @@ func portMatches(rulePort, servicePort string) bool {
 	return false
 }
 
+// findUnusedRules reports ports that a rule opens although nothing listens
+// on them. The ports come from the evaluation of the whole INPUT path, so
+// rules in user chains count and rules that never match do not.
 func findUnusedRules(result *models.AnalysisResult) {
-	checkUnusedInRuleset(result, result.IPv4Rules)
-	checkUnusedInRuleset(result, result.IPv6Rules)
-}
-
-func checkUnusedInRuleset(result *models.AnalysisResult, rs *models.Ruleset) {
-	if rs == nil {
-		return
+	listening := func(open models.OpenPort) bool {
+		for _, svc := range result.Services {
+			if svc.Protocol != open.Protocol || svc.Port < open.First || svc.Port > open.Last {
+				continue
+			}
+			switch {
+			case svc.Family == models.SocketDual:
+				return true
+			case open.IPVersion == models.IPv6:
+				if svc.Family == models.SocketIPv6 || svc.IsIPv6 {
+					return true
+				}
+			case svc.Family == models.SocketIPv4 || (svc.Family == "" && !svc.IsIPv6):
+				return true
+			}
+		}
+		return false
 	}
-
-	filterTable, ok := rs.Tables["filter"]
-	if !ok {
-		return
-	}
-
-	input, ok := filterTable.Chains["INPUT"]
-	if !ok {
-		return
-	}
-
-	for _, rule := range input.Rules {
-		if !rule.IsAllow() || rule.DstPort == "" {
+	for i := range result.OpenPorts {
+		open := result.OpenPorts[i]
+		// Ports that no rule names and wide ranges are findings of their own.
+		// A rule for a given source port admits replies, not a service, and a
+		// rule without a port was not written for this port.
+		if open.Rule == nil || open.Unnamed || open.Last-open.First+1 >= broadPortCount ||
+			open.Rule.SrcPort != "" || !namesPorts(open.Rule) || listening(open) {
 			continue
 		}
-
-		// Check if any service is listening on this port
-		ports := expandPorts(rule.DstPort)
-		found := false
-		for _, portRange := range ports {
-			for _, svc := range result.Services {
-				familyMatches := (rs.IPVersion == models.IPv6 && (svc.Family == models.SocketIPv6 || svc.Family == models.SocketDual || svc.IsIPv6)) ||
-					(rs.IPVersion == models.IPv4 && (svc.Family == models.SocketIPv4 || svc.Family == models.SocketDual || (!svc.IsIPv6 && svc.Family == "")))
-				if !familyMatches {
-					continue
-				}
-				if svc.Port >= portRange[0] && svc.Port <= portRange[1] &&
-					(rule.Protocol == "" || rule.Protocol == models.ProtoAll || rule.Protocol == svc.Protocol) {
-					found = true
-					break
-				}
-			}
-			if found {
-				break
-			}
+		audience := scopeAudience(open.Scope)
+		if open.Scope == models.ScopeRestricted {
+			audience = "sources that match " + open.Restriction
 		}
-		if !found && len(ports) > 0 {
-			result.UnusedRules = append(result.UnusedRules, models.UnusedRuleFinding{
-				Code:      models.FindingUnusedRule,
-				Certainty: models.CertaintyDefinite,
-				Rule:      rule,
-				Reason: "Rule #" + strconv.Itoa(rule.RuleNum) + " allows " +
-					string(rule.Protocol) + " port(s) " + rule.DstPort +
-					" but no matching service is listening",
-			})
+		noun := "port"
+		if open.Last > open.First {
+			noun = "ports"
+		}
+		result.UnusedRules = append(result.UnusedRules, models.UnusedRuleFinding{
+			Code:      models.FindingUnusedRule,
+			Certainty: open.Certainty,
+			Rule:      *open.Rule,
+			Reason: fmt.Sprintf("%s %s %s/%s is open to %s by rule #%d in %s/%s, but nothing listens on it",
+				stackName(open.IPVersion), noun, portRangeText(open.First, open.Last), open.Protocol, audience,
+				open.Rule.RuleNum, open.Rule.Table, open.Rule.Chain),
+		})
+	}
+}
+
+// namesPorts reports whether a rule has a destination-port predicate.
+func namesPorts(rule *models.Rule) bool {
+	if rule.DstPort != "" {
+		return true
+	}
+	for _, ext := range rule.Matches {
+		if ext.Params["--ctorigdstport"] != "" || ext.Params["--ports"] != "" {
+			return true
 		}
 	}
+	return false
 }
 
 func isLoopback(addr string) bool {

@@ -1,10 +1,11 @@
 package analyzer
 
 import (
-	"net"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/c0m4r/iptables-analyzer/internal/models"
 )
@@ -31,17 +32,16 @@ func DetectShadowedRules(rs *models.Ruleset) []models.ShadowFinding {
 func detectShadowsInChain(chain *models.Chain, tableName string, ipVer models.IPVersion) []models.ShadowFinding {
 	var findings []models.ShadowFinding
 	rules := chain.Rules
-	terminal := make([]bool, len(rules))
-	for i := range rules {
-		terminal[i] = rules[i].IsTerminal()
+	index := newShadowIndex(chain)
+	// Rules after a rule that ends the chain for every packet are reported
+	// together as unreachable (checkDeadRules), not one by one as shadowed.
+	last := len(rules) - 1
+	if catchAll := firstCatchAll(chain); catchAll >= 0 {
+		last = catchAll
 	}
-	index := newChainIndex(chain)
 
-	for j := 1; j < len(rules); j++ {
-		for _, i := range shadowCandidates(index, &rules[j], j) {
-			if !terminal[i] {
-				continue
-			}
+	for j := 1; j <= last; j++ {
+		for _, i := range index.candidates(&rules[j], j) {
 			if isSuperset(&rules[i], &rules[j], ipVer) {
 				sev := models.SeverityMedium
 				// Higher severity if shadowed rule has opposite action
@@ -67,33 +67,121 @@ func detectShadowsInChain(chain *models.Chain, tableName string, ipVer models.IP
 	return findings
 }
 
-// shadowCandidates returns, in chain order, the rules before position j that
-// can cover rule b. A rule with a destination-port predicate only covers rules
-// whose ports it contains, so indexed rules are looked up by b's first port.
-func shadowCandidates(index *chainIndex, b *models.Rule, j int) []int {
-	var indexed []int
+// shadowIndex finds the rules of a chain that can cover a given rule without
+// comparing every pair: a chain with thousands of rules (a blocklist, one
+// rule per published port) would need millions of comparisons.
+//
+// A rule can only cover another when it is terminal and free of negations,
+// when its source is "any" or contains the other source, and when its
+// destination-port predicate contains the other ports.
+type shadowIndex struct {
+	chain     *models.Chain
+	ports     *chainIndex
+	eligible  []bool                 // terminal, without negation or fragment predicate
+	anySource []int                  // eligible rules without a source predicate
+	bySource  map[netip.Prefix][]int // eligible rules by their source prefix
+	sources   []netip.Prefix         // parsed source of each rule; invalid when absent
+}
+
+func newShadowIndex(chain *models.Chain) *shadowIndex {
+	index := &shadowIndex{
+		chain:    chain,
+		ports:    newChainIndex(chain),
+		eligible: make([]bool, len(chain.Rules)),
+		bySource: map[netip.Prefix][]int{},
+		sources:  make([]netip.Prefix, len(chain.Rules)),
+	}
+	for i := range chain.Rules {
+		rule := &chain.Rules[i]
+		source, hasSource := netip.Prefix{}, false
+		if rule.SrcAddr != "" && rule.SrcAddr != "0.0.0.0/0" && rule.SrcAddr != "::/0" {
+			var ok bool
+			if source, ok = cachedPrefix(rule.SrcAddr); !ok {
+				continue // an unreadable source covers nothing and is covered by nothing
+			}
+			hasSource = true
+			index.sources[i] = source
+		}
+		if !rule.IsTerminal() || len(rule.Negations) > 0 || rule.Fragment {
+			continue
+		}
+		index.eligible[i] = true
+		if hasSource {
+			index.bySource[source] = append(index.bySource[source], i)
+		} else {
+			index.anySource = append(index.anySource, i)
+		}
+	}
+	return index
+}
+
+// candidates returns, in chain order, the rules before position j that can
+// cover rule b.
+func (index *shadowIndex) candidates(b *models.Rule, j int) []int {
+	if len(b.Negations) > 0 || b.Fragment {
+		return nil
+	}
+	// Rules whose source is "any" or contains the source of b.
+	lists := [][]int{index.anySource}
+	if source := index.sources[j]; source.IsValid() {
+		for bits := source.Bits(); bits >= 0; bits-- {
+			if ancestor, err := source.Addr().Prefix(bits); err == nil {
+				if list := index.bySource[ancestor]; len(list) > 0 {
+					lists = append(lists, list)
+				}
+			}
+		}
+	} else if b.SrcAddr != "" && b.SrcAddr != "0.0.0.0/0" && b.SrcAddr != "::/0" {
+		return nil
+	}
+	// Of those, the rules whose destination ports can contain the ports of b.
+	port, indexed := 0, false
 	if ranges := cachedPortRanges(b.DstPort); b.DstPort != "" && !b.Negations["dport"] && len(ranges) > 0 {
-		indexed = index.byPort[ranges[0][0]]
+		port, indexed = ranges[0][0], true
 	}
-	candidates := make([]int, 0, len(index.always)+len(indexed))
-	x, y := 0, 0
-	for {
-		var next int
-		switch {
-		case x < len(index.always) && (y >= len(indexed) || index.always[x] < indexed[y]):
-			next = index.always[x]
-			x++
-		case y < len(indexed):
-			next = indexed[y]
-			y++
-		default:
-			return candidates
+	var candidates []int
+	for _, list := range lists {
+		for _, i := range list {
+			if i >= j {
+				break
+			}
+			if ranges := cachedPortRanges(index.chain.Rules[i].DstPort); len(ranges) > 0 {
+				if !indexed || !rangesContain(ranges, port) {
+					continue // the rule names ports that b does not have
+				}
+			}
+			candidates = append(candidates, i)
 		}
-		if next >= j {
-			return candidates
-		}
-		candidates = append(candidates, next)
 	}
+	if len(lists) > 1 {
+		sort.Ints(candidates)
+	}
+	return candidates
+}
+
+func rangesContain(ranges [][2]int, port int) bool {
+	for _, r := range ranges {
+		if port >= r[0] && port <= r[1] {
+			return true
+		}
+	}
+	return false
+}
+
+var prefixCache sync.Map // address or prefix text -> netip.Prefix, invalid when unreadable
+
+// cachedPrefix memoizes parsePrefix: rule addresses are compared many times.
+func cachedPrefix(value string) (netip.Prefix, bool) {
+	if cached, ok := prefixCache.Load(value); ok {
+		prefix := cached.(netip.Prefix)
+		return prefix, prefix.IsValid()
+	}
+	prefix, ok := parsePrefix(value)
+	if !ok {
+		prefix = netip.Prefix{}
+	}
+	prefixCache.Store(value, prefix)
+	return prefix, ok
 }
 
 // isSuperset returns true if rule A matches every packet that rule B matches
@@ -175,44 +263,16 @@ func addrCovers(a, b, anyAddr string) bool {
 }
 
 func cidrContains(outer, inner string) bool {
-	// Normalize: add /32 or /128 if missing
-	if !strings.Contains(outer, "/") {
-		if strings.Contains(outer, ":") {
-			outer += "/128"
-		} else {
-			outer += "/32"
-		}
-	}
-	if !strings.Contains(inner, "/") {
-		if strings.Contains(inner, ":") {
-			inner += "/128"
-		} else {
-			inner += "/32"
-		}
-	}
-
-	_, outerNet, err := net.ParseCIDR(outer)
-	if err != nil {
+	outerPrefix, ok := cachedPrefix(outer)
+	if !ok {
 		return false
 	}
-	_, innerNet, err := net.ParseCIDR(inner)
-	if err != nil {
-		return false
+	innerPrefix, ok := cachedPrefix(inner)
+	if !ok || outerPrefix.Addr().Is4() != innerPrefix.Addr().Is4() {
+		return false // unreadable, or different address families
 	}
-
-	onesOuter, bitsOuter := outerNet.Mask.Size()
-	onesInner, bitsInner := innerNet.Mask.Size()
-
-	if bitsOuter != bitsInner {
-		return false // different address families
-	}
-
 	// Outer must have equal or shorter prefix (wider range)
-	if onesOuter > onesInner {
-		return false
-	}
-
-	return outerNet.Contains(innerNet.IP)
+	return outerPrefix.Bits() <= innerPrefix.Bits() && outerPrefix.Contains(innerPrefix.Addr())
 }
 
 func portCovers(a, b string) bool {

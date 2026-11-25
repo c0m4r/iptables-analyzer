@@ -59,6 +59,7 @@ func Render(result *models.AnalysisResult, opts RenderOptions) error {
 	renderHeader(tracked, opts)
 	renderOverview(tracked, result)
 	renderRules(tracked, result, opts.Verbose)
+	renderOpenPorts(tracked, result)
 	renderPublishedPorts(tracked, result)
 	renderFindingsAndRecommendations(tracked, result)
 	if len(result.Services) > 0 {
@@ -171,11 +172,25 @@ func renderSectionHeader(w io.Writer, title string) {
 func renderOverview(w io.Writer, result *models.AnalysisResult) {
 	renderSectionHeader(w, "Overview")
 
-	if result.IPv4Rules != nil {
-		renderRulesetOverview(w, result.IPv4Rules, "IPv4")
-	}
-	if result.IPv6Rules != nil && len(result.IPv6Rules.Tables) > 0 {
-		renderRulesetOverview(w, result.IPv6Rules, "IPv6")
+	for _, family := range []struct {
+		version models.IPVersion
+		rules   *models.Ruleset
+		label   string
+	}{{models.IPv4, result.IPv4Rules, "IPv4"}, {models.IPv6, result.IPv6Rules, "IPv6"}} {
+		switch result.FamilyState(family.version) {
+		case models.FamilyAnalyzed:
+			if family.rules != nil {
+				renderRulesetOverview(w, family.rules, family.label)
+			}
+		case models.FamilyNoRules:
+			fmt.Fprintf(w, "  %s  %s\n", styleBold.Render(family.label),
+				styleDanger.Render("no rules are loaded: all traffic is accepted"))
+		case models.FamilyUnreadable:
+			fmt.Fprintf(w, "  %s  %s\n", styleBold.Render(family.label),
+				styleWarning.Render("not analyzed: native nftables rules"))
+		case models.FamilyNotSupplied:
+			fmt.Fprintf(w, "  %s  %s\n", styleBold.Render(family.label), styleMuted.Render("not supplied"))
+		}
 	}
 
 	fmt.Fprintln(w)
@@ -188,8 +203,17 @@ func renderOverview(w io.Writer, result *models.AnalysisResult) {
 		fmt.Fprintf(w, "  Findings:        %s\n", styleSuccess.Render("none"))
 	} else {
 		parts := []string{}
-		if n := len(result.DockerBypasses); n > 0 {
-			parts = append(parts, styleDanger.Render(fmt.Sprintf("%d docker", n)))
+		docker := 0
+		for i := range result.DockerBypasses {
+			if result.DockerBypasses[i].NATRule.Chain == "" || analyzer.IsDockerRule(&result.DockerBypasses[i].NATRule) {
+				docker++
+			}
+		}
+		if docker > 0 {
+			parts = append(parts, styleDanger.Render(fmt.Sprintf("%d docker", docker)))
+		}
+		if n := len(result.DockerBypasses) - docker; n > 0 {
+			parts = append(parts, styleDanger.Render(fmt.Sprintf("%d port forward%s", n, pluralS(n))))
 		}
 		if n := len(result.ShadowedRules); n > 0 {
 			parts = append(parts, styleWarning.Render(fmt.Sprintf("%d shadowed rules", n)))
@@ -211,7 +235,7 @@ func renderOverview(w io.Writer, result *models.AnalysisResult) {
 	fmt.Fprintf(w, "  Recommendations: %s\n", styleMuted.Render(strconv.Itoa(len(result.Recommendations))))
 	fmt.Fprintf(w, "  Service exposure: %s\n", styleMuted.Render(string(result.ServiceAssessment)))
 	if n := len(result.PublishedPorts); n > 0 {
-		fmt.Fprintf(w, "  Docker published: %s\n", styleMuted.Render(fmt.Sprintf("%d port mapping%s", n, pluralS(n))))
+		fmt.Fprintf(w, "  Translated ports: %s\n", styleMuted.Render(fmt.Sprintf("%d port mapping%s in nat/PREROUTING", n, pluralS(n))))
 	}
 	if result.Host != nil {
 		var names []string
@@ -233,6 +257,9 @@ func renderOverview(w io.Writer, result *models.AnalysisResult) {
 	}
 	for _, diagnostic := range result.Diagnostics {
 		fmt.Fprintf(w, "  Assessment note (%s): %s\n", diagnostic.Area, styleWarning.Render(diagnostic.Message))
+	}
+	for _, note := range result.Notes {
+		fmt.Fprintf(w, "  Note: %s\n", styleMuted.Render(note))
 	}
 	fmt.Fprintln(w)
 }
@@ -266,7 +293,7 @@ func renderRulesetOverview(w io.Writer, rs *models.Ruleset, label string) {
 
 	fmt.Fprintf(w, "  %s  %s\n",
 		styleBold.Render(label),
-		styleMuted.Render(fmt.Sprintf("%d table · %d chains · %d rules", len(rs.Tables), totalChains, totalRules)),
+		styleMuted.Render(fmt.Sprintf("%s · %s · %s", countNoun(len(rs.Tables), "table"), countNoun(totalChains, "chain"), countNoun(totalRules, "rule"))),
 	)
 
 	if filterTable, ok := rs.Tables["filter"]; ok {
@@ -443,6 +470,9 @@ func renderScore(w io.Writer, score models.ScoreResult) {
 		)
 
 	fmt.Fprintln(w, lipgloss.JoinHorizontal(lipgloss.Center, catsBlock, "  ", gradeCard))
+	if score.Cap != "" && score.Complete {
+		fmt.Fprintln(w, styleWarning.Render("  "+strings.ToUpper(score.Cap[:1])+score.Cap[1:]))
+	}
 	if !score.Complete && len(score.Unassessed) > 0 {
 		fmt.Fprintln(w, styleWarning.Render("  Assessment incomplete: "+strings.Join(score.Unassessed, ", ")))
 	}
@@ -571,24 +601,32 @@ func renderFindingsAndRecommendations(w io.Writer, result *models.AnalysisResult
 
 	renderSectionHeader(w, "Issues & Recommendations")
 
-	// Docker findings, grouped by kind
+	// NAT and Docker findings, grouped by kind. A port forward that is not
+	// Docker's gets a title without Docker in it.
 	for _, group := range dockerFindingGroups {
-		var findings []models.DockerBypassFinding
-		for _, f := range result.DockerBypasses {
-			for _, code := range group.codes {
-				if f.Code == code {
-					findings = append(findings, f)
+		for _, docker := range []bool{true, false} {
+			var findings []models.DockerBypassFinding
+			for _, f := range result.DockerBypasses {
+				ofDocker := group.forward == "" || analyzer.IsDockerRule(&f.NATRule)
+				for _, code := range group.codes {
+					if f.Code == code && ofDocker == docker {
+						findings = append(findings, f)
+					}
 				}
 			}
+			if len(findings) == 0 {
+				continue
+			}
+			title := group.title
+			if !docker {
+				title = group.forward
+			}
+			renderSubSection(w, title, len(findings))
+			for _, f := range findings {
+				renderFindingRow(w, f.Severity.String(), f.Reason, f.Fix)
+			}
+			fmt.Fprintln(w)
 		}
-		if len(findings) == 0 {
-			continue
-		}
-		renderSubSection(w, group.title, len(findings))
-		for _, f := range findings {
-			renderFindingRow(w, f.Severity.String(), f.Reason, f.Fix)
-		}
-		fmt.Fprintln(w)
 	}
 
 	// Shadowed rules (grouped)
@@ -663,15 +701,93 @@ func renderFindingsAndRecommendations(w io.Writer, result *models.AnalysisResult
 	}
 }
 
+// dockerFindingGroups orders the NAT findings. forward is the title for
+// findings about a DNAT rule that Docker did not write; kinds that only
+// Docker hosts have leave it empty.
 var dockerFindingGroups = []struct {
-	title string
-	codes []models.FindingCode
+	title   string
+	forward string
+	codes   []models.FindingCode
 }{
-	{"Docker: INPUT Bypassed by Published Ports", []models.FindingCode{models.FindingDockerBypass}},
-	{"Docker: Ineffective Firewall Rules", []models.FindingCode{models.FindingDockerIneffectiveRule, models.FindingDockerShadowedRule, models.FindingDockerFragileRule}},
-	{"Docker: Direct Routing to Containers", []models.FindingCode{models.FindingDockerDirectRoute}},
-	{"Docker: Published Ports Open to Any Source", []models.FindingCode{models.FindingDockerPublished}},
-	{"Docker: IPv6", []models.FindingCode{models.FindingDockerIPv6Unfiltered}},
+	{"Docker: INPUT Bypassed by Published Ports", "INPUT Rules Bypassed by Port Forwards", []models.FindingCode{models.FindingDockerBypass}},
+	{"Docker: Ineffective Firewall Rules", "", []models.FindingCode{models.FindingDockerIneffectiveRule, models.FindingDockerShadowedRule, models.FindingDockerFragileRule}},
+	{"Docker: Direct Routing to Containers", "", []models.FindingCode{models.FindingDockerDirectRoute}},
+	{"Docker: Published Ports Open to Any Source", "Port Forwards Open to Any Source", []models.FindingCode{models.FindingDockerPublished}},
+	{"Docker: IPv6", "", []models.FindingCode{models.FindingDockerIPv6Unfiltered}},
+}
+
+// maxOpenPortRows keeps the open-port table readable for rulesets that name
+// thousands of ports; JSON has all of them.
+const maxOpenPortRows = 40
+
+// renderOpenPorts lists the ports for which the firewall accepts new
+// connections to the host itself. It needs no list of listening services:
+// it shows what the rules allow, in use or not.
+func renderOpenPorts(w io.Writer, result *models.AnalysisResult) {
+	if len(result.OpenPorts) == 0 {
+		return
+	}
+	renderSectionHeader(w, "Open Ports")
+	type key struct {
+		version  models.IPVersion
+		protocol models.Protocol
+	}
+	unnamedShown := map[key]bool{}
+	var rows [][]string
+	for _, open := range result.OpenPorts {
+		ports := strconv.Itoa(open.First)
+		if open.Last > open.First {
+			ports += "-" + strconv.Itoa(open.Last)
+		}
+		if open.Unnamed {
+			// One probe stands for every port that no rule names.
+			k := key{open.IPVersion, open.Protocol}
+			if unnamedShown[k] {
+				continue
+			}
+			unnamedShown[k] = true
+			ports = "all ports that no rule names"
+		}
+		sources := renderScope(open.Scope, open.Certainty)
+		if open.Restriction != "" {
+			sources += " " + styleMuted.Render("("+open.Restriction+")")
+		}
+		if open.Condition != "" {
+			sources += " " + styleMuted.Render("("+open.Condition+")")
+		}
+		via := "any"
+		if len(open.Interfaces) > 0 {
+			via = strings.Join(open.Interfaces, ", ")
+		}
+		allowed := "policy"
+		if open.Rule != nil {
+			allowed = open.Rule.Table + "/" + open.Rule.Chain + " #" + strconv.Itoa(open.Rule.RuleNum)
+		}
+		rows = append(rows, []string{"IPv" + strconv.Itoa(int(open.IPVersion)), string(open.Protocol), ports, sources, via, allowed})
+	}
+	hidden := 0
+	if len(rows) > maxOpenPortRows {
+		hidden = len(rows) - maxOpenPortRows
+		rows = rows[:maxOpenPortRows]
+	}
+	t := lgtable.New().
+		Border(lipgloss.RoundedBorder()).
+		BorderStyle(styleTableBorder).
+		BorderRow(false).
+		StyleFunc(func(row, col int) lipgloss.Style {
+			if row == lgtable.HeaderRow {
+				return lipgloss.NewStyle().Foreground(muted).Bold(true).Padding(0, 1)
+			}
+			return lipgloss.NewStyle().Foreground(text).Padding(0, 1)
+		}).
+		Headers("STACK", "PROTO", "PORTS", "ACCEPTED FROM", "INTERFACE", "ALLOWED BY").
+		Rows(rows...)
+	fmt.Fprintln(w, indentBlock(t.String(), "  "))
+	if hidden > 0 {
+		fmt.Fprintln(w, styleMuted.Render(fmt.Sprintf("  ... and %d more port ranges (see --json).", hidden)))
+	}
+	fmt.Fprintln(w, styleMuted.Render("  New connections to the host that filter/INPUT accepts, whether or not a service listens."))
+	fmt.Fprintln(w)
 }
 
 // renderPublishedPorts lists every port Docker DNATs, with the verdict of the
@@ -680,7 +796,22 @@ func renderPublishedPorts(w io.Writer, result *models.AnalysisResult) {
 	if len(result.PublishedPorts) == 0 {
 		return
 	}
-	renderSectionHeader(w, "Docker Published Ports")
+	title, target := "Docker Published Ports", "CONTAINER"
+	docker, other := 0, 0
+	for i := range result.PublishedPorts {
+		if analyzer.IsDockerRule(&result.PublishedPorts[i].NATRule) {
+			docker++
+		} else {
+			other++
+		}
+	}
+	switch {
+	case docker == 0:
+		title, target = "Port Forwards", "FORWARDED TO"
+	case other > 0:
+		title, target = "Published and Forwarded Ports", "DESTINATION"
+	}
+	renderSectionHeader(w, title)
 	groups := analyzer.GroupPublishedPorts(result.PublishedPorts)
 	rows := make([][]string, 0, len(groups))
 	for _, p := range groups {
@@ -723,10 +854,10 @@ func renderPublishedPorts(w io.Writer, result *models.AnalysisResult) {
 			}
 			return lipgloss.NewStyle().Foreground(text).Padding(0, 1)
 		}).
-		Headers("STACK", "PUBLISHED", "CONTAINER", "BRIDGE", "REACHABLE VIA FORWARD", "INPUT WOULD").
+		Headers("STACK", "PUBLISHED", target, "BRIDGE", "REACHABLE VIA FORWARD", "INPUT WOULD").
 		Rows(rows...)
 	fmt.Fprintln(w, indentBlock(t.String(), "  "))
-	fmt.Fprintln(w, styleMuted.Render("  Published ports are DNATed in nat/PREROUTING and never traverse filter/INPUT."))
+	fmt.Fprintln(w, styleMuted.Render("  These ports are translated in nat/PREROUTING and never traverse filter/INPUT."))
 	fmt.Fprintln(w)
 }
 
@@ -740,6 +871,8 @@ func renderScope(scope models.AccessScope, certainty models.Certainty) string {
 		return styleDanger.Render("ANY SOURCE" + suffix)
 	case models.ScopeSubnet:
 		return styleWarning.Render("PUBLIC NETS" + suffix)
+	case models.ScopeRestricted:
+		return styleWarning.Render("RESTRICTED" + suffix)
 	case models.ScopeLocalnet:
 		return styleWarning.Render("PRIVATE NETS" + suffix)
 	case models.ScopeWhitelisted:
@@ -804,6 +937,11 @@ func renderFindingRow(w io.Writer, severity, message, detail string) {
 	if detail != "" {
 		fmt.Fprintf(w, "               %s\n", styleMuted.Render("↳ "+detail))
 	}
+}
+
+// countNoun renders "1 table" or "5 tables".
+func countNoun(n int, noun string) string {
+	return strconv.Itoa(n) + " " + noun + pluralS(n)
 }
 
 func pluralS(n int) string {

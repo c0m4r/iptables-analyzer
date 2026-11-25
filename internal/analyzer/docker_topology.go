@@ -276,6 +276,45 @@ func ingressCandidates(rs *models.Ruleset, ctx *evalContext, host *models.HostCo
 	return append(candidates, ingressCandidate{name: otherInterface, assumed: len(sorted) > 0})
 }
 
+// guestCandidates lists the interfaces through which only guests of this host
+// arrive: bridges of containers and virtual machines. A listener that is
+// reachable only through them is not exposed to other hosts.
+func guestCandidates(rs *models.Ruleset, ctx *evalContext, host *models.HostContext) []ingressCandidate {
+	names := map[string]bool{}
+	for bridge := range ctx.bridges {
+		names[bridge] = true
+	}
+	if host != nil {
+		for _, iface := range host.Interfaces {
+			if isBridgeInterface(iface.Name, ctx) {
+				names[iface.Name] = true
+			}
+		}
+	}
+	if rs != nil {
+		for _, table := range rs.Tables {
+			for _, chain := range table.Chains {
+				for _, rule := range chain.Rules {
+					if isBridgeInterface(rule.InIface, ctx) {
+						names[rule.InIface] = true
+					}
+				}
+			}
+		}
+	}
+	var candidates []ingressCandidate
+	for name := range names {
+		// Packets of a bridged guest enter the host on the bridge, not on the
+		// port (veth, tap) of the guest.
+		if name == "" || strings.HasSuffix(name, "+") || strings.HasPrefix(name, "veth") || strings.HasPrefix(name, "vnet") {
+			continue
+		}
+		candidates = append(candidates, ingressCandidate{name: name})
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].name < candidates[j].name })
+	return candidates
+}
+
 // candidateLabels renders the interfaces of a finding. A finding that holds
 // for every candidate is reported without an interface list.
 func candidateLabels(selected, all []ingressCandidate) []string {

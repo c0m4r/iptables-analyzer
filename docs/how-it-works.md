@@ -22,14 +22,26 @@ This document describes the analysis method, the code structure and the limits o
 
   The tool also identifies effective restrictions, for example `--ctorigdstport` and
   `--ctorigsrc` in `DOCKER-USER`, or drops in `raw` or `mangle` PREROUTING.
-- **Dead rule detection**: the tool finds rules after a catch-all DROP.
-  Conditional matches, for example `recent --update`, are not catch-all rules.
+- **Default behavior**: the tool sends a probe for a port that no rule names through the
+  INPUT path and through the FORWARD path. A chain that accepts the probe accepts by default.
+  The policy line does not decide: a final `REJECT` under an ACCEPT policy denies by default,
+  and a rule `-j ACCEPT` under a DROP policy accepts by default.
+- **Open ports**: the tool evaluates one new connection for each range of ports that the
+  rules handle in the same way. The result is the list of open ports with their sources.
+  It needs no list of listening services.
+- **Unreachable rules**: the tool finds rules after a rule that ends the chain for all
+  packets. It reports them as one finding for the chain.
+  Conditional matches, for example `recent --update`, do not end the chain.
 - **Service cross-reference**: the tool compares the firewall rules with the listening
   services from `ss`. It follows user-defined chains. Listeners of Docker published ports
   follow the Docker path.
-- **Configuration errors**: the tool finds dropped loopback traffic, a missing
-  `ESTABLISHED,RELATED` rule under default deny, and blocked IPv6 neighbor discovery
+- **IPv4 and IPv6 comparison**: the tool reports ports that IPv6 opens to all sources
+  while IPv4 restricts or filters them.
+- **Configuration errors**: the tool finds dropped loopback traffic, dropped packets of
+  established connections under default deny, and blocked IPv6 neighbor discovery
   and router advertisements. These errors stop IPv6 connectivity.
+  An address family with a DROP policy and no accepting rule is closed on purpose:
+  the tool shows one note for it.
 - **Certainty**: each finding is `DEFINITE` or `POSSIBLE`. The tool evaluates
   interface-specific rules for each interface. In live mode, it uses the real interface list.
 
@@ -54,12 +66,14 @@ This document describes the analysis method, the code structure and the limits o
 Files of `internal/analyzer/`:
 
 - `evaluation.go`: order-aware packet-path evaluation with jump, goto and RETURN.
+- `addrset.go`: sets of source addresses as sorted address ranges.
 - `analyzer.go`: service exposure and the cross-reference with listening services.
 - `shadow.go`: shadowed rules (CIDR containment, port ranges, match extensions).
 - `docker.go`: Docker published ports, ineffective rules, rule order and direct routing.
 - `docker_topology.go`: bridges, container addresses, raw protection and gateway modes,
   from the Docker rules.
-- `effectiveness.go`: policy checks, dead rules and conntrack.
+- `effectiveness.go`: default behavior, open ports, unreachable rules, replies, loopback,
+  neighbor discovery and the comparison of IPv4 with IPv6.
 
 ## Order of the steps
 
@@ -116,12 +130,35 @@ The tool gives each reachable service the scope of the sources that it accepts:
 | --- | --- |
 | `EXPOSED` | Any source, or public networks with more than 65,536 IPv4 addresses (one IPv6 /48) in total. |
 | `SUBNET` | Only specific public networks, for example `-s 203.0.113.0/24`. |
+| `RESTRICTED` | Only sources that a match selects which the tool cannot read: an ipset, a MAC address, a GeoIP match, a `recent` list. |
 | `LOCALNET` | Only private address ranges, for example `10.0.0.0/8` or `fc00::/7`. |
 | `WHITELISTED` | Only single hosts (/32 or /128). |
 
 When more than one scope applies, the tool uses the widest scope.
+The scope follows from the addresses, not from the form of the rules:
+`-m iprange --src-range` gives the same scope as the equivalent `-s` rules.
 The report lists only `EXPOSED` services as findings, and only they decrease the score.
 The service table shows the other scopes. Docker published ports use the same scopes.
+
+### Predicates that the tool cannot decide
+
+The tool does not know if a packet is below a rate limit, or if a source is in an ipset.
+It keeps both results and handles each kind of predicate in a different way:
+
+| Kind | Examples | Effect |
+| --- | --- | --- |
+| All sources can meet it | `limit`, `hashlimit`, `connlimit`, `time`, `statistic`, a source port | An ACCEPT is a definite exposure with a condition. Traffic that passes a rule that drops the excess has the same condition. |
+| An unknown set of sources | `set` with `src`, `mac`, `geoip`, `recent --rcheck`, `policy --pol ipsec` | An ACCEPT has the scope `RESTRICTED`. After a DROP with the negated match (`! --match-set allow src`), only the set continues. A DROP of the set (a blocklist) does not change the scope. |
+| Not known | `mark`, extensions that are not modeled | The finding is `POSSIBLE`. |
+
+The tool decides these matches exactly: `--syn` and `--tcp-flags` for the first packet of a
+connection, `iprange`, `multiport --ports` and `pkttype`.
+
+### Sets of sources
+
+The tool keeps the remaining sources as sorted address ranges.
+A rule for one address divides one range into two.
+A chain with 20,000 single-address rules (a fail2ban jail) is examined in approximately one second.
 
 ### Evaluation limit
 
@@ -154,3 +191,11 @@ shows an assessment note. A real Docker host with many networks uses approximate
 - Saved `ss` wildcard sockets shown as `*` count for IPv4 and IPv6, because the saved
   text does not show if a socket is IPv6-only.
 - The tool does not use rule counters.
+- A `REDIRECT` in `nat/PREROUTING` gives an assessment note. The tool does not follow it.
+- The tool examines published ports only for DNAT rules that have a destination port.
+  kube-proxy matches the port in an earlier chain. The tool gives one assessment note
+  for these rules.
+- Interfaces with the names of host-only bridges (`docker0`, `br-*`, `virbr*`, `lxcbr*`,
+  `lxdbr*`, `incusbr*`, `podman*`, `cni*`, `flannel*`, `cali*`) connect containers and
+  virtual machines of the host. A listener that only they reach has the status `INTERNAL`.
+- The tool does not read the contents of ipsets, sysctl values, or native nftables rules.

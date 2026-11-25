@@ -57,9 +57,17 @@ func ReadFile(path string, limit int64) ([]byte, error) {
 // output, which may not exceed limit bytes. The tool gets no standard input,
 // "/" as working directory and only a fixed PATH and LC_ALL=C.
 func Run(ctx context.Context, name string, args []string, limit int64) ([]byte, error) {
+	out, _, err := RunOutput(ctx, name, args, limit)
+	return out, err
+}
+
+// RunOutput is Run that also returns what a successful tool wrote to
+// standard error (at most 4 KiB, with control characters escaped). The
+// nf_tables variant of iptables-save reports there that legacy tables exist.
+func RunOutput(ctx context.Context, name string, args []string, limit int64) ([]byte, string, error) {
 	path, err := LookTrusted(name)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -75,18 +83,19 @@ func Run(ctx context.Context, name string, args []string, limit int64) ([]byte, 
 	cmd.WaitDelay = 2 * time.Second
 	command := strings.TrimSpace(name + " " + strings.Join(args, " "))
 	err = cmd.Run()
+	msg := strings.TrimSpace(textsafe.Escape(stderr.String()))
 	switch {
 	case stdout.overflow:
-		return nil, fmt.Errorf("%s output exceeds the %s input limit", command, formatSize(limit))
+		return nil, "", fmt.Errorf("%s output exceeds the %s input limit", command, formatSize(limit))
 	case err == nil:
-		return stdout.Bytes(), nil
+		return stdout.Bytes(), msg, nil
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		return nil, fmt.Errorf("%s timed out: %w", command, ctx.Err())
+		return nil, "", fmt.Errorf("%s timed out: %w", command, ctx.Err())
 	}
-	if msg := strings.TrimSpace(textsafe.Escape(stderr.String())); msg != "" {
-		return nil, fmt.Errorf("running %s: %w: %s", command, err, msg)
+	if msg != "" {
+		return nil, "", fmt.Errorf("running %s: %w: %s", command, err, msg)
 	}
-	return nil, fmt.Errorf("running %s: %w", command, err)
+	return nil, "", fmt.Errorf("running %s: %w", command, err)
 }
 
 // LookTrusted finds name in TrustedDirs, or else in PATH, and verifies that

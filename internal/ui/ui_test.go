@@ -75,6 +75,7 @@ func TestReportRendersDockerSectionsAndBaseline(t *testing.T) {
 		PublishedPorts: []models.PublishedPort{{
 			IPVersion: models.IPv6, Protocol: models.ProtoTCP, HostPort: 8443, ContainerAddr: "fd00::2", ContainerPort: 443,
 			Bridge: "br-0123456789ab", ForwardScope: models.ScopeExposed, Certainty: models.CertaintyDefinite,
+			NATRule: models.Rule{Table: "nat", Chain: "DOCKER", RuleNum: 1},
 		}},
 		DockerBypasses: []models.DockerBypassFinding{{
 			Code: models.FindingDockerIneffectiveRule, Severity: models.SeverityHigh, Reason: "rule never matches", Fix: "use --ctorigdstport",
@@ -127,5 +128,34 @@ func TestServiceStatusShowsBroadestSourceScope(t *testing.T) {
 		if !strings.Contains(status, tt.status) {
 			t.Fatalf("expected %s, got %q for %+v", tt.status, status, tt.findings)
 		}
+	}
+}
+
+// A port forward that Docker did not write is not labeled as Docker's
+// (audit B8).
+func TestPortForwardIsNotLabeledAsDocker(t *testing.T) {
+	forward := models.Rule{Table: "nat", Chain: "PREROUTING", RuleNum: 1, Protocol: models.ProtoTCP}
+	result := &models.AnalysisResult{
+		Score: models.ScoreResult{Breakdown: map[string]int{}},
+		PublishedPorts: []models.PublishedPort{{
+			IPVersion: models.IPv4, Protocol: models.ProtoTCP, HostPort: 8443, ContainerAddr: "192.168.1.50", ContainerPort: 443,
+			ForwardScope: models.ScopeExposed, Certainty: models.CertaintyDefinite, NATRule: forward,
+		}},
+		DockerBypasses: []models.DockerBypassFinding{{
+			Code: models.FindingDockerPublished, Severity: models.SeverityMedium, NATRule: forward, Reason: "port 8443 is forwarded",
+		}},
+	}
+	var output bytes.Buffer
+	if err := Render(result, RenderOptions{Writer: &output}); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{"Port Forwards", "FORWARDED TO", "Port Forwards Open to Any Source"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("report is missing %q", want)
+		}
+	}
+	if strings.Contains(text, "Docker") || strings.Contains(text, "CONTAINER") {
+		t.Errorf("a port forward was labeled as Docker's:\n%s", text)
 	}
 }
