@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Types of changes: Added, Changed, Deprecated, Removed, Fixed, Security
 
-## [Unreleased]
+## [0.8.0] - 2026-11-26
 
 This release follows the audit in `docs/audit-0.7.1.md`. It changes the report, the JSON form
 and the exit status: see "Changed" before you update scripts.

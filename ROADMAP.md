@@ -11,13 +11,9 @@ Phase 2 changes the data model and the report. Phase 3 widens the analysis.
 
 | Phase | State |
 | --- | --- |
-| 1. Correct results | Done (2026-11-25), not released. See `CHANGELOG.md`, section Unreleased |
-| 2. Report | Done (2026-11-25), not released |
-| 3. Wider analysis | Done (2026-11-26), not released. Open points below |
-
-Before the release: set `VERSION` (decision 3 names 0.8), give the section Unreleased
-of `CHANGELOG.md` its version and date, and set the same in the manual page.
-The picture in `README.md` showed the old report; the README now has a text example.
+| 1. Correct results | Released in 0.8.0. See `CHANGELOG.md` |
+| 2. Report | Released in 0.8.0 |
+| 3. Wider analysis | Released in 0.8.0. Open points below |
 
 Phase 3 differs from the plan below in these points:
 
