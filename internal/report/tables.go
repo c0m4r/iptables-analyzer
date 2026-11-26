@@ -2,6 +2,7 @@ package report
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/c0m4r/iptables-analyzer/internal/analyzer"
@@ -26,13 +27,17 @@ func (b *builder) openPorts() []OpenPort {
 			other := &ports[j]
 			if other.Protocol != entry.Protocol || other.First != entry.First || other.Last != entry.Last ||
 				other.Scope != entry.Scope || other.Certainty != entry.Certainty || other.Condition != entry.Condition ||
-				other.Restriction != entry.Restriction || other.Default != entry.Default ||
+				other.Restriction != entry.Restriction || other.Default != entry.Default || other.Address != entry.Address ||
+				!sameRedirect(other.Redirect, entry.Redirect) ||
 				strings.Join(other.Interfaces, ",") != strings.Join(entry.Interfaces, ",") {
 				continue
 			}
 			if !containsInt(other.Families, entry.Families[0]) {
 				other.Families = append(other.Families, entry.Families[0])
 				other.Rules = append(other.Rules, entry.Rules...)
+				if entry.Redirect != nil {
+					other.Redirect.Rules = append(other.Redirect.Rules, entry.Redirect.Rules...)
+				}
 			}
 			for _, name := range entry.Listeners {
 				if !containsString(other.Listeners, name) {
@@ -53,6 +58,7 @@ func (b *builder) openPorts() []OpenPort {
 		entry := OpenPort{
 			Families:    []int{int(source.IPVersion)},
 			Protocol:    string(source.Protocol),
+			Address:     source.Address,
 			First:       source.First,
 			Last:        source.Last,
 			Scope:       source.Scope,
@@ -62,9 +68,16 @@ func (b *builder) openPorts() []OpenPort {
 			Interfaces:  source.Interfaces,
 			Default:     source.Unnamed,
 		}
+		if source.Redirected() {
+			entry.Redirect = &Redirect{Address: source.LocalAddr, First: source.LocalPort, Last: source.LocalPortEnd,
+				Rules: []RuleRef{b.ref(source.NATRule, "redirects")}}
+		}
 		if source.Unnamed {
 			// One probe stands for every port that no rule names.
 			entry.First, entry.Last = 0, 0
+			if entry.Redirect != nil && entry.Redirect.First == source.First {
+				entry.Redirect.First, entry.Redirect.Last = 0, 0 // the port stays
+			}
 		} else {
 			entry.Public = b.declaredPublic(source.Protocol, source.First, source.Last)
 			entry.Listeners = b.listeners(source)
@@ -79,6 +92,9 @@ func (b *builder) openPorts() []OpenPort {
 	for i := range b.result.ExposedServices {
 		exposed := &b.result.ExposedServices[i]
 		svc := exposed.Service
+		if exposed.ViaPort != 0 {
+			continue // the entry of the redirected port names the listener
+		}
 		named := false
 		for j := range b.result.OpenPorts {
 			open := &b.result.OpenPorts[j]
@@ -131,12 +147,25 @@ func containsInt(values []int, wanted int) bool {
 	return false
 }
 
+// sameRedirect reports whether two entries are sent to the same local ports.
+func sameRedirect(a, b *Redirect) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Address == b.Address && a.First == b.First && a.Last == b.Last
+}
+
 // listeners names the processes that listen on the ports of an entry and
-// that other hosts could reach there.
+// that other hosts could reach there. For ports that nat/PREROUTING sends to
+// other local ports, those are the listeners on the new ports.
 func (b *builder) listeners(open *models.OpenPort) []string {
+	first, last := open.First, open.Last
+	if open.NATRule != nil {
+		first, last = open.LocalPort, open.LocalPortEnd
+	}
 	var names []string
 	for _, svc := range b.result.Services {
-		if svc.Protocol != open.Protocol || svc.Port < open.First || svc.Port > open.Last || svc.Status == models.ServiceLocalhost {
+		if svc.Protocol != open.Protocol || svc.Port < first || svc.Port > last || svc.Status == models.ServiceLocalhost {
 			continue
 		}
 		switch {
@@ -160,11 +189,13 @@ func (b *builder) listeners(open *models.OpenPort) []string {
 }
 
 // forwards lists the ports that nat/PREROUTING translates to another host.
+// Destinations that share one port (the endpoints of a Kubernetes service)
+// are one entry.
 func (b *builder) forwards() []Forward {
 	forwards := []Forward{}
 	for _, group := range analyzer.GroupPublishedPorts(b.result.PublishedPorts) {
 		rule := group.NATRule
-		forwards = append(forwards, Forward{
+		entry := Forward{
 			Family:       int(group.IPVersion),
 			Protocol:     string(group.Protocol),
 			HostAddr:     group.HostAddr,
@@ -180,9 +211,35 @@ func (b *builder) forwards() []Forward {
 			Certainty:    group.Certainty,
 			Interfaces:   group.Interfaces,
 			Rule:         b.ref(&rule, "translates"),
-		})
+		}
+		if n := len(forwards); n > 0 {
+			last := &forwards[n-1]
+			if last.Family == entry.Family && last.Protocol == entry.Protocol && last.HostAddr == entry.HostAddr &&
+				last.HostPort == entry.HostPort && last.HostPortEnd == entry.HostPortEnd && last.ForwardScope == entry.ForwardScope &&
+				last.InputScope == entry.InputScope && last.Certainty == entry.Certainty && last.Docker == entry.Docker &&
+				strings.Join(last.Interfaces, ",") == strings.Join(entry.Interfaces, ",") {
+				if len(last.Destinations) == 0 {
+					last.Destinations = []string{destinationText(*last)}
+				}
+				last.Destinations = append(last.Destinations, destinationText(entry))
+				continue
+			}
+		}
+		forwards = append(forwards, entry)
 	}
 	return forwards
+}
+
+// destinationText renders the destination of a forward as "address:port".
+func destinationText(forward Forward) string {
+	ports := strconv.Itoa(forward.DestPort)
+	if forward.DestPortEnd > forward.DestPort {
+		ports += "-" + strconv.Itoa(forward.DestPortEnd)
+	}
+	if strings.Contains(forward.DestAddr, ":") {
+		return "[" + forward.DestAddr + "]:" + ports
+	}
+	return forward.DestAddr + ":" + ports
 }
 
 func scopeRank(scope models.AccessScope) int {
@@ -231,7 +288,8 @@ func (b *builder) services() []Service {
 			}
 		case models.ServiceDocker:
 			for _, mapping := range b.result.PublishedPorts {
-				if mapping.Protocol == svc.Protocol && mapping.HostPort == svc.Port && scopeRank(mapping.ForwardScope) > scopeRank(entry.Scope) {
+				if mapping.Protocol == svc.Protocol && mapping.HostPort <= svc.Port && svc.Port <= max(mapping.HostPort, mapping.HostPortEnd) &&
+					scopeRank(mapping.ForwardScope) > scopeRank(entry.Scope) {
 					entry.Scope = mapping.ForwardScope
 				}
 			}
@@ -290,7 +348,10 @@ func (b *builder) rulesets(findings []Finding) []Ruleset {
 			})
 			for _, chainName := range chainNames {
 				chain := source.Chains[chainName]
-				entry := Chain{Name: chainName, Policy: chain.Policy, Owner: chainOwner(chainName), Rules: make([]Rule, 0, len(chain.Rules))}
+				entry := Chain{Name: chainName, Policy: chain.Policy, Rules: make([]Rule, 0, len(chain.Rules))}
+				if chain.Policy == "" {
+					entry.Owner = b.ownerOf(version, tableName, chainName)
+				}
 				for i := range chain.Rules {
 					rule := &chain.Rules[i]
 					_, jump := source.Chains[rule.Target]

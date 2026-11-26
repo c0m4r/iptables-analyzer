@@ -39,6 +39,8 @@ func testDependencies(root bool) commandDependencies {
 		return models.SandboxStatus{Mode: string(mode)}, nil
 	}
 	deps.now = func() time.Time { return testTime }
+	// The tests must not read the facts of the machine that runs them.
+	deps.collectFacts = func(*models.HostContext) loader.Facts { return loader.Facts{} }
 	return deps
 }
 

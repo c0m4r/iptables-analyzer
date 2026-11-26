@@ -1,0 +1,21 @@
+iptables-analyzer vdev · file analysis · 2026-11-25 12:00
+inputs: ../testdata/ufw.iptables-save
+
+  Packet tcp 203.0.113.5 → this host, port 22 · in eth0 · new connection · IPv4
+
+  filter/INPUT
+    #1  -j ufw-before-logging-input  → jump
+    #2  -j ufw-before-input  → jump
+      ufw-before-input #10  -j ufw-not-local  → jump
+        ufw-not-local #1  -m addrtype --dst-type LOCAL -j RETURN  → RETURN
+      ufw-before-input #13  -j ufw-user-input  → jump
+        ufw-user-input #3  -p tcp -m tcp --dport 22 -j ufw-user-limit-accept  → jump
+          ufw-user-limit-accept #1  -j ACCEPT  → ACCEPT
+    → ACCEPT
+
+  Verdict  ACCEPT by filter/ufw-user-limit-accept #1
+           This host receives the packet on port 22.
+
+  Taken for granted
+    · The source port was not given: 54321 stands for a port that a client sends from.
+    · Rate and connection limits are judged for a first packet, which stays below them.

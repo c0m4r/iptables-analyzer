@@ -57,7 +57,7 @@
 <thead><tr><th class="sortable">Protocol</th><th class="sortable">Port</th>{{if .ShowFamily}}<th class="sortable">Family</th>{{end}}<th class="sortable">Open to</th><th class="sortable">Listener</th><th>Accepted by</th></tr></thead>
 <tbody>{{range .OpenPorts}}<tr>
 <td>{{.Protocol}}</td>
-<td data-sort="{{.Sort}}">{{.Ports}}{{if .Public}} <span class="tag">declared public</span>{{end}}</td>
+<td data-sort="{{.Sort}}">{{.Ports}}{{if .Redirect}} → {{.Redirect}}{{end}}{{if .Public}} <span class="tag">declared public</span>{{end}}{{if .Redirect}}<div class="sub">sent there by {{range .RedirectRules}}<a class="mono" href="#{{.Anchor}}">{{.Where}}</a> {{end}}</div>{{end}}</td>
 {{if $.ShowFamily}}<td>{{.Families}}</td>
 {{end}}<td data-sort="{{.ScopeRank}}"><span class="scope sc-{{.ScopeClass}}">{{.Scope}}</span>{{if .Qualifiers}}<div class="sub">{{.Qualifiers}}</div>{{end}}</td>
 <td>{{.Listeners}}</td>

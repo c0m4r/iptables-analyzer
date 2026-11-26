@@ -1,0 +1,48 @@
+iptables-analyzer vdev · file analysis · 2026-11-25 12:00
+inputs: ../testdata/k8s.iptables-save
+
+  Packet tcp 203.0.113.5 → this host, port 30080 · in eth0 · new connection · IPv4
+
+  mangle/PREROUTING  → no rule decides: policy ACCEPT
+
+  nat/PREROUTING
+    #1  -m comment --comment "kubernetes service portals" -j KUBE-SERVICES  → jump
+      KUBE-SERVICES #6  -m comment --comment "kubernetes service nodeports; NOTE: this must be the last rule in this chain" -m addrtype --dst-type LOCAL -j KUBE-NODEPORTS
+          → jump
+        KUBE-NODEPORTS #1  -p tcp -m comment --comment "default/web" -m tcp --dport 30080 -j KUBE-EXT-2CMXP7HKUVJN7L6M
+            → jump
+          KUBE-EXT-2CMXP7HKUVJN7L6M #1  -m comment --comment "masquerade traffic for default/web external destinations" -j KUBE-MARK-MASQ
+              → jump
+            KUBE-MARK-MASQ #1  -j MARK --set-xmark 0x4000/0x4000  → continue
+                the mark is now 0x4000
+          KUBE-EXT-2CMXP7HKUVJN7L6M #2  -j KUBE-SVC-2CMXP7HKUVJN7L6M  → jump
+            KUBE-SVC-2CMXP7HKUVJN7L6M #2  -m comment --comment "default/web -> 10.244.0.10:8080" -m statistic --mode random --probability 0.50000000000 -j KUBE-SEP-KTTG6H42UOAJUCVL
+                → may match, not followed
+                depends on: random share of packets
+            KUBE-SVC-2CMXP7HKUVJN7L6M #3  -m comment --comment "default/web -> 10.244.0.11:8080" -j KUBE-SEP-N4G2XR5TDX7PQE7P
+                → jump
+              KUBE-SEP-N4G2XR5TDX7PQE7P #2  -p tcp -m comment --comment "default/web" -m tcp -j DNAT --to-destination 10.244.0.11:8080
+                  → DNAT
+    → new destination: 10.244.0.11, port 8080
+
+  mangle/FORWARD  → no rule decides: policy ACCEPT
+
+  filter/FORWARD
+    #1  -m conntrack --ctstate NEW -m comment --comment "kubernetes load balancer firewall" -j KUBE-PROXY-FIREWALL
+        → jump
+    #2  -m comment --comment "kubernetes forwarding rules" -j KUBE-FORWARD  → jump
+      KUBE-FORWARD #2  -m comment --comment "kubernetes forwarding rules" -m mark --mark 0x4000/0x4000 -j ACCEPT
+          → ACCEPT
+    → ACCEPT
+
+  Verdict  ACCEPT by filter/KUBE-FORWARD #2
+           This host sends the packet on to 10.244.0.11, port 8080, its new destination.
+
+  When a rule that may match does match
+    · If nat/KUBE-SVC-2CMXP7HKUVJN7L6M #2 matches (depends on: random share of packets): ACCEPT by
+      filter/KUBE-FORWARD #2. This host sends the packet on to 10.244.0.10, port 8080, its new
+      destination.
+
+  Taken for granted
+    · The source port was not given: 54321 stands for a port that a client sends from.
+    · The egress interface is not known: a rule that names one may match (add "out IFACE").

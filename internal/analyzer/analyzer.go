@@ -36,17 +36,20 @@ func AnalyzeHost(ipv4, ipv6 *models.Ruleset, host *models.HostContext) *models.A
 		result.PublishedPorts = append(result.PublishedPorts, docker.PublishedPorts...)
 		result.Diagnostics = append(result.Diagnostics, docker.Diagnostics...)
 		result.Diagnostics = append(result.Diagnostics, DockerAssessmentDiagnostics(rs)...)
+		result.Notes = append(result.Notes, docker.Notes...)
 	}
-	result.DockerBypasses = append(result.DockerBypasses, DockerIPv6Gaps(ipv4, ipv6)...)
+	result.DockerBypasses = append(result.DockerBypasses, DockerIPv6Gaps(ipv4, ipv6, host)...)
 
 	// What the rules do by default, and which ports they open
 	for _, rs := range []*models.Ruleset{ipv4, ipv6} {
-		findings, open, diagnostics := checkEffectiveness(rs, host, result.PublishedPorts)
+		findings, open, diagnostics := checkEffectiveness(rs, host)
 		result.EffectiveIssues = append(result.EffectiveIssues, findings...)
 		result.OpenPorts = append(result.OpenPorts, open...)
 		result.Diagnostics = append(result.Diagnostics, diagnostics...)
 	}
 	result.EffectiveIssues = append(result.EffectiveIssues, checkFamilyParity(result)...)
+	result.Diagnostics = append(result.Diagnostics, nativeTableDiagnostics(result, host)...)
+	result.Notes = append(result.Notes, reversePathNotes(ipv4, host)...)
 
 	return result
 }
@@ -130,13 +133,12 @@ func CrossReferenceServices(result *models.AnalysisResult, services []models.Lis
 			}
 			assessed = true
 			if mapping := publishedMapping(result.PublishedPorts, family, evaluated); mapping != nil {
-				// nat/PREROUTING translates this port before INPUT; the listener
-				// (typically docker-proxy) is not what external clients reach.
+				// nat/PREROUTING sends this port to another host before INPUT; the
+				// listener (typically docker-proxy) is not what other hosts reach.
 				published = true
 				if mapping.ForwardScope != "" {
 					reachable = true
 				}
-				continue
 			}
 			evaluator := evaluators[rs]
 			if evaluator == nil {
@@ -151,6 +153,13 @@ func CrossReferenceServices(result *models.AnalysisResult, services []models.Lis
 			default:
 				reachable = true
 				addServiceFinding(result, evaluated, exposure, label, family)
+			}
+			// Ports that nat/PREROUTING sends to the port of this listener.
+			for j := range result.OpenPorts {
+				if open := &result.OpenPorts[j]; redirectsTo(open, family, evaluated) {
+					reachable = true
+					addRedirectFinding(result, evaluated, open, label)
+				}
 			}
 		}
 		switch {
@@ -176,13 +185,14 @@ func CrossReferenceServices(result *models.AnalysisResult, services []models.Lis
 	findUnusedRules(result)
 }
 
-// publishedMapping returns the Docker mapping that intercepts traffic for the
-// listener before INPUT, if any. A mapping bound to one host address only
-// intercepts a listener bound to that same address.
+// publishedMapping returns the mapping that takes the traffic for the
+// listener to another host before INPUT, if any. A mapping for one host
+// address only takes the traffic of a listener bound to that same address.
 func publishedMapping(mappings []models.PublishedPort, family models.IPVersion, svc models.ListeningService) *models.PublishedPort {
 	for i := range mappings {
 		mapping := &mappings[i]
-		if mapping.IPVersion != family || mapping.Protocol != svc.Protocol || mapping.HostPort != svc.Port {
+		if mapping.IPVersion != family || mapping.Protocol != svc.Protocol ||
+			svc.Port < mapping.HostPort || svc.Port > max(mapping.HostPort, mapping.HostPortEnd) {
 			continue
 		}
 		if mapping.HostAddr == "" || mapping.HostAddr == svc.Address {
@@ -190,6 +200,80 @@ func publishedMapping(mappings []models.PublishedPort, family models.IPVersion, 
 		}
 	}
 	return nil
+}
+
+// redirectsTo reports whether nat/PREROUTING sends the ports of an entry to
+// the socket of the listener. REDIRECT uses the address of the ingress
+// interface, so it reaches a socket on the wildcard address or on an address
+// of an interface, and never one on loopback.
+func redirectsTo(open *models.OpenPort, family models.IPVersion, svc models.ListeningService) bool {
+	if !open.Redirected() || open.IPVersion != family || open.Protocol != svc.Protocol ||
+		svc.Port < open.LocalPort || svc.Port > open.LocalPortEnd {
+		return false
+	}
+	if svc.Device != "" && len(open.Interfaces) > 0 && !containsString(open.Interfaces, svc.Device) {
+		return false
+	}
+	wildcard := svc.IsWildcard || wildcardAddress(svc.Address)
+	return wildcard || open.LocalAddr == "" || open.LocalAddr == svc.Address
+}
+
+// addRedirectFinding reports a listener that other hosts reach through
+// another port, which nat/PREROUTING sends to its own.
+func addRedirectFinding(result *models.AnalysisResult, svc models.ListeningService, open *models.OpenPort, ipLabel string) {
+	// The port that the clients use tells what the service is to them.
+	sev := ExposureSeverity(open.First, open.Last, open.Condition)
+	audience := "the network"
+	switch {
+	case open.Scope == models.ScopeRestricted:
+		sev = models.SeverityLow
+		audience = "sources that match " + open.Restriction + " (not evaluated)"
+	case open.Scope != models.ScopeExposed:
+		sev = models.SeverityLow
+		audience = scopeAudience(open.Scope)
+	}
+	reachability := "is accessible"
+	if open.Certainty == models.CertaintyPossible {
+		reachability = "may be accessible"
+	}
+	process := svc.Process
+	if process == "" {
+		process = "(unknown process)"
+	}
+	via := portRangeText(open.First, open.Last) + "/" + string(open.Protocol)
+	if open.Address != "" {
+		via += " of " + open.Address
+	}
+	reason := fmt.Sprintf("Service %s listening on port %d/%s (%s) %s from %s through port %s, which %s rule #%d sends to it",
+		process, svc.Port, svc.Protocol, ipLabel, reachability, audience, via,
+		open.NATRule.Table+"/"+open.NATRule.Chain, open.NATRule.RuleNum)
+	if open.Condition != "" {
+		reason += ", limited by: " + open.Condition
+	}
+	if len(open.Interfaces) > 0 {
+		reason += " via " + strings.Join(open.Interfaces, ", ")
+	}
+	if open.Rule != nil {
+		reason += " (allowed by rule #" + strconv.Itoa(open.Rule.RuleNum) + " in " + open.Rule.Table + "/" + open.Rule.Chain + ")"
+	} else {
+		reason += " (allowed by default ACCEPT policy)"
+	}
+	result.ExposedServices = append(result.ExposedServices, models.ExposedServiceFinding{
+		Code:         models.FindingExposedService,
+		Certainty:    open.Certainty,
+		IPVersion:    open.IPVersion,
+		Service:      svc,
+		AllowingRule: open.Rule,
+		Severity:     sev,
+		Scope:        open.Scope,
+		Interfaces:   open.Interfaces,
+		Condition:    open.Condition,
+		Restriction:  open.Restriction,
+		Reason:       reason,
+		ViaPort:      open.First,
+		ViaPortEnd:   open.Last,
+		NATRule:      open.NATRule,
+	})
 }
 
 // deduplicateServices collapses repeated socket rows without merging distinct
@@ -304,18 +388,37 @@ type serviceExposure struct {
 	restriction string // what selects the sources of a RESTRICTED scope
 }
 
-// inputEvaluator evaluates the local-delivery path (raw/PREROUTING through
-// security/INPUT) of one ruleset for every candidate ingress interface.
+// inputEvaluator follows the packets that other hosts send to this host
+// through one ruleset, for every candidate ingress interface: PREROUTING
+// with its address translation, then INPUT or FORWARD (see ingress.go).
 type inputEvaluator struct {
 	rs         *models.Ruleset
 	ctx        *evalContext
+	topo       *dockerTopology
+	host       *models.HostContext
 	candidates []ingressCandidate
 	guests     []ingressCandidate
+	// named holds the single local addresses that rules of nat/PREROUTING
+	// name; clusterIPs counts the cluster addresses of kube-proxy, which are
+	// not evaluated.
+	named      []namedDestination
+	clusterIPs int
+	classCache map[models.Protocol][]portClass
+	natCache   map[natKey][]natBranch
+	// reverse holds the sources that the reverse-path filter admits, once
+	// the routes were read (reverseRead).
+	reverse     *reversePaths
+	reverseRead bool
 }
 
 func newInputEvaluator(rs *models.Ruleset, host *models.HostContext) *inputEvaluator {
-	ctx := newEvalContext(rs, inferDockerTopology(rs), host)
-	return &inputEvaluator{rs: rs, ctx: ctx, candidates: ingressCandidates(rs, ctx, host), guests: guestCandidates(rs, ctx, host)}
+	topo := inferDockerTopology(rs)
+	ctx := newEvalContext(rs, topo, host)
+	e := &inputEvaluator{rs: rs, ctx: ctx, topo: topo, host: host,
+		candidates: ingressCandidates(rs, ctx, host), guests: guestCandidates(rs, ctx, host),
+		classCache: map[models.Protocol][]portClass{}, natCache: map[natKey][]natBranch{}}
+	e.nameDestinations()
+	return e
 }
 
 // classify returns the widest exposure of a listener to other hosts. A
@@ -357,42 +460,31 @@ func onDevice(candidates []ingressCandidate, device string) []ingressCandidate {
 	return result
 }
 
-// newConnection is the first packet of a connection from another host to a
-// local port. address is the local address, or the wildcard address.
-func (e *inputEvaluator) newConnection(protocol models.Protocol, port int, address string) packetQuery {
-	return packetQuery{
-		Protocol:        protocol,
-		DstPort:         port,
-		DstAddr:         address,
-		DstType:         "LOCAL",
-		State:           "NEW",
-		NATState:        noNAT,
-		OriginalDstAddr: address,
-		OriginalDstPort: port,
-		Direction:       "ORIGINAL",
-		External:        true,
-		Ctx:             e.ctx,
-	}
-}
-
 // classifyVia evaluates the listener for each given ingress interface.
 func (e *inputEvaluator) classifyVia(svc models.ListeningService, candidates, all []ingressCandidate) serviceExposure {
 	return e.classifyQuery(e.newConnection(svc.Protocol, svc.Port, svc.Address), candidates, all)
 }
 
 // classifyQuery evaluates a packet for each given ingress interface and
-// returns the widest scope that accepts it. all is the full candidate list:
-// an exposure through every one of them is reported without an interface list.
+// returns the widest scope from which it arrives at its own port. all is the
+// full candidate list: an exposure through every one of them is reported
+// without an interface list.
 func (e *inputEvaluator) classifyQuery(base packetQuery, candidates, all []ingressCandidate) serviceExposure {
-	root := rootSet(e.rs.IPVersion)
+	return e.widest(candidates, all, func(candidate ingressCandidate) pathResult {
+		query := base
+		query.InIface = candidate.name
+		return e.direct(query)
+	})
+}
+
+// widest returns the widest scope that a path accepts among the candidate
+// ingress interfaces. accepted gives the path of one candidate.
+func (e *inputEvaluator) widest(candidates, all []ingressCandidate, accepted func(ingressCandidate) pathResult) serviceExposure {
 	var best serviceExposure
 	var selected []ingressCandidate
 	uncertain := false
 	for _, candidate := range candidates {
-		query := base
-		query.InIface = candidate.name
-		path := evaluatePath(e.rs, inputPath(query), root)
-		class := path.classify()
+		class := accepted(candidate).classify()
 		if class.scope == "" {
 			continue
 		}
@@ -441,8 +533,14 @@ func portMatches(rulePort, servicePort string) bool {
 // rules in user chains count and rules that never match do not.
 func findUnusedRules(result *models.AnalysisResult) {
 	listening := func(open models.OpenPort) bool {
+		// A port that nat/PREROUTING sends to another one is in use when
+		// something listens there.
+		first, last := open.First, open.Last
+		if open.NATRule != nil {
+			first, last = open.LocalPort, open.LocalPortEnd
+		}
 		for _, svc := range result.Services {
-			if svc.Protocol != open.Protocol || svc.Port < open.First || svc.Port > open.Last {
+			if svc.Protocol != open.Protocol || svc.Port < first || svc.Port > last {
 				continue
 			}
 			switch {
@@ -475,6 +573,12 @@ func findUnusedRules(result *models.AnalysisResult) {
 		if open.Last > open.First {
 			noun = "ports"
 		}
+		where := "on it"
+		if open.Redirected() {
+			audience += fmt.Sprintf(" and sent to local port %s by rule #%d in %s/%s; that is accepted",
+				portRangeText(open.LocalPort, open.LocalPortEnd), open.NATRule.RuleNum, open.NATRule.Table, open.NATRule.Chain)
+			where = "there"
+		}
 		result.UnusedRules = append(result.UnusedRules, models.UnusedRuleFinding{
 			Code:      models.FindingUnusedRule,
 			Certainty: open.Certainty,
@@ -484,9 +588,11 @@ func findUnusedRules(result *models.AnalysisResult) {
 			Last:      open.Last,
 			Scope:     open.Scope,
 			Rule:      *open.Rule,
-			Reason: fmt.Sprintf("%s %s %s/%s is open to %s by rule #%d in %s/%s, but nothing listens on it",
+			NATRule:   open.NATRule,
+			LocalPort: open.LocalPort,
+			Reason: fmt.Sprintf("%s %s %s/%s is open to %s by rule #%d in %s/%s, but nothing listens %s",
 				stackName(open.IPVersion), noun, portRangeText(open.First, open.Last), open.Protocol, audience,
-				open.Rule.RuleNum, open.Rule.Table, open.Rule.Chain),
+				open.Rule.RuleNum, open.Rule.Table, open.Rule.Chain, where),
 		})
 	}
 }

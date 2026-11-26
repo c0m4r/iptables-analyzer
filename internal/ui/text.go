@@ -441,9 +441,9 @@ func (t *textReport) finding(finding report.Finding) {
 func (t *textReport) reachable() {
 	rep := t.rep
 	entry := func(open report.OpenPort) string {
-		name := "all ports that no rule names"
-		if !open.Default {
-			name = portRange(open.First, open.Last)
+		name := openPortName(open)
+		if open.Redirect != nil {
+			name += " → " + redirectName(open.Redirect)
 		}
 		var qualifiers []string
 		if len(open.Listeners) > 0 {
@@ -526,7 +526,7 @@ func (t *textReport) reachable() {
 				host = bracket(host) + ":"
 			}
 			from := host + portRange(forward.HostPort, forward.HostPortEnd) + "/" + forward.Protocol
-			to := bracket(forward.DestAddr) + ":" + portRange(forward.DestPort, forward.DestPortEnd)
+			to := forwardDestination(forward)
 			if forward.Bridge != "" {
 				to += " (" + forward.Bridge + ")"
 			}

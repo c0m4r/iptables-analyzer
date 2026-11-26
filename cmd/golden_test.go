@@ -80,6 +80,11 @@ func TestGoldenReports(t *testing.T) {
 		{"docker29", testDependencies(false), []string{data("docker29.iptables-save"), data("docker29.ip6tables-save"), data("services.txt")}},
 		{"insecure", testDependencies(false), []string{data("insecure.iptables-save")}},
 		{"no-rules", liveDependencies("", "", ssListenBoth), nil},
+		{"k8s", testDependencies(false), []string{data("k8s.iptables-save"), data("k8s-services.txt")}},
+		{"router", testDependencies(false), []string{data("router.snapshot.json")}},
+		{"libvirt", testDependencies(false), []string{data("libvirt.iptables-save"), data("libvirt-services.txt")}},
+		{"firewalld", testDependencies(false), []string{data("firewalld.iptables-save"), data("firewalld-services.txt")}},
+		{"fail2ban", testDependencies(false), []string{data("fail2ban.iptables-save"), data("fail2ban-services.txt")}},
 	} {
 		text, err := run(t, c.deps, c.args...)
 		if err != nil {
@@ -102,6 +107,29 @@ func TestGoldenReports(t *testing.T) {
 		}
 		compareGolden(t, c.name+".json", json)
 		compareGolden(t, c.name+".html", pageWithoutAssets(page.String()))
+	}
+}
+
+// The answers to the two questions besides the report are kept as well:
+// the way of one packet, and what a change of the rules changes.
+func TestGoldenQueries(t *testing.T) {
+	t.Setenv("COLUMNS", "")
+	for _, c := range []struct {
+		name string
+		args []string
+	}{
+		{"trace-ufw-ssh.txt", []string{data("ufw.iptables-save"), "--trace", "tcp 203.0.113.5 -> :22 in eth0"}},
+		{"trace-router-forward.txt", []string{data("router.snapshot.json"), "--trace", "tcp 203.0.113.5 -> 198.51.100.7:8443 in eth0"}},
+		{"trace-k8s-nodeport.txt", []string{data("k8s.iptables-save"), "--trace", "tcp 203.0.113.5 -> :30080 in eth0"}},
+		{"trace-k8s-nodeport.json", []string{data("k8s.iptables-save"), "--json", "--trace", "tcp 203.0.113.5 -> :30080 in eth0"}},
+		{"diff-basic-ufw.txt", []string{"--diff", data("basic.iptables-save"), data("ufw.iptables-save")}},
+		{"diff-basic-ufw.json", []string{"--diff", "--json", data("basic.iptables-save"), data("ufw.iptables-save")}},
+	} {
+		output, err := run(t, testDependencies(false), c.args...)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		compareGolden(t, c.name, output)
 	}
 }
 

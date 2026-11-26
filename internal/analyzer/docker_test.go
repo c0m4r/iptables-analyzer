@@ -308,15 +308,20 @@ func TestDocker29IPv6PublishedPort(t *testing.T) {
 func TestDockerIPv6GapWhenIp6tablesIsNotManaged(t *testing.T) {
 	v4 := parseRules(t, docker29(t), models.IPv4)
 	v6 := parseRules(t, "*filter\n:INPUT DROP [0:0]\n:FORWARD ACCEPT [0:0]\n:OUTPUT ACCEPT [0:0]\nCOMMIT\n", models.IPv6)
-	if gaps := DockerIPv6Gaps(v4, v6); len(gaps) != 1 || gaps[0].Code != models.FindingDockerIPv6Unfiltered {
+	if gaps := DockerIPv6Gaps(v4, v6, nil); len(gaps) != 1 || gaps[0].Code != models.FindingDockerIPv6Unfiltered {
 		t.Fatalf("expected an IPv6 forwarding gap, got %+v", gaps)
 	}
-	if gaps := DockerIPv6Gaps(v4, parseRules(t, readFixture(t, "docker29.ip6tables-save"), models.IPv6)); len(gaps) != 0 {
+	if gaps := DockerIPv6Gaps(v4, parseRules(t, readFixture(t, "docker29.ip6tables-save"), models.IPv6), nil); len(gaps) != 0 {
 		t.Fatalf("Docker-managed ip6tables has no gap: %+v", gaps)
 	}
 	closed := parseRules(t, "*filter\n:INPUT DROP [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\nCOMMIT\n", models.IPv6)
-	if gaps := DockerIPv6Gaps(v4, closed); len(gaps) != 0 {
+	if gaps := DockerIPv6Gaps(v4, closed, nil); len(gaps) != 0 {
 		t.Fatalf("FORWARD DROP closes the gap: %+v", gaps)
+	}
+	// A host that routes no IPv6 packets has no gap either.
+	noRouting := &models.HostContext{Sysctls: map[string]string{"net.ipv6.conf.all.forwarding": "0"}}
+	if gaps := DockerIPv6Gaps(v4, v6, noRouting); len(gaps) != 0 {
+		t.Fatalf("without IPv6 forwarding nothing reaches the containers: %+v", gaps)
 	}
 }
 

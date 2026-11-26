@@ -1,0 +1,57 @@
+{
+ "format": "iptables-analyzer snapshot",
+ "version": 1,
+ "created": "2026-11-25T04:46:00+01:00",
+ "tool": "0.8.0",
+ "live": true,
+ "hostname": "gw01",
+ "interfaces": [
+  {
+   "name": "lo",
+   "addrs": [
+    "127.0.0.1/8",
+    "::1/128"
+   ],
+   "up": true
+  },
+  {
+   "name": "eth0",
+   "addrs": [
+    "198.51.100.7/24",
+    "fe80::5054:ff:fe12:3456/64"
+   ],
+   "up": true
+  },
+  {
+   "name": "eth1",
+   "addrs": [
+    "192.168.1.1/24",
+    "fe80::5054:ff:fe65:4321/64"
+   ],
+   "up": true
+  }
+ ],
+ "sysctls": {
+  "net.ipv4.ip_forward": "1",
+  "net.ipv6.conf.all.forwarding": "0",
+  "net.ipv4.conf.all.rp_filter": "1",
+  "net.ipv4.conf.default.rp_filter": "1",
+  "net.ipv4.conf.eth0.rp_filter": "1",
+  "net.ipv4.conf.eth1.rp_filter": "1",
+  "net.ipv4.conf.lo.rp_filter": "0",
+  "net.ipv4.conf.all.route_localnet": "0",
+  "net.ipv4.conf.eth0.route_localnet": "0",
+  "net.ipv4.conf.eth1.route_localnet": "0",
+  "net.ipv4.conf.lo.route_localnet": "0"
+ },
+ "iptables_save": {
+  "data": "# A router: eth0 is the uplink (198.51.100.7), eth1 the local network (192.168.1.0/24).\n# It sends three ports to hosts behind it, hides the local network, and redirects the\n# web traffic of the local network to a proxy on the router.\n# Written after the rules of such a host, not captured: the addresses are examples.\n*nat\n:PREROUTING ACCEPT [0:0]\n:INPUT ACCEPT [0:0]\n:OUTPUT ACCEPT [0:0]\n:POSTROUTING ACCEPT [0:0]\n-A PREROUTING -i eth0 -p tcp -m tcp --dport 8443 -j DNAT --to-destination 192.168.1.50:443\n-A PREROUTING -s 203.0.113.0/24 -i eth0 -p tcp -m tcp --dport 2222 -j DNAT --to-destination 192.168.1.10:22\n-A PREROUTING -i eth0 -p udp -m udp --dport 51820 -j DNAT --to-destination 192.168.1.20:51820\n-A PREROUTING -i eth1 -p tcp -m tcp --dport 80 -j REDIRECT --to-ports 3128\n-A POSTROUTING -s 192.168.1.0/24 -o eth0 -j MASQUERADE\nCOMMIT\n*filter\n:INPUT DROP [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\n-A INPUT -i lo -j ACCEPT\n-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n-A INPUT -m conntrack --ctstate INVALID -j DROP\n-A INPUT -p icmp -m icmp --icmp-type 8 -m limit --limit 5/sec -j ACCEPT\n-A INPUT -i eth1 -p tcp -m tcp --dport 22 -j ACCEPT\n-A INPUT -i eth1 -p udp -m udp --dport 53 -j ACCEPT\n-A INPUT -i eth1 -p tcp -m tcp --dport 53 -j ACCEPT\n-A INPUT -i eth1 -p udp -m udp --sport 68 --dport 67 -j ACCEPT\n-A INPUT -i eth1 -p tcp -m tcp --dport 3128 -j ACCEPT\n-A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n-A FORWARD -m conntrack --ctstate INVALID -j DROP\n-A FORWARD -i eth1 -o eth0 -j ACCEPT\n-A FORWARD -d 192.168.1.50/32 -i eth0 -o eth1 -p tcp -m tcp --dport 443 -j ACCEPT\n-A FORWARD -d 192.168.1.10/32 -i eth0 -o eth1 -p tcp -m tcp --dport 22 -j ACCEPT\n-A FORWARD -d 192.168.1.20/32 -i eth0 -o eth1 -p udp -m udp --dport 51820 -j ACCEPT\nCOMMIT\n"
+ },
+ "ss": [
+  {
+   "data": "Netid State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process\nudp   UNCONN 0      0        192.168.1.1:53        0.0.0.0:*     users:((\"dnsmasq\",pid=640,fd=4))\nudp   UNCONN 0      0       0.0.0.0%eth1:67        0.0.0.0:*     users:((\"dnsmasq\",pid=640,fd=3))\ntcp   LISTEN 0      32       192.168.1.1:53        0.0.0.0:*     users:((\"dnsmasq\",pid=640,fd=5))\ntcp   LISTEN 0      128          0.0.0.0:22        0.0.0.0:*     users:((\"sshd\",pid=812,fd=3))\ntcp   LISTEN 0      256                *:3128            *:*     users:((\"squid\",pid=930,fd=11))\n"
+  }
+ ],
+ "nft_list_chains": "",
+ "ip_route": "default via 198.51.100.1 dev eth0 proto static metric 100 \n192.168.1.0/24 dev eth1 proto kernel scope link src 192.168.1.1 \n198.51.100.0/24 dev eth0 proto kernel scope link src 198.51.100.7 \n"
+}

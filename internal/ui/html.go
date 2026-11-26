@@ -143,10 +143,14 @@ type htmlOpenPort struct {
 	Protocol, Ports, Families string
 	Sort                      int
 	Public                    bool
-	Scope, ScopeClass         string
-	ScopeRank                 int
-	Qualifiers, Listeners     string
-	Rules                     []htmlRef
+	// Redirect names the local port that receives the connections, when
+	// nat/PREROUTING sends them there; RedirectRules are the rules that do.
+	Redirect              string
+	RedirectRules         []htmlRef
+	Scope, ScopeClass     string
+	ScopeRank             int
+	Qualifiers, Listeners string
+	Rules                 []htmlRef
 }
 
 type htmlForward struct {
@@ -453,7 +457,7 @@ func (b *htmlBuilder) reachable(page *htmlPage) {
 	for _, open := range rep.OpenPorts {
 		entry := htmlOpenPort{
 			Protocol:   open.Protocol,
-			Ports:      portRange(open.First, open.Last),
+			Ports:      openPortName(open),
 			Sort:       open.First,
 			Public:     open.Public,
 			Families:   familyNames(open.Families),
@@ -464,6 +468,12 @@ func (b *htmlBuilder) reachable(page *htmlPage) {
 		}
 		if open.Default {
 			entry.Ports, entry.Sort = "all that no rule names", 65536
+		}
+		if open.Redirect != nil {
+			entry.Redirect = redirectName(open.Redirect)
+			for _, rule := range open.Redirect.Rules {
+				entry.RedirectRules = append(entry.RedirectRules, b.ref(rule))
+			}
 		}
 		var qualifiers []string
 		for _, text := range []string{open.Condition, open.Restriction} {
@@ -496,7 +506,7 @@ func (b *htmlBuilder) reachable(page *htmlPage) {
 		entry := htmlForward{
 			Family:     "IPv" + strconv.Itoa(forward.Family),
 			From:       host + portRange(forward.HostPort, forward.HostPortEnd) + "/" + forward.Protocol,
-			To:         bracket(forward.DestAddr) + ":" + portRange(forward.DestPort, forward.DestPortEnd),
+			To:         forwardDestination(forward),
 			Bridge:     forward.Bridge,
 			Sort:       forward.HostPort,
 			Scope:      scopeWords(forward.ForwardScope),

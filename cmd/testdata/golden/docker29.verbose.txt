@@ -54,9 +54,9 @@ IPv6: 15 rules in 24 chains (docker) · INPUT ACCEPT · FORWARD DROP · OUTPUT A
   MEDIUM   F4   6 Docker published ports are open to any source                                  -16
                 Docker translates these ports to containers, and filter/FORWARD accepts them from
                 any source; the rules of filter/INPUT do not apply: IPv4 8080/tcp to 172.17.0.2:80;
-                IPv4 8082/tcp to 172.17.0.4:80; IPv4 9053/udp to 172.17.0.5:53; IPv4 9000-9002/tcp
-                to 172.17.0.6:9000-9002; IPv4 8091/tcp to 172.29.0.2:80; IPv4 8443/tcp to
-                172.30.0.2:443; IPv6 8443/tcp to [fd00:dead:beef::2]:443.
+                IPv4 8082/tcp of 192.168.88.217 to 172.17.0.4:80; IPv4 9053/udp to 172.17.0.5:53;
+                IPv4 9000-9002/tcp to 172.17.0.6:9000-9002; IPv4 8091/tcp to 172.29.0.2:80; IPv4
+                8443/tcp to 172.30.0.2:443; IPv6 8443/tcp to [fd00:dead:beef::2]:443.
                 IPv4 nat/DOCKER #1:  ! -i docker0 -p tcp -m tcp --dport 8080 -j DNAT --to-destination 172.17.0.2:80
                   reached by PREROUTING #1
                 IPv4 nat/DOCKER #3:  -d 192.168.88.217/32 ! -i docker0 -p tcp -m tcp --dport 8082 -j DNAT --to-destination 172.17.0.4:80
@@ -77,7 +77,12 @@ IPv6: 15 rules in 24 chains (docker) · INPUT ACCEPT · FORWARD DROP · OUTPUT A
                      Docker never flushes. Packets are already translated there: match the published
                      port with --ctorigdstport, not --dport. A service that only local clients need
                      can be published on loopback instead (docker run -p
-                     127.0.0.1:8080:<container-port>).
+                     127.0.0.1:8080:<container-port>). The commands below are for port 8080/tcp. For
+                     each of the other ports (8082/tcp of 192.168.88.217, 9053/udp, 9000-9002/tcp,
+                     8091/tcp, 8443/tcp), run them again with its protocol and its port; write a
+                     range of ports as FIRST:LAST. For a port of one address, add --ctorigdst
+                     ADDRESS; for a port of all addresses, leave that match out. For IPv6, use
+                     ip6tables.
                      Allow the trusted sources of port 8080 first:
                        iptables -I DOCKER-USER 1 -p tcp -m conntrack --ctorigdstport 8080 --ctdir ORIGINAL -s <trusted-cidr> -j RETURN
                      Then drop the rest of that port:
@@ -101,13 +106,16 @@ IPv6: 15 rules in 24 chains (docker) · INPUT ACCEPT · FORWARD DROP · OUTPUT A
          ports that no rule names
     udp  68 dhclient (IPv4 only) · all ports that no rule names
 
+  Open to restricted sources
+    tcp  8443 (private networks, IPv6 only)
+
   Translated to other hosts
     IPv4 8080/tcp → 172.17.0.2:80 (docker0): any source
     IPv4 192.168.88.217:8082/tcp → 172.17.0.4:80 (docker0): any source
-    IPv4 9053/udp → 172.17.0.5:53 (docker0): any source
-    IPv4 9000-9002/tcp → 172.17.0.6:9000-9002 (docker0): any source
-    IPv4 8443/tcp → 172.30.0.2:443 (br-7a3442937ee6): any source
     IPv4 8091/tcp → 172.29.0.2:80 (br-982052ef0162): any source
+    IPv4 8443/tcp → 172.30.0.2:443 (br-7a3442937ee6): any source
+    IPv4 9000-9002/tcp → 172.17.0.6:9000-9002 (docker0): any source
+    IPv4 9053/udp → 172.17.0.5:53 (docker0): any source
     IPv6 8443/tcp → [fd00:dead:beef::2]:443 (br-7a3442937ee6): any source
     These ports are translated in nat/PREROUTING and pass filter/FORWARD, not filter/INPUT.
 

@@ -17,11 +17,11 @@ import (
 // CheckEffectiveness reports conditions of one ruleset that defeat the
 // firewall or break the host.
 func CheckEffectiveness(rs *models.Ruleset) []models.EffectivenessFinding {
-	findings, _, _ := checkEffectiveness(rs, nil, nil)
+	findings, _, _ := checkEffectiveness(rs, nil)
 	return findings
 }
 
-func checkEffectiveness(rs *models.Ruleset, host *models.HostContext, published []models.PublishedPort) ([]models.EffectivenessFinding, []models.OpenPort, []models.AssessmentDiagnostic) {
+func checkEffectiveness(rs *models.Ruleset, host *models.HostContext) ([]models.EffectivenessFinding, []models.OpenPort, []models.AssessmentDiagnostic) {
 	if rs == nil {
 		return nil, nil, nil
 	}
@@ -43,7 +43,7 @@ func checkEffectiveness(rs *models.Ruleset, host *models.HostContext, published 
 		})
 	} else {
 		var defaults map[models.Protocol]serviceExposure
-		open, defaults = surveyInput(evaluator, published)
+		open, defaults = surveyInput(evaluator)
 		accepting := defaultAcceptFindings(rs, defaults)
 		findings = append(findings, accepting...)
 		findings = append(findings, broadAcceptFindings(open, defaults)...)
@@ -121,130 +121,153 @@ func inputBlocked(rs *models.Ruleset) bool {
 	return true
 }
 
-// portClass is a range of destination ports that every rule on the way to a
-// local socket treats alike.
-type portClass struct {
-	first, last int
-	named       bool // some rule names these ports
+// opening is the exposure of the ports of a class on one way: straight to
+// INPUT, or through a rule of nat/PREROUTING that sends them to a port of
+// this host.
+type opening struct {
+	exposure serviceExposure
+	rule     *models.Rule // the rule of nat/PREROUTING; nil for the straight way
+	target   translation
 }
 
-// inputPortClasses divides the ports 1-65535 of one protocol at every
-// boundary of a port predicate that can apply to it. Ports of published
-// mappings are classes of their own.
-func inputPortClasses(rs *models.Ruleset, protocol models.Protocol, extra map[int]bool) []portClass {
-	starts := map[int]bool{1: true}
-	var named [][2]int
-	add := func(spec string) {
-		if spec == "" {
-			return
-		}
-		for _, r := range cachedPortRanges(spec) {
-			lo, hi := max(r[0], 1), min(r[1], 65535)
-			if lo > hi {
-				continue
+// openings evaluates a new connection to the ports of a class for every
+// ingress interface and returns the ways on which this host accepts it.
+// address is a local address that a rule of nat/PREROUTING names, or the
+// wildcard address.
+func (e *inputEvaluator) openings(protocol models.Protocol, class portClass, address string) []opening {
+	base := e.newConnection(protocol, class.first, address)
+	results := map[*models.Rule]map[string]pathResult{}
+	targets := map[*models.Rule]translation{}
+	var order []*models.Rule
+	for _, candidate := range e.candidates {
+		query := base
+		query.InIface = candidate.name
+		for _, way := range e.ways(query, class) {
+			if !way.local {
+				continue // FORWARD decides: a translated port, not an open one
 			}
-			starts[lo] = true
-			if hi < 65535 {
-				starts[hi+1] = true
+			if results[way.rule] == nil {
+				results[way.rule] = map[string]pathResult{}
+				targets[way.rule] = way.translation
+				if way.rule == nil {
+					order = append([]*models.Rule{nil}, order...)
+				} else {
+					order = append(order, way.rule)
+				}
 			}
-			named = append(named, [2]int{lo, hi})
-		}
-	}
-	for _, chain := range inputChains(rs) {
-		for i := range chain.Rules {
-			rule := &chain.Rules[i]
-			// A rule for another protocol does not name ports of this one.
-			if other := normalizeProtocol(rule.Protocol); other != "" && other != models.ProtoAll &&
-				(other == protocol) == rule.Negations["protocol"] {
-				continue
-			}
-			add(rule.DstPort)
-			for _, ext := range rule.Matches {
-				add(ext.Params["--ctorigdstport"])
-				add(ext.Params["--ports"])
-			}
+			results[way.rule][candidate.name] = e.deliver(way)
 		}
 	}
-	for port := range extra {
-		if port >= 1 && port <= 65535 {
-			starts[port] = true
-			if port < 65535 {
-				starts[port+1] = true
-			}
+	var found []opening
+	for _, rule := range order {
+		exposure := e.widest(e.candidates, e.candidates, func(candidate ingressCandidate) pathResult {
+			return results[rule][candidate.name]
+		})
+		if exposure.scope != "" {
+			found = append(found, opening{exposure: exposure, rule: rule, target: targets[rule]})
 		}
 	}
-	sorted := make([]int, 0, len(starts))
-	for start := range starts {
-		sorted = append(sorted, start)
+	return found
+}
+
+// sameExposure reports whether two exposures say the same.
+func sameExposure(a, b serviceExposure) bool {
+	return a.scope == b.scope && a.allowRule == b.allowRule && a.certainty == b.certainty && a.condition == b.condition &&
+		a.restriction == b.restriction && strings.Join(a.interfaces, ",") == strings.Join(b.interfaces, ",")
+}
+
+// openPort describes one opening of a class of ports. byDefault is what
+// happens to the ports that no rule names, nil when they are not open.
+func (e *inputEvaluator) openPort(protocol models.Protocol, class portClass, address string, found opening, byDefault *serviceExposure) models.OpenPort {
+	exposure := found.exposure
+	port := models.OpenPort{
+		IPVersion: e.rs.IPVersion, Protocol: protocol, First: class.first, Last: class.last,
+		Scope: exposure.scope, Certainty: exposure.certainty, Condition: exposure.condition,
+		Restriction: exposure.restriction, Interfaces: exposure.interfaces, Rule: exposure.allowRule,
+		Unnamed: !class.named,
 	}
-	sort.Ints(sorted)
-	classes := make([]portClass, len(sorted))
-	for i, start := range sorted {
-		classes[i] = portClass{first: start, last: 65535}
-		if i+1 < len(sorted) {
-			classes[i].last = sorted[i+1] - 1
-		}
-		for _, r := range named {
-			if r[0] <= start && start <= r[1] {
-				classes[i].named = true
-				break
-			}
+	// A port that only a rule of the nat table names, and that arrives at
+	// INPUT like the ports that no rule names, is one of them.
+	if !class.inputNamed && found.rule == nil && byDefault != nil && sameExposure(exposure, *byDefault) {
+		port.Unnamed = true
+	}
+	if !wildcardAddress(address) {
+		port.Address = address
+	}
+	if found.rule != nil {
+		port.NATRule, port.LocalAddr = found.rule, found.target.addr
+		port.LocalPort, port.LocalPortEnd = found.target.port, found.target.portEnd
+		if found.target.keepsPort {
+			port.LocalPort, port.LocalPortEnd = class.first, class.last
 		}
 	}
-	return classes
+	return port
 }
 
 // surveyInput evaluates a new connection to every class of ports and returns
-// the ports that the firewall accepts, and what it does with ports that no
-// rule names. No port predicate tells two unnamed ports apart, so one probe
-// stands for all of them.
-func surveyInput(e *inputEvaluator, published []models.PublishedPort) ([]models.OpenPort, map[models.Protocol]serviceExposure) {
+// the ports for which this host accepts it, and what it does with ports that
+// no rule names. No port predicate tells two unnamed ports apart, so one
+// probe stands for all of them. A port that nat/PREROUTING sends to another
+// host is not listed: the analysis of translated ports covers it.
+func surveyInput(e *inputEvaluator) ([]models.OpenPort, map[models.Protocol]serviceExposure) {
 	wildcard := "0.0.0.0"
 	if e.rs.IPVersion == models.IPv6 {
 		wildcard = "::"
 	}
-	// A port that nat/PREROUTING translates for every local address never
-	// reaches INPUT; the published-port analysis covers it.
-	translated := map[models.Protocol]map[int]bool{models.ProtoTCP: {}, models.ProtoUDP: {}}
-	for _, mapping := range published {
-		if mapping.IPVersion == e.rs.IPVersion && mapping.HostAddr == "" && translated[mapping.Protocol] != nil {
-			translated[mapping.Protocol][mapping.HostPort] = true
-		}
-	}
-
 	defaults := map[models.Protocol]serviceExposure{}
 	var open []models.OpenPort
 	for _, protocol := range []models.Protocol{models.ProtoTCP, models.ProtoUDP} {
-		var unnamed *serviceExposure
-		for _, class := range inputPortClasses(e.rs, protocol, translated[protocol]) {
-			if translated[protocol][class.first] {
-				continue
+		// Adjacent classes that are open in the same way are one entry. last
+		// holds the entry of each way that the next class can continue.
+		last := map[*models.Rule]int{}
+		add := func(port models.OpenPort) {
+			if at, known := last[port.NATRule]; known && sameOpening(open[at], port) {
+				open[at].Last, open[at].LocalPortEnd = port.Last, port.LocalPortEnd
+				return
 			}
-			var exposure serviceExposure
-			switch {
-			case class.named:
-				exposure = e.classifyQuery(e.newConnection(protocol, class.first, wildcard), e.candidates, e.candidates)
-			case unnamed != nil:
-				exposure = *unnamed
-			default:
-				exposure = e.classifyQuery(e.newConnection(protocol, class.first, wildcard), e.candidates, e.candidates)
-				unnamed = &exposure
-				defaults[protocol] = exposure
-			}
-			if exposure.scope == "" {
-				continue
-			}
-			port := models.OpenPort{
-				IPVersion: e.rs.IPVersion, Protocol: protocol, First: class.first, Last: class.last,
-				Scope: exposure.scope, Certainty: exposure.certainty, Condition: exposure.condition,
-				Restriction: exposure.restriction, Interfaces: exposure.interfaces, Rule: exposure.allowRule,
-				Unnamed: !class.named,
-			}
-			if n := len(open); n > 0 && sameOpening(open[n-1], port) {
-				open[n-1].Last = port.Last
-				continue
-			}
+			last[port.NATRule] = len(open)
 			open = append(open, port)
+		}
+		// One probe stands for every port that no rule names.
+		var unnamed []opening
+		var byDefault *serviceExposure
+		for _, class := range e.classes(protocol) {
+			if class.named {
+				continue
+			}
+			unnamed = e.openings(protocol, class, wildcard)
+			for i := range unnamed {
+				if unnamed[i].rule == nil {
+					defaults[protocol] = unnamed[i].exposure
+					byDefault = &unnamed[i].exposure
+				}
+			}
+			break
+		}
+		for _, class := range e.classes(protocol) {
+			found := unnamed
+			if class.named {
+				found = e.openings(protocol, class, wildcard)
+			}
+			for _, way := range found {
+				add(e.openPort(protocol, class, wildcard, way, byDefault))
+			}
+		}
+		// A translation that holds for one local address only.
+		for i := range e.named {
+			dest := &e.named[i]
+			address := dest.addr.String()
+			last = map[*models.Rule]int{}
+			for _, class := range e.classes(protocol) {
+				if !dest.names(class) {
+					continue
+				}
+				for _, way := range e.openings(protocol, class, address) {
+					if way.rule != nil {
+						add(e.openPort(protocol, class, address, way, nil))
+					}
+				}
+			}
 		}
 	}
 	return open, defaults
@@ -253,9 +276,18 @@ func surveyInput(e *inputEvaluator, published []models.PublishedPort) ([]models.
 // sameOpening reports whether two port ranges are adjacent and open in the
 // same way, so that they are one entry.
 func sameOpening(a, b models.OpenPort) bool {
-	return a.Protocol == b.Protocol && a.Last+1 == b.First && a.Scope == b.Scope && a.Certainty == b.Certainty &&
-		a.Condition == b.Condition && a.Restriction == b.Restriction && a.Rule == b.Rule && a.Unnamed == b.Unnamed &&
-		strings.Join(a.Interfaces, ",") == strings.Join(b.Interfaces, ",")
+	if a.Protocol != b.Protocol || a.Last+1 != b.First || a.Scope != b.Scope || a.Certainty != b.Certainty ||
+		a.Condition != b.Condition || a.Restriction != b.Restriction || a.Rule != b.Rule || a.Unnamed != b.Unnamed ||
+		a.Address != b.Address || a.NATRule != b.NATRule || a.LocalAddr != b.LocalAddr ||
+		strings.Join(a.Interfaces, ",") != strings.Join(b.Interfaces, ",") {
+		return false
+	}
+	if a.NATRule == nil {
+		return true
+	}
+	// The new ports continue (the rule keeps the port), or all of the ports
+	// go to one port.
+	return b.LocalPort == a.LocalPortEnd+1 || (a.LocalPort == a.LocalPortEnd && b.LocalPort == a.LocalPort && b.LocalPortEnd == a.LocalPort)
 }
 
 // defaultAcceptFindings reports that INPUT accepts new connections to ports
@@ -402,7 +434,8 @@ func checkReturnTraffic(e *inputEvaluator) []models.EffectivenessFinding {
 	for _, candidate := range e.candidates {
 		probe := query
 		probe.InIface = candidate.name
-		path := evaluatePath(e.rs, inputPath(probe), rootSet(e.rs.IPVersion))
+		sources, _ := e.arriving(candidate.name)
+		path := evaluatePath(e.rs, inputPath(probe), sources)
 		if len(path.Accepted) > 0 || path.Uncertain {
 			return nil
 		}
@@ -460,7 +493,8 @@ func checkForwardDefault(e *inputEvaluator) []models.EffectivenessFinding {
 			Protocol: models.ProtoTCP, DstPort: port, DstType: "UNICAST", InIface: candidate.name,
 			State: "NEW", NATState: noNAT, OriginalDstPort: port, Direction: "ORIGINAL", External: true, Ctx: e.ctx,
 		}
-		pre := evaluatePath(rs, preroutingPath(query), rootSet(rs.IPVersion))
+		sources, _ := e.arriving(candidate.name)
+		pre := evaluatePath(rs, preroutingPath(query), sources)
 		class := evaluatePath(rs, forwardPath(query), pre.acceptedSet()).classify()
 		if class.scope != models.ScopeExposed || class.certainty != models.CertaintyDefinite {
 			continue
@@ -495,7 +529,20 @@ func checkForwardDefault(e *inputEvaluator) []models.EffectivenessFinding {
 	if labels := candidateLabels(selected, e.candidates); len(labels) > 0 {
 		finding.Detail += " This holds for packets that arrive on " + strings.Join(labels, ", ") + "."
 	}
-	if forwardsPackets(rs) {
+	if on, known := e.host.Forwarding(rs.IPVersion); known {
+		// The kernel setting says whether the chain is in use at all.
+		setting := forwardingSetting(rs.IPVersion)
+		if !on {
+			finding.Severity, finding.Certainty = models.SeverityInfo, models.CertaintyDefinite
+			finding.Title = "FORWARD would accept traffic that no rule names"
+			finding.Detail += " This host does not route packets now (" + setting + " is 0), so the chain has no effect. " +
+				"It takes effect at once when routing is turned on, as Docker and libvirt do."
+			return []models.EffectivenessFinding{finding}
+		}
+		finding.Severity = models.SeverityHigh
+		finding.Detail += " This host routes packets (" + setting + " is 1), so other hosts can send traffic through it to " +
+			"every network that it reaches, including container and virtual networks."
+	} else if forwardsPackets(rs) {
 		finding.Severity = models.SeverityHigh
 		finding.Detail += " The rules show that this host routes packets (address translation or Docker), so other hosts can " +
 			"send traffic through it to every network it reaches, including container and virtual networks."
@@ -727,14 +774,16 @@ func checkFamilyParity(result *models.AnalysisResult) []models.EffectivenessFind
 			return nil // one family accepts or refuses everything; that finding says more
 		}
 	}
-	// scope4 returns the IPv4 scope of one port.
+	// scope4 returns the widest IPv4 scope of one port.
 	scope4 := func(protocol models.Protocol, port int) models.AccessScope {
+		var widest models.AccessScope
 		for _, open := range result.OpenPorts {
-			if open.IPVersion == models.IPv4 && open.Protocol == protocol && open.First <= port && port <= open.Last {
-				return open.Scope
+			if open.IPVersion == models.IPv4 && open.Protocol == protocol && open.First <= port && port <= open.Last &&
+				scopeRank(open.Scope) > scopeRank(widest) {
+				widest = open.Scope
 			}
 		}
-		return ""
+		return widest
 	}
 	// IPv4 changes only at the boundaries of its own entries.
 	cutsWithin := func(protocol models.Protocol, first, last int) []int {

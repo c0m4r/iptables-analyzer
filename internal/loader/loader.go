@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/c0m4r/iptables-analyzer/internal/hostinfo"
 	"github.com/c0m4r/iptables-analyzer/internal/models"
 	"github.com/c0m4r/iptables-analyzer/internal/parser"
 	"github.com/c0m4r/iptables-analyzer/internal/safeio"
@@ -143,12 +144,12 @@ func Host() (*models.HostContext, error) {
 	}
 	host := &models.HostContext{}
 	if name, err := os.Hostname(); err == nil {
-		host.Hostname = textsafe.Escape(name)
+		host.Hostname = textsafe.Name(name)
 	}
 	for _, iface := range interfaces {
 		// Interface names may contain any byte but '/', ':' and whitespace;
 		// escape them like names read from rules files.
-		entry := models.HostInterface{Name: textsafe.Escape(iface.Name), Up: iface.Flags&net.FlagUp != 0}
+		entry := models.HostInterface{Name: textsafe.Name(iface.Name), Up: iface.Flags&net.FlagUp != 0}
 		addrs, err := iface.Addrs()
 		if err != nil {
 			return nil, fmt.Errorf("listing addresses of %s: %w", entry.Name, err)
@@ -159,4 +160,77 @@ func Host() (*models.HostContext, error) {
 		host.Interfaces = append(host.Interfaces, entry)
 	}
 	return host, nil
+}
+
+// Facts is what live analysis reads about the host besides its rules and
+// its interfaces. The output of the tools is kept as text: it is parsed
+// later, in the sandbox.
+type Facts struct {
+	// Sysctls holds the kernel settings that were read, by name.
+	Sysctls map[string]string
+	// NFTChains is the output of "nft list chains", and IPSets that of
+	// "ipset save". The Have fields are false when the tool is not installed
+	// or failed.
+	NFTChains  string
+	HaveNFT    bool
+	IPSets     string
+	HaveIPSets bool
+	// Routes is the output of "ip -4 route show table main".
+	Routes     string
+	HaveRoutes bool
+	// Notes say why a part could not be read.
+	Notes []string
+}
+
+// factSizeLimit bounds the kernel settings, which are single numbers.
+const factSizeLimit = 64
+
+// CollectFacts reads the kernel settings that the analysis uses, the list of
+// nftables chains and the contents of the ipsets. A tool that is not
+// installed is no error: the analysis then states less.
+func CollectFacts(host *models.HostContext) Facts {
+	facts := Facts{Sysctls: map[string]string{}}
+	var interfaces []string
+	if host != nil {
+		for _, iface := range host.Interfaces {
+			interfaces = append(interfaces, iface.Name)
+		}
+	}
+	for name, path := range hostinfo.SysctlPaths(interfaces) {
+		raw, err := safeio.ReadFile(path, factSizeLimit)
+		if err != nil {
+			continue // IPv6 can be off, and an interface can have gone
+		}
+		if value, ok := hostinfo.CleanSysctl(string(raw)); ok {
+			facts.Sysctls[name] = value
+		}
+	}
+	facts.NFTChains, facts.HaveNFT = runFact(&facts,
+		"The nftables tables could not be listed (%s), so this report cannot say whether rules exist outside the tables of iptables.",
+		"nft", "list", "chains")
+	facts.IPSets, facts.HaveIPSets = runFact(&facts,
+		"The contents of the ipsets could not be read (%s); matches against them are judged without them.",
+		"ipset", "save")
+	facts.Routes, facts.HaveRoutes = runFact(&facts,
+		"The routing table could not be read (%s); the reverse-path filter is left out of the analysis.",
+		"ip", "-4", "route", "show", "table", "main")
+	return facts
+}
+
+// runFact runs a tool that tells more about the host, when it is installed.
+// note says what a failure means for the report; %s stands for the error.
+func runFact(facts *Facts, note, name string, args ...string) (string, bool) {
+	if _, err := safeio.LookTrusted(name); err != nil {
+		return "", false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	out, err := safeio.Run(ctx, name, args, safeio.MaxRulesSize)
+	if err != nil {
+		// The first line of what the tool said is enough.
+		reason, _, _ := strings.Cut(textsafe.Escape(err.Error()), "^J")
+		facts.Notes = append(facts.Notes, fmt.Sprintf(note, strings.TrimSpace(reason)))
+		return "", false
+	}
+	return string(out), true
 }

@@ -15,20 +15,23 @@ const SchemaVersion = 2
 
 // Report is the result of one run, ready to render.
 type Report struct {
-	SchemaVersion int       `json:"schema_version"`
-	Tool          Tool      `json:"tool"`
-	Generated     string    `json:"generated"` // RFC 3339
-	Mode          string    `json:"mode"`      // live or file
-	Host          string    `json:"host,omitempty"`
-	Inputs        []string  `json:"inputs,omitempty"`
-	Families      []Family  `json:"families"`
-	Score         Score     `json:"score"`
-	Counts        Counts    `json:"counts"`
-	Findings      []Finding `json:"findings"`
+	SchemaVersion int    `json:"schema_version"`
+	Tool          Tool   `json:"tool"`
+	Generated     string `json:"generated"` // RFC 3339
+	Mode          string `json:"mode"`      // live, file or snapshot
+	Host          string `json:"host,omitempty"`
+	// Captured is the time when the input was read from the host, for a
+	// snapshot.
+	Captured string    `json:"captured,omitempty"`
+	Inputs   []string  `json:"inputs,omitempty"`
+	Families []Family  `json:"families"`
+	Score    Score     `json:"score"`
+	Counts   Counts    `json:"counts"`
+	Findings []Finding `json:"findings"`
 	// OpenPorts are the ports for which INPUT accepts new connections.
 	OpenPorts []OpenPort `json:"open_ports"`
 	// Forwards are the ports that nat/PREROUTING translates to another host:
-	// Docker published ports and port forwards.
+	// Docker published ports, NodePorts of Kubernetes and port forwards.
 	Forwards []Forward `json:"forwarded_ports"`
 	// ServicesKnown is false when no list of listening sockets was read.
 	ServicesKnown bool      `json:"services_known"`
@@ -138,7 +141,7 @@ type RuleRef struct {
 	Num    int    `json:"num"`
 	Spec   string `json:"spec"` // the rule without "-A CHAIN"
 	// Role says what the rule does in the finding: accepts, causes, shadows,
-	// shadowed, translates, bypassed or ineffective.
+	// shadowed, translates, redirects, bypassed or ineffective.
 	Role string `json:"role,omitempty"`
 	// Path lists the jumps from the built-in chain to the rule, as "CHAIN #N",
 	// when the rule is in a user-defined chain.
@@ -162,10 +165,17 @@ type FixStep struct {
 
 // OpenPort is a range of ports for which INPUT accepts new connections.
 type OpenPort struct {
-	Families    []int              `json:"families"`
-	Protocol    string             `json:"protocol"`
-	First       int                `json:"first"`
-	Last        int                `json:"last"`
+	Families []int  `json:"families"`
+	Protocol string `json:"protocol"`
+	// Address is the local address for which the entry holds, when a rule of
+	// nat/PREROUTING names one. Empty: every other local address.
+	Address string `json:"address,omitempty"`
+	First   int    `json:"first"`
+	Last    int    `json:"last"`
+	// Redirect says where nat/PREROUTING sends the ports before INPUT judges
+	// them (REDIRECT, or DNAT to an address of this host). The scope and the
+	// rules of the entry are those of the new port.
+	Redirect    *Redirect          `json:"redirect,omitempty"`
 	Scope       models.AccessScope `json:"scope"`
 	Certainty   models.Certainty   `json:"certainty"`
 	Condition   string             `json:"condition,omitempty"`
@@ -180,16 +190,32 @@ type OpenPort struct {
 	Public bool `json:"public,omitempty"`
 }
 
+// Redirect is a translation of nat/PREROUTING that keeps the packet on this
+// host.
+type Redirect struct {
+	// Address is the new local address; empty for REDIRECT, which uses the
+	// address of the interface where the packet arrived.
+	Address string `json:"address,omitempty"`
+	// First and Last are the local ports that receive the connections.
+	First int `json:"first"`
+	Last  int `json:"last"`
+	// Rules are the translating rules, one for each address family.
+	Rules []RuleRef `json:"rules"`
+}
+
 // Forward is a host port that nat/PREROUTING translates to another address.
 type Forward struct {
-	Family       int                `json:"family"`
-	Protocol     string             `json:"protocol"`
-	HostAddr     string             `json:"host_addr,omitempty"` // empty: every local address
-	HostPort     int                `json:"host_port"`
-	HostPortEnd  int                `json:"host_port_end"`
-	DestAddr     string             `json:"dest_addr"`
-	DestPort     int                `json:"dest_port"`
-	DestPortEnd  int                `json:"dest_port_end"`
+	Family      int    `json:"family"`
+	Protocol    string `json:"protocol"`
+	HostAddr    string `json:"host_addr,omitempty"` // empty: every local address
+	HostPort    int    `json:"host_port"`
+	HostPortEnd int    `json:"host_port_end"`
+	DestAddr    string `json:"dest_addr"`
+	DestPort    int    `json:"dest_port"`
+	DestPortEnd int    `json:"dest_port_end"`
+	// Destinations lists every destination as "address:port" when the rules
+	// share the port among several (load balancing); DestAddr is the first.
+	Destinations []string           `json:"destinations,omitempty"`
 	Bridge       string             `json:"bridge,omitempty"`
 	Docker       bool               `json:"docker"`
 	ForwardScope models.AccessScope `json:"forward_scope,omitempty"` // empty: no source reaches the destination

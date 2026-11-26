@@ -22,11 +22,15 @@ const noNAT = "NONE"
 // packetQuery fixes the packet attributes known to an analysis. Empty interface
 // and destination fields mean that multiple values are possible.
 type packetQuery struct {
-	Protocol        models.Protocol
-	SrcPort         int
-	DstPort         int
-	DstAddr         string
-	DstType         string // addrtype of the destination: LOCAL, UNICAST or "" when unknown
+	Protocol models.Protocol
+	SrcPort  int
+	DstPort  int
+	DstAddr  string
+	DstType  string // addrtype of the destination: LOCAL, UNICAST or "" when unknown
+	// DstOther: the destination is a local address that no rule of
+	// nat/PREROUTING names. It is set for the traversal of the nat table
+	// only; the named addresses are evaluated there one by one.
+	DstOther        bool
 	InIface         string
 	OutIface        string
 	State           string
@@ -37,9 +41,13 @@ type packetQuery struct {
 	External        bool
 	ICMPType        string // numeric ICMP/ICMPv6 type, "" when unknown
 	HopLimit        int    // IPv6 hop limit, 0 when unknown
-	Ctx             *evalContext
-	Chain           string
-	Hook            string
+	// Mark and ConnMark are the marks of the packet and of its connection.
+	// nil means unknown: only the trace of one packet follows the rules that
+	// set them.
+	Mark, ConnMark *uint32
+	Ctx            *evalContext
+	Chain          string
+	Hook           string
 }
 
 // evalContext carries ruleset-wide knowledge that individual predicates need,
@@ -49,8 +57,13 @@ type evalContext struct {
 	containerAddrs map[netip.Addr]bool
 	localAddrs     []netip.Addr
 	localKnown     bool
-	indexes        map[*models.Chain]*chainIndex
-	budget         *walkBudget
+	// natNamed holds the single addresses that rules on the way through
+	// nat/PREROUTING name as a destination.
+	natNamed map[netip.Addr]bool
+	// sets holds the addresses of the ipsets whose contents are known.
+	sets    map[string]addrSet
+	indexes map[*models.Chain]*chainIndex
+	budget  *walkBudget
 }
 
 // maxChainVisits bounds the chain traversals of one evaluation context (one
@@ -295,10 +308,13 @@ type decisionSegment struct {
 }
 
 type chainEvaluation struct {
-	Accepted  []decisionSegment
-	Dropped   []decisionSegment
-	Returned  []flow
-	Uncertain bool
+	Accepted []decisionSegment
+	Dropped  []decisionSegment
+	// Translated holds the traffic that a rule of the nat table gives a new
+	// destination; Rule is that rule.
+	Translated []decisionSegment
+	Returned   []flow
+	Uncertain  bool
 }
 
 func rootSet(version models.IPVersion) addrSet {
@@ -409,9 +425,9 @@ func (r pathResult) classify() exposureClass {
 			continue
 		}
 		result.certainty, result.condition, result.restriction = models.CertaintyDefinite, tier.condition, tierRestriction
-		if tierRule != nil || rule == nil {
-			result.rule = tierRule
-		}
+		// The rule that explains the certain acceptance, or none when a
+		// policy accepts: a rule that only may match does not explain it.
+		result.rule = tierRule
 		break
 	}
 	return result
@@ -421,11 +437,17 @@ func (r pathResult) classify() exposureClass {
 // chains pass traffic unchanged, which matches the kernel when a table is not
 // loaded. Accepted segments keep the most specific accepting rule seen.
 func evaluatePath(rs *models.Ruleset, stages []pathStage, sources addrSet) pathResult {
-	remaining := sources
-	var accepted []decisionSegment
-	if !remaining.empty() {
-		accepted = []decisionSegment{{Set: remaining}}
+	if sources.empty() {
+		return pathResult{}
 	}
+	return evaluatePathFrom(rs, stages, []decisionSegment{{Set: sources}})
+}
+
+// evaluatePathFrom is evaluatePath for traffic that earlier hooks have
+// already judged: entry holds its sources with what those hooks established.
+func evaluatePathFrom(rs *models.Ruleset, stages []pathStage, entry []decisionSegment) pathResult {
+	accepted := entry
+	remaining := segmentsUnion(accepted, nil)
 	var result pathResult
 	for _, stage := range stages {
 		if remaining.empty() {
@@ -583,7 +605,7 @@ func evaluateChain(table *models.Table, chainName string, input flow, query pack
 		}
 		rule := &chain.Rules[i]
 		_, isChain := table.Chains[rule.Target]
-		verdict := isChain
+		verdict := isChain || translates(table, rule)
 		switch rule.Target {
 		case "ACCEPT", "DROP", "REJECT", "RETURN", "QUEUE", "NFQUEUE":
 			verdict = true
@@ -644,6 +666,8 @@ func evaluateChain(table *models.Table, chainName string, input flow, query pack
 			}
 
 			switch {
+			case !isChain && translates(table, rule):
+				result.Translated = append(result.Translated, flowSegments(branch, rule)...)
 			case rule.Target == "ACCEPT":
 				result.Accepted = append(result.Accepted, flowSegments(branch, rule)...)
 			case rule.Target == "DROP" || rule.Target == "REJECT":
@@ -670,9 +694,10 @@ func evaluateChain(table *models.Table, chainName string, input flow, query pack
 				child := evaluateChain(table, rule.Target, branch, childQuery, walk)
 				result.Accepted = append(result.Accepted, child.Accepted...)
 				result.Dropped = append(result.Dropped, child.Dropped...)
+				result.Translated = append(result.Translated, child.Translated...)
 				result.Uncertain = result.Uncertain || child.Uncertain
 				if match.certainty == matchMaybe && match.kind == kindConditional && sourceKnown &&
-					len(child.Accepted) == 0 && len(child.Returned) == 0 {
+					len(child.Accepted) == 0 && len(child.Returned) == 0 && len(child.Translated) == 0 {
 					// The chain drops all of the excess, as "ufw limit" does.
 					rest.condition = joinLabels(f.condition, match.label, ", ")
 				}
@@ -694,6 +719,19 @@ func evaluateChain(table *models.Table, chainName string, input flow, query pack
 		policy(f)
 	}
 	return result
+}
+
+// translates reports whether a rule gives the packets that it matches a new
+// destination. Such a rule ends the traversal of the nat table for them.
+func translates(table *models.Table, rule *models.Rule) bool {
+	if table.Name != "nat" {
+		return false
+	}
+	switch rule.Target {
+	case "DNAT", "REDIRECT", "NETMAP":
+		return true
+	}
+	return false
 }
 
 // reduceFlows removes traffic that says nothing new: sources of a possible,
@@ -909,7 +947,7 @@ func addressMatch(ruleAddr, queryAddr string, negated bool, query packetQuery) m
 	}
 	if queryAddr == "" || queryAddr == "0.0.0.0" || queryAddr == "::" || queryAddr == "*" {
 		if query.DstType == "LOCAL" {
-			return applyNegation(localAddressMatch(prefix, query.Ctx), negated)
+			return applyNegation(localAddressMatch(prefix, query.Ctx, query.DstOther), negated)
 		}
 		return matchMaybe
 	}
@@ -921,8 +959,9 @@ func addressMatch(ruleAddr, queryAddr string, negated bool, query packetQuery) m
 }
 
 // localAddressMatch decides whether some local address falls in prefix when
-// the exact local destination is unknown.
-func localAddressMatch(prefix netip.Prefix, ctx *evalContext) matchCertainty {
+// the exact local destination is unknown. With other, the destination is
+// none of the addresses that rules of nat/PREROUTING name.
+func localAddressMatch(prefix netip.Prefix, ctx *evalContext, other bool) matchCertainty {
 	if first := prefix.Addr(); first.IsMulticast() || (first.Is4() && first.As4() == [4]byte{255, 255, 255, 255}) {
 		// A connection to a service is addressed to one host. Multicast and
 		// broadcast destinations (mDNS, SSDP, DHCP) are not local addresses.
@@ -933,10 +972,15 @@ func localAddressMatch(prefix netip.Prefix, ctx *evalContext) matchCertainty {
 	if ctx == nil {
 		return matchMaybe
 	}
+	other = other && len(ctx.natNamed) > 0
+	if other && prefix.IsSingleIP() && ctx.natNamed[prefix.Addr()] {
+		return matchNo
+	}
 	if ctx.localKnown {
 		inside, outside := 0, 0
 		for _, addr := range ctx.localAddrs {
-			if addr.Is4() != prefix.Addr().Is4() {
+			// A packet of another host is not for a loopback address.
+			if addr.Is4() != prefix.Addr().Is4() || addr.IsLoopback() || (other && ctx.natNamed[addr]) {
 				continue
 			}
 			if prefix.Contains(addr) {
@@ -1326,6 +1370,21 @@ func extensionMatch(ext *models.MatchExt, query packetQuery, state *matchState) 
 			}
 		}
 
+	case "mark", "connmark":
+		known := query.Mark
+		if ext.Module == "connmark" {
+			known = query.ConnMark
+		}
+		value, mask, ok := parseMark(ext.Params["--mark"])
+		if known == nil || !ok || len(ext.Params) != 1 {
+			state.unknown = true
+			return true
+		}
+		modeled.add("--mark")
+		if (*known&mask == value) == ext.Negations["--mark"] {
+			return false
+		}
+
 	// Predicates that every source can meet: the rule decides for any source,
 	// but not for every packet.
 	case "limit", "hashlimit":
@@ -1370,6 +1429,10 @@ func extensionMatch(ext *models.MatchExt, query packetQuery, state *matchState) 
 
 	// Predicates that hold for an unknown subset of the sources.
 	case "set":
+		if _, known := knownSourceSet(ext, query.Ctx); known {
+			// Evaluated together with -s by splitBySource.
+			return true
+		}
 		value := strings.Fields(ext.Params["--match-set"])
 		if len(ext.Params) != 1 || len(value) != 2 || !strings.HasPrefix(value[1], "src") {
 			// A set of destinations or ports, or options that change the result.
@@ -1424,6 +1487,25 @@ func extensionMatch(ext *models.MatchExt, query packetQuery, state *matchState) 
 	return true
 }
 
+// parseMark reads "value" or "value/mask" as the mark matches and targets
+// print it.
+func parseMark(text string) (value, mask uint32, ok bool) {
+	valueText, maskText, masked := strings.Cut(text, "/")
+	parsed, err := strconv.ParseUint(valueText, 0, 32)
+	if err != nil {
+		return 0, 0, false
+	}
+	mask = 0xffffffff
+	if masked {
+		parsedMask, err := strconv.ParseUint(maskText, 0, 32)
+		if err != nil {
+			return 0, 0, false
+		}
+		mask = uint32(parsedMask)
+	}
+	return uint32(parsed), mask, true
+}
+
 // modeledParams is a small allocation-free set of the options of one match
 // extension that the evaluator understands.
 type modeledParams struct {
@@ -1475,8 +1557,9 @@ func portInSpec(spec string, port int) bool {
 
 // splitBySource divides sources into those the source predicates of a rule
 // match and the rest. The predicates are -s, the conntrack original source
-// (which equals -s for externally received packets) and iprange --src-range.
-// known is false when a predicate cannot be read.
+// (which equals -s for externally received packets), iprange --src-range and
+// an ipset whose contents are known. known is false when a predicate cannot
+// be read.
 func splitBySource(input addrSet, rule *models.Rule, query packetQuery) (matched, unmatched addrSet, known bool) {
 	matched, unmatched, known = splitByPrefix(input, rule.SrcAddr, rule.Negations["src"])
 	if !known {
@@ -1505,6 +1588,15 @@ func splitBySource(input addrSet, rule *models.Rule, query packetQuery) (matched
 			}
 			inside, outside = matched.splitRange(lo, hi)
 			if ext.Negations["--src-range"] {
+				inside, outside = outside, inside
+			}
+		case "set":
+			members, known := knownSourceSet(ext, query.Ctx)
+			if !known {
+				continue
+			}
+			inside, outside = matched.intersect(members), matched.subtract(members)
+			if ext.Negations["--match-set"] {
 				inside, outside = outside, inside
 			}
 		default:

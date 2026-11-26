@@ -50,6 +50,8 @@ The tool reads iptables and ip6tables rules and finds these problems:
 - Listening services that the firewall does not protect.
 - Ports that are open on IPv6 and restricted on IPv4.
 - Rules that never match, because an earlier rule matches the same packets.
+- Ports that the nat table sends to a different port or to a different host: `REDIRECT`,
+  port forwards, Docker published ports and the node ports of Kubernetes.
 - Docker published ports that bypass the INPUT rules.
 - DOCKER-USER and FORWARD rules that have no effect on Docker traffic.
 - Containers that other hosts can reach by direct routing.
@@ -57,8 +59,19 @@ The tool reads iptables and ip6tables rules and finds these problems:
 
 The report starts with a security score from 0 to 100 and a grade from A to F.
 Each finding names the rules that cause it and says how to fix it, with commands.
+When ufw, firewalld, csf or shorewall writes the rules, the fix uses that program.
 The tool writes the report for the terminal, as an interactive HTML page, or as JSON.
-It can also write a recommended baseline firewall for IPv4 and IPv6.
+
+The tool can also:
+
+- show the way of one packet through the rules, with its verdict (`--trace`),
+- show what a change of the rules opens and closes (`--diff`),
+- save all that it reads from a host in one file, to examine it on a different host (`--snapshot`),
+- write a recommended baseline firewall for IPv4 and IPv6 (`--baseline`).
+
+On a live host, the tool also reads the facts that decide what the rules do: the
+interfaces and routes, the kernel settings for routing and the reverse-path filter,
+the contents of the ipsets, and the list of nftables tables.
 
 The tool does not change the firewall.
 
@@ -67,6 +80,7 @@ The tool does not change the firewall.
 - Linux.
 - Root access to examine the live rules. Without root access, use saved rule files.
 - For live analysis: `iptables-save`, `ip6tables-save` and `ss` (iproute2).
+  Optional: `ip`, `ipset` and `nft`. The tool uses them when they are installed.
 - To build from source: Go 1.26 or later.
 
 ## Install
@@ -138,6 +152,20 @@ of one address family:
 - Without the `ss` output, the tool judges each open port as if a service uses it.
 - An empty rules file means that no rules are loaded: all traffic is accepted.
 
+The output of `iptables -S` is accepted too.
+
+### Examine a host from a different host
+
+A snapshot is one file with all that a live analysis reads: the rules, the listening
+sockets, the interfaces, the routes, the kernel settings and the ipsets.
+
+```bash
+sudo iptables-analyzer --snapshot host.json      # on the host
+iptables-analyzer host.json --html report.html   # on any host, without root
+```
+
+The result is the same as on the host itself.
+
 ### Get an interactive report
 
 ```bash
@@ -148,6 +176,44 @@ The file is one HTML page that loads nothing from the network.
 You can filter the findings, go from a finding to its rules, and copy the commands of a fix.
 The page also holds the rules and the recommended baseline.
 
+### Follow one packet
+
+```text
+$ iptables-analyzer host.json --trace 'tcp 203.0.113.5 -> :8443 in eth0'
+
+  Packet tcp 203.0.113.5 → this host, port 8443 · in eth0 · new connection · IPv4
+
+  nat/PREROUTING
+    #1  -i eth0 -p tcp -m tcp --dport 8443 -j DNAT --to-destination 192.168.1.50:443  → DNAT
+    → new destination: 192.168.1.50, port 443
+
+  filter/FORWARD
+    #4  -d 192.168.1.50/32 -i eth0 -o eth1 -p tcp -m tcp --dport 443 -j ACCEPT  → ACCEPT
+    → ACCEPT
+
+  Verdict  ACCEPT by filter/FORWARD #4
+           This host sends the packet on to 192.168.1.50, port 443, its new destination.
+```
+
+The tests of the tool compare these verdicts with the Linux kernel: they load rulesets
+in a network namespace and send real packets.
+
+### Compare two rule sets
+
+```text
+$ iptables-analyzer --diff rules-before.v4 rules-after.v4
+
+  Grade A 93/100  →  Grade F 70/100    -23 points
+  3 new findings, 2 findings gone, 5 port ranges changed.
+
+  New findings
+    HIGH     INPUT accepts new connections to any port                          -15
+  ...
+  Ports of this host
+    IPv4 tcp 1-21          closed → any source
+  ...
+```
+
 ### Use the result in a script
 
 ```bash
@@ -156,18 +222,29 @@ iptables-analyzer rules.v4 rules.v6 --quiet --fail-on high
 
 # Exit status 2 when the grade is worse than B
 sudo iptables-analyzer --quiet --min-grade B
+
+# Exit status 2 when a change of the rules adds a finding of medium or higher severity
+iptables-analyzer --diff deployed.v4 proposed.v4 --quiet --fail-on medium
+
+# Exit status 2 unless the rules drop this packet
+iptables-analyzer proposed.v4 --trace 'tcp 203.0.113.5 -> :5432' --expect drop
 ```
 
 ### Options
 
 | Option | Function |
 | --- | --- |
-| `FILE...` | Read saved `iptables-save`, `ip6tables-save` and `ss` output |
+| `FILE...` | Read saved `iptables-save`, `ip6tables-save` and `ss` output, or a snapshot |
 | `-f`, `--file FILE` | Read the IPv4 rules from FILE |
 | `--file6 FILE` | Read the IPv6 rules from FILE |
 | `--services-file FILE` | Read the listening sockets from FILE (`ss` output) |
+| `--ipset-file FILE` | Read the contents of the ipsets from FILE (`ipset save` output) |
 | `-4`, `-6` | Examine only IPv4 or only IPv6 |
 | `--public LIST` | Ports that are open to all sources on purpose, for example `tcp/80,tcp/443`: no deduction |
+| `--trace PACKET` | Show the way of one packet through the rules, for example `'tcp 203.0.113.5 -> :22 in eth0'` |
+| `--expect VERDICT` | With `--trace`: exit with status 2 unless the verdict is `accept`, `drop` or `reject` as given |
+| `--diff OLD NEW` | Show what differs between two inputs |
+| `--snapshot FILE` | Also save all input to FILE, which the tool can examine like the live host |
 | `--html FILE` | Also write an interactive HTML report to FILE |
 | `--json` | Write the report as JSON |
 | `--rules` | Also show the rules of each chain |
@@ -200,7 +277,7 @@ To stop when the full sandbox is not available, use `--sandbox=strict`.
 ## Documentation
 
 - [docs/usage.md](docs/usage.md): all modes, the report, the baseline and examples.
-- [docs/json.md](docs/json.md): the fields of the JSON report.
+- [docs/json.md](docs/json.md): the fields of the JSON report, of a trace and of a comparison.
 - [docs/how-it-works.md](docs/how-it-works.md): the analysis method and its limits.
 - [docs/security.md](docs/security.md): the sandbox and the other protections.
 - [docs/supply-chain.md](docs/supply-chain.md): the dependency cooldown, the CI checks and the release verification.

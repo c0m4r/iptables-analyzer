@@ -1,0 +1,24 @@
+# A web server with its own rules and two jails of fail2ban (action iptables-multiport).
+# fail2ban puts the jumps to its chains at the top of INPUT.
+# Written after the rules of such a host, not captured: the addresses are examples.
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+:f2b-nginx-http-auth - [0:0]
+:f2b-sshd - [0:0]
+-A INPUT -p tcp -m multiport --dports 80,443 -j f2b-nginx-http-auth
+-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A INPUT -m conntrack --ctstate INVALID -j DROP
+-A INPUT -p icmp -m icmp --icmp-type 8 -j ACCEPT
+-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+-A INPUT -p tcp -m multiport --dports 80,443 -m conntrack --ctstate NEW -j ACCEPT
+-A f2b-nginx-http-auth -s 192.0.2.44/32 -j REJECT --reject-with icmp-port-unreachable
+-A f2b-nginx-http-auth -j RETURN
+-A f2b-sshd -s 198.51.100.23/32 -j REJECT --reject-with icmp-port-unreachable
+-A f2b-sshd -s 203.0.113.66/32 -j REJECT --reject-with icmp-port-unreachable
+-A f2b-sshd -s 203.0.113.67/32 -j REJECT --reject-with icmp-port-unreachable
+-A f2b-sshd -j RETURN
+COMMIT

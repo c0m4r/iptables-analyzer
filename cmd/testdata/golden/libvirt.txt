@@ -1,0 +1,54 @@
+iptables-analyzer vdev · file analysis · 2026-11-25 12:00
+inputs: ../testdata/libvirt.iptables-save, ../testdata/libvirt-services.txt
+IPv4: 31 rules in 19 chains (libvirt) · INPUT DROP · FORWARD DROP · OUTPUT ACCEPT
+IPv6: not supplied
+
+  Grade A  94/100    1 high · 1 medium · 1 info
+
+  Policy                ▰▰▰▰▰▰▰▰▰▰ 25/25    Hygiene               ▰▰▰▰▰▰▰▰▰▰ 15/15
+  Exposure              ▰▰▰▰▰▰▰▰▱▱ 19/25    IPv6                  ▰▰▰▰▰▰▰▰▰▰ 10/10
+  Shadows and bypasses  ▰▰▰▰▰▰▰▰▰▰ 25/25    
+
+  note: No IPv6 rules were supplied: only IPv4 was analyzed, and IPv4 rules do not filter IPv6. Add
+  the output of ip6tables-save as another file.
+
+  Fix first
+    1. F1   sshd is open to any source on 22/tcp                                                  +5
+    2. F2   Forwarded port 8022/tcp is open to any source                                         +1
+
+  Findings
+
+  HIGH     F1   sshd is open to any source on 22/tcp                                              -5
+                IPv4: accepted by filter/INPUT rule #4.
+                filter/INPUT #4:  -p tcp -m tcp --dport 22 -j ACCEPT
+                fix  If the clients are known, accept only their addresses. If SSH must stay open to
+                     any source, limit new connections for each source: the limit counts every
+                     source by itself, so one client cannot lock out the others, and it does not
+                     touch established sessions.
+                     Replace the rule with one for the known clients:
+                       iptables -R INPUT 4 -s <trusted-cidr> -p tcp -m tcp --dport 22 -j ACCEPT
+                     Or drop the connections of a source that opens more than 10 a minute, in front
+                     of the rule:
+                       iptables -I INPUT 4 -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh4 -j DROP
+
+  MEDIUM   F2   Forwarded port 8022/tcp is open to any source (possible)                          -1
+                nat/PREROUTING translates these ports to another host, and filter/FORWARD accepts
+                them from any source; the rules of filter/INPUT do not apply: IPv4 8022/tcp to
+                192.168.122.50:22 (via eth0).
+                nat/PREROUTING #1:  -i eth0 -p tcp -m tcp --dport 8022 -j DNAT --to-destination 192.168.122.50:22
+                fix  The port is translated by nat/PREROUTING rule #1 and then passes
+                     filter/FORWARD, not filter/INPUT. If only known clients need it, add their
+                     sources (-s <trusted-cidr>) to that rule or to the FORWARD rule that accepts
+                     the traffic. In FORWARD the packet has the translated address and port; match
+                     the original port with '-m conntrack --ctorigdstport 8022 --ctdir ORIGINAL'.
+
+  Open to any source
+    tcp  22 sshd
+
+  Translated to other hosts
+    8022/tcp → 192.168.122.50:22: any source, possible
+    These ports are translated in nat/PREROUTING and pass filter/FORWARD, not filter/INPUT.
+
+  Not shown: 31 rules (--rules) · 1 info finding, 5 listening sockets (-v) · recommended baseline
+  (--baseline)
+  Interactive report: --html FILE · machine-readable: --json

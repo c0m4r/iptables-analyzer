@@ -6,9 +6,10 @@ This document describes how the tool protects the system that runs it.
 
 The tool usually runs as root. It reads data that other persons can control:
 
-- **Rule files** can come from a different host or from a different person.
-- **Rule comments, chain names and interface names** come from all users and containers
-  that can change the firewall (for example, containers with `NET_ADMIN` in the host namespace).
+- **Rule files, ipset files and snapshots** can come from a different host or from a different person.
+- **Rule comments, chain names, interface names, and the names of ipsets and nftables tables**
+  come from all users and containers that can change the firewall (for example, containers
+  with `NET_ADMIN` in the host namespace).
 - **Process names** in `ss` output come from all local users.
   Any user can give a process a name with terminal escape sequences.
 
@@ -27,14 +28,21 @@ A person who controls this data must not be able to:
 
 - The tool reads at most 64 MiB of rules and 16 MiB of `ss` output.
   A larger input, or an endless device such as `/dev/zero`, gives an error.
-- Each line can have at most 1 MiB.
+  The same limit of 64 MiB applies to a snapshot, to an ipset file and to the output
+  of each tool that a live analysis starts.
+- Each line of rules can have at most 1 MiB, and each line of `ipset`, `nft` and `ip`
+  output 64 KiB.
 - The tool stops the evaluation of a ruleset after 262,144 chain traversals
   (see [how-it-works.md](how-it-works.md#evaluation-limit)).
   The affected results are `POSSIBLE`, and the report shows an assessment note.
+- `--trace` follows at most 48 ways of a packet through rules that can match or not.
+  With more ways, the verdict is `not certain`.
 
 ### 2. Safe execution of system tools
 
-In live mode, the tool starts `iptables-save`, `ip6tables-save` and `ss`. It:
+In live mode, the tool starts `iptables-save`, `ip6tables-save` and `ss`.
+It also starts `nft list chains`, `ipset save` and `ip -4 route show table main`
+when these tools are installed. All of these commands only read. The tool:
 
 - finds them only in `/usr/sbin`, `/usr/bin`, `/sbin` and `/bin`. `PATH` is only a fallback
   (for example on NixOS), and a relative `PATH` entry is refused,
@@ -46,6 +54,13 @@ In live mode, the tool starts `iptables-save`, `ip6tables-save` and `ss`. It:
   do not get to the tool,
 - starts the tool in `/`, without standard input, with a time limit,
   and kills it when the analyzer stops.
+
+The kernel settings are read from fixed files below `/proc/sys/net`. The name of an
+interface is a part of some of these paths. A name with a `/`, and a name of dots only,
+is not used.
+
+`nft`, `ipset` and `ip` are optional. Without one of them, or when one fails, the analysis
+goes on with less data, and a note in the report says what is missing.
 
 ### 3. Sandbox
 
@@ -72,7 +87,10 @@ and writes the report. The steps:
    | 10 | — | Also: UDP bind and send |
 
 The file descriptors that are open before the sandbox, for example standard output
-and the file for `--html`, continue to operate.
+and the files for `--html` and `--snapshot`, continue to operate.
+
+`--trace` and `--diff` read their input before the sandbox too, and then do all their
+work inside it.
 
 `--verbose` and the HTML report show the sandbox status. The JSON report has it in `sandbox`.
 
@@ -116,9 +134,14 @@ The parser and the `ss` parser replace characters that a terminal can interpret:
 | C1 control characters, bidirectional overrides, zero-width characters, line separators | `<U+XXXX>`, for example `<U+202E>` |
 | Bytes that are not valid UTF-8 | `<0xNN>` |
 
-Interface names from the live system get the same treatment.
+Interface names and the host name from the live system get the same treatment, and so
+does all text from `ipset`, `nft` and `ip`, and each value of a snapshot.
+In a name, a tab is shown as `^I` too.
 Thus an escape sequence in a rule comment or in a process name has no effect on the terminal.
 The placeholders contain no quotes or backslashes, so the rules parse the same.
+
+The packet of `--trace` comes from the command line. The tool accepts an interface name
+there only without control characters, spaces, `/` and `:`.
 
 ### 5. Safe commands in a fix
 
@@ -166,6 +189,23 @@ The file:
 The report shows the rules of the host and the listening processes. Keep it, and the
 JSON report, where only the right persons can read them.
 
+### 7. Snapshots
+
+`--snapshot FILE` writes the input of the analysis to a file. The rules for the file are
+those of the HTML report: opened before the sandbox, no symbolic link, not an input file,
+a regular file, written only when the run succeeds.
+
+A snapshot that the tool reads is input like a rule file, and gets no more trust:
+
+- The text of the tools in it goes through the same parsers, with the same limits.
+- Interface names, the host name and the names of settings are escaped. An address or a
+  setting with a value that is not valid is ignored.
+- The tool does not start a program and does not read a file because a snapshot says so.
+
+A snapshot holds the rules, the host name, the addresses of the interfaces, the routes,
+the ipsets and the names of the listening processes. Keep it where only the right persons
+can read it.
+
 ## Tests
 
 - `internal/sandbox`: a child process enforces the sandbox while other threads run.
@@ -176,6 +216,8 @@ JSON report, where only the right persons can read them.
   must be written from inside the sandbox.
 - Fuzz tests send random rules and `ss` data through the full command.
   The `--no-color` report must not contain control characters.
+  More fuzz tests do the same for `--trace` and `--diff`, for the parsers of `ipset`,
+  `nft` and `ip` output, and for the snapshot reader.
 - `internal/report`: a shell splits each command of the fixes. A rule comment with shell
   syntax must stay one literal argument, and nothing from it may run.
 - `internal/ui`: each string of a report is replaced by a string full of markup. The

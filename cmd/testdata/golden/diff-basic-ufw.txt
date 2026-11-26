@@ -1,0 +1,18 @@
+iptables-analyzer vdev · comparison · 2026-11-25 12:00
+old: ../testdata/basic.iptables-save (file analysis)
+new: ../testdata/ufw.iptables-save (file analysis)
+
+  Grade A 93/100  →  Grade A 95/100    +2 points
+  1 new finding, 1 finding changed, 3 port ranges changed.
+
+  New findings
+    LOW      68/udp is open to any source                                                         -1
+
+  Changed findings
+    MEDIUM   22/tcp is open to any source (was HIGH, was -5)                                      -2
+
+  Ports of this host
+    IPv4 tcp 22            any source → any source (rate limit)
+    IPv4 tcp 5432          closed → private networks
+    IPv4 udp 68            closed → any source (source port 67)
+

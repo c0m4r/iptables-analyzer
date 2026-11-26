@@ -1,4 +1,4 @@
-.PHONY: build build-dev check check-deps test test-cover test-race test-sandbox fuzz update-golden vet fmt fmt-check clean help update-deps update-deps-patch rebuild test-coverage pre-commit
+.PHONY: build build-dev check check-deps test test-cover test-race test-sandbox test-kernel fuzz update-golden vet fmt fmt-check clean help update-deps update-deps-patch rebuild test-coverage pre-commit
 
 BINARY_NAME=iptables-analyzer
 GO=go
@@ -20,7 +20,8 @@ help:
 	@echo "  test           - Run unit tests"
 	@echo "  test-race      - Run unit tests with the race detector (needs cgo)"
 	@echo "  test-sandbox   - Run the Landlock sandbox enforcement tests"
-	@echo "  fuzz           - Fuzz the parsers, the analysis pipeline and the HTML report (FUZZTIME=30s)"
+	@echo "  test-kernel    - Compare the analysis with the Linux kernel in network namespaces"
+	@echo "  fuzz           - Fuzz the parsers, the analysis, the queries and the HTML report (FUZZTIME=30s)"
 	@echo "  update-golden  - Rewrite the golden files of the report formats (read the diff)"
 	@echo "  vet            - Run go vet"
 	@echo "  fmt            - Format code"
@@ -59,17 +60,26 @@ test-sandbox:
 	@echo "Running sandbox enforcement tests (skipped without Landlock)..."
 	$(GO) test -mod=readonly -count=1 -v -run 'Sandbox|Enforce' ./internal/sandbox ./cmd
 
+# Loads the rules of each scenario with the real iptables-restore in a user
+# and network namespace and sends real packets. Skipped without namespaces.
+test-kernel:
+	@echo "Comparing the analysis with the kernel (skipped without user namespaces)..."
+	$(GO) test -mod=readonly -count=1 -v -run 'Kernel|RealIptables' ./internal/analyzer ./internal/baseline
+
 fuzz:
 	$(GO) test -mod=readonly -run '^$$' -fuzz '^FuzzParse$$' -fuzztime $(FUZZTIME) ./internal/parser
 	$(GO) test -mod=readonly -run '^$$' -fuzz '^FuzzParseSSData$$' -fuzztime $(FUZZTIME) ./internal/services
 	$(GO) test -mod=readonly -run '^$$' -fuzz '^FuzzAnalysis$$' -fuzztime $(FUZZTIME) ./cmd
+	$(GO) test -mod=readonly -run '^$$' -fuzz '^FuzzQueries$$' -fuzztime $(FUZZTIME) ./cmd
+	$(GO) test -mod=readonly -run '^$$' -fuzz '^FuzzHostFacts$$' -fuzztime $(FUZZTIME) ./internal/hostinfo
+	$(GO) test -mod=readonly -run '^$$' -fuzz '^FuzzSnapshot$$' -fuzztime $(FUZZTIME) ./internal/hostinfo
 	$(GO) test -mod=readonly -run '^$$' -fuzz '^FuzzHTMLReport$$' -fuzztime $(FUZZTIME) ./internal/ui
 	$(GO) test -mod=readonly -run '^$$' -fuzz '^FuzzShellQuote$$' -fuzztime $(FUZZTIME) ./internal/textsafe
 	$(GO) test -mod=readonly -run '^$$' -fuzz '^FuzzEscape$$' -fuzztime $(FUZZTIME) ./internal/textsafe
 
 # The golden files are what the user reads. Review their diff like code.
 update-golden:
-	$(GO) test -mod=readonly -count=1 -run '^TestGoldenReports$$' ./cmd -update
+	$(GO) test -mod=readonly -count=1 -run '^TestGolden(Reports|Queries)$$' ./cmd -update
 	@git status --short cmd/testdata/golden
 
 check-deps:

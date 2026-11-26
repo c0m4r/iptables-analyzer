@@ -636,17 +636,6 @@ func TestParseDNATTargetDistinguishesBareIPv6(t *testing.T) {
 	}
 }
 
-func TestUnsupportedDNATProducesAssessmentDiagnostic(t *testing.T) {
-	rs, err := parser.Parse("*nat\n:PREROUTING ACCEPT [0:0]\n-A PREROUTING -j DNAT --to-destination 172.17.0.2\nCOMMIT\n", models.IPv4)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result := Analyze(rs, nil)
-	if len(result.Diagnostics) != 1 || result.Diagnostics[0].Area != "docker" {
-		t.Fatalf("unsupported DNAT was silently omitted: %+v", result.Diagnostics)
-	}
-}
-
 func TestNATTraversalHonorsConditionalReturn(t *testing.T) {
 	data := `*nat
 :PREROUTING ACCEPT [0:0]

@@ -9,6 +9,8 @@ iptables-analyzer rules.v4 rules.v6 ss.txt --json --rules
 ```
 
 `--json --score-only` writes only the `score` object.
+`--json` with `--trace` writes a [trace object](#the-trace-object), and with `--diff`
+a [comparison object](#the-comparison-object).
 
 ## Stability
 
@@ -29,8 +31,9 @@ The findings were in five lists there, and the report always held all rules.
 | `schema_version` | number | `2` |
 | `tool` | object | `name`, `version` and `url` of the program |
 | `generated` | string | The time of the run (RFC 3339) |
-| `mode` | string | `live` or `file` |
-| `host` | string | The host name, in live mode |
+| `mode` | string | `live`, `file` or `snapshot` |
+| `host` | string | The host name, for a live analysis and for a snapshot |
+| `captured` | string | For a snapshot: the time when the host was read (RFC 3339) |
 | `inputs` | list of strings | The names of the files that were read |
 | `families` | list | One [family](#family) object for IPv4 and one for IPv6 |
 | `score` | object | The [score](#score) |
@@ -55,7 +58,7 @@ A field that is empty can be absent.
 | `status` | string | `ANALYZED`, `NO_RULES` (the save tool printed no table: all traffic is accepted), `EXCLUDED` (`-4` or `-6`), `NOT_SUPPLIED` (no file for this family) or `UNREADABLE` (native nftables rules) |
 | `tables`, `chains`, `rules` | number | What the input holds |
 | `policies` | object | The policy of `INPUT`, `FORWARD` and `OUTPUT` in the filter table |
-| `managers` | list of strings | The programs whose chains the rules contain, for example `docker` or `ufw` |
+| `managers` | list of strings | The programs whose chains the rules contain, for example `docker`, `ufw`, `firewalld`, `csf`, `shorewall`, `kubernetes`, `flannel`, `libvirt` or `fail2ban` |
 
 ### Score
 
@@ -118,8 +121,14 @@ The codes:
 | `docker_direct_route` | Containers are reachable by direct routing |
 | `docker_ipv6_unfiltered` | Docker does not filter IPv6 forwarding |
 
-The `docker_` codes are also used for a port forward that is not made by Docker.
+The `docker_` codes are also used for a port that something else sends to a different host:
+a port forward of a router, or a node port of Kubernetes.
 `title` and `detail` then do not speak of Docker.
+
+`exposed_service` and `open_port` are about the port that clients connect to. When
+`nat/PREROUTING` sends that port to a different local port, the finding has the redirecting
+rule in `rules` with the role `redirects`, and the service of `exposed_service` listens on
+the new port.
 
 ### Rule reference
 
@@ -129,7 +138,7 @@ The `docker_` codes are also used for a port forward that is not made by Docker.
 | `table`, `chain` | string | Where the rule is |
 | `num` | number | The position of the rule in its chain, from 1 |
 | `spec` | string | The rule as `iptables-save` prints it, without `-A CHAIN` |
-| `role` | string | What the rule does in the finding: `accepts`, `causes`, `shadows`, `shadowed`, `translates`, `bypassed` or `ineffective` |
+| `role` | string | What the rule does in the finding: `accepts`, `causes`, `shadows`, `shadowed`, `translates`, `redirects`, `bypassed` or `ineffective` |
 | `path` | list of strings | For a rule in a user-defined chain: the jumps from the built-in chain to the rule, each as `CHAIN #N`. The last entry is the rule |
 
 ### Open port
@@ -138,7 +147,9 @@ The `docker_` codes are also used for a port forward that is not made by Docker.
 | --- | --- | --- |
 | `families` | list of numbers | `4`, `6` or both |
 | `protocol` | string | `tcp` or `udp` |
+| `address` | string | The address of the host for which the entry applies, when a rule of `nat/PREROUTING` names one. Absent for all other addresses |
 | `first`, `last` | number | The range of ports. Both are `0` when `default` is `true` |
+| `redirect` | object | Present when `nat/PREROUTING` sends the ports to different local ports. See below |
 | `default` | boolean | `true` for the entry that stands for all ports that no rule names |
 | `scope` | string | The sources that reach the port. See [Scope](#scope) |
 | `certainty` | string | `DEFINITE` or `POSSIBLE` |
@@ -146,8 +157,19 @@ The `docker_` codes are also used for a port forward that is not made by Docker.
 | `restriction` | string | The set that restricts the sources, for example an ipset, when `scope` is `RESTRICTED` |
 | `interfaces` | list of strings | The interfaces for which the entry applies, when not all |
 | `rules` | list | The [rules](#rule-reference) that accept. Empty when the policy of the chain accepts |
-| `listeners` | list of strings | The processes that listen in the range |
+| `listeners` | list of strings | The processes that listen in the range. For an entry with `redirect`: the processes on the new ports |
 | `public` | boolean | `true` when `--public` names the ports |
+
+The `redirect` object:
+
+| Field | Type | Contents |
+| --- | --- | --- |
+| `first`, `last` | number | The local ports that receive the connections. Both are `0` when the port stays and only the address changes |
+| `address` | string | The new local address of a `DNAT`. Absent for `REDIRECT`, which uses the address of the ingress interface |
+| `rules` | list | The [rules](#rule-reference) that translate, one for each address family |
+
+For an entry with `redirect`, `scope` and `rules` are those of the new port: INPUT sees the
+packet with it.
 
 ### Forwarded port
 
@@ -158,6 +180,7 @@ The `docker_` codes are also used for a port forward that is not made by Docker.
 | `host_addr` | string | The local address that the rule matches. Absent for all local addresses |
 | `host_port`, `host_port_end` | number | The range of ports on this host |
 | `dest_addr`, `dest_port`, `dest_port_end` | | Where the packets go |
+| `destinations` | list of strings | All destinations as `address:port`, when the rules share the port among more than one (the pods of a Kubernetes service). `dest_addr` is the first |
 | `bridge` | string | The bridge of the destination, when it is known |
 | `docker` | boolean | `true` when Docker made the rule |
 | `forward_scope` | string | The sources that `filter/FORWARD` accepts. Absent when no source gets through |
@@ -184,7 +207,7 @@ The `docker_` codes are also used for a port forward that is not made by Docker.
 | --- | --- |
 | `EXPOSED` | Any source |
 | `SUBNET` | Specific public networks |
-| `RESTRICTED` | A set that the tool cannot read: an ipset, a MAC address, a GeoIP match |
+| `RESTRICTED` | A set that the tool cannot read: an ipset without its contents, a MAC address, a GeoIP match |
 | `LOCALNET` | Private address ranges |
 | `WHITELISTED` | Single hosts |
 
@@ -221,6 +244,67 @@ A table has `name` and `chains`. A chain has `name`, `policy` (built-in chains),
 | `jump` | boolean | `true` when the target is a chain of the same table |
 | `findings` | list of strings | The `id` of each finding that names the rule |
 
+## The trace object
+
+`--json --trace PACKET` writes this object instead of the report:
+
+| Field | Type | Contents |
+| --- | --- | --- |
+| `schema_version`, `tool`, `generated`, `mode`, `host`, `captured`, `inputs` | | As in the report object |
+| `trace` | object | The way of the packet |
+
+The `trace` object:
+
+| Field | Type | Contents |
+| --- | --- | --- |
+| `packet` | object | The packet: `protocol`, `source`, `source_port`, `destination`, `port`, `in`, `out`, `state`, `icmp_type`. A field that was not given is absent |
+| `family` | number | `4` or `6` |
+| `stages` | list | The chains that the packet passes, in order. Each has `table`, `chain`, `steps` and `result` (how the packet leaves the chain, in words) |
+| `verdict` | string | `ACCEPT`, `DROP`, `REJECT` or `UNDECIDED` |
+| `certain` | boolean | `false` when a rule that can match or not gives a different verdict |
+| `decided_by` | string | The rule or the policy that gave the verdict, for example `filter/INPUT #7` |
+| `delivery` | string | For `ACCEPT`: `local` when the host receives the packet, `forward` when it sends the packet to a different host |
+| `destination`, `port` | | For `ACCEPT`: the destination after the address translation |
+| `assumptions` | list of strings | What the trace took for granted, for example the source port |
+| `alternatives` | list | How the packet ends when rules that can match or not do match. Each has `if`, `verdict`, `decided_by`, `delivery`, `destination` and `port` |
+
+A step is one rule that the packet matched:
+
+| Field | Type | Contents |
+| --- | --- | --- |
+| `table`, `chain`, `num`, `spec` | | The rule |
+| `depth` | number | `0` for a rule in the built-in chain, one more for each jump |
+| `match` | string | `yes`, or `maybe` when the packet alone does not decide. The trace then goes on without the rule |
+| `action` | string | `ACCEPT`, `DROP`, `REJECT`, `RETURN`, `jump`, `goto`, the target of a translation (`DNAT`, `REDIRECT`, `NETMAP`), `QUEUE` or `NFQUEUE`, `continue` for a rule that does not decide, or `skipped` for a `maybe` |
+| `note` | string | What a `maybe` depends on, or what the rule changed (a mark) |
+
+## The comparison object
+
+`--json --diff OLD NEW` writes this object instead of the report:
+
+| Field | Type | Contents |
+| --- | --- | --- |
+| `schema_version`, `tool`, `generated` | | As in the report object |
+| `old`, `new` | object | For each input: `mode`, `host`, `captured`, `inputs`, `families`, `score` and `counts`, as in the report object |
+| `added` | list | The [findings](#finding) that only the new input has |
+| `removed` | list | The findings that only the old input has |
+| `changed` | list | Findings of both inputs whose severity, certainty, points or address families differ. Each has `old` and `new` |
+| `ports` | list | The ports of the host whose state differs. See below |
+| `forwarded_ports` | list | The [ports](#forwarded-port) that go to a different host and differ. Each has `old`, `new` or both |
+| `notes` | list of strings | What could not be compared, for example an address family that only one input has |
+
+Findings are matched by `code` and by what they are about (the port, the chain), not by `id`.
+
+A port change:
+
+| Field | Type | Contents |
+| --- | --- | --- |
+| `family` | number | `4` or `6` |
+| `protocol` | string | `tcp` or `udp` |
+| `address` | string | For ports of one address of the host |
+| `first`, `last` | number | The range of ports |
+| `old`, `new` | object | The state before and after: `scope` (absent for a closed port), `certainty`, `condition`, and `local_port` when the port is redirected to one local port |
+
 ## Examples
 
 ```bash
@@ -235,7 +319,22 @@ iptables-analyzer rules.v4 --json | jq -r '.findings[].fix.steps[]?.command'
 
 # The ports that are open to all sources
 iptables-analyzer rules.v4 --json | jq -r '.open_ports[] | select(.scope == "EXPOSED" and (.default | not)) | "\(.first)/\(.protocol)"'
+
+# The verdict for one packet
+iptables-analyzer rules.v4 --json --trace 'tcp 203.0.113.5 -> :22' | jq -r '.trace.verdict'
+
+# The ports that a change opens to all sources
+iptables-analyzer --json --diff old.v4 new.v4 | jq -r '.ports[] | select(.new.scope == "EXPOSED") | "\(.first)-\(.last)/\(.protocol)"'
 ```
 
-For a result in the exit status, use `--fail-on` and `--min-grade` instead:
+For a result in the exit status, use `--fail-on`, `--min-grade` and `--expect` instead:
 see [usage.md](usage.md#use-in-scripts).
+
+## The snapshot file
+
+`--snapshot FILE` writes a JSON file of a different kind: the input of an analysis, not its
+result. It has `"format": "iptables-analyzer snapshot"` and `"version": 1`, and it holds the
+output of the tools as text (`iptables_save`, `ip6tables_save`, `ss`, `nft_list_chains`,
+`ipset_save`, `ip_route`), next to `created`, `hostname`, `interfaces` and `sysctls`.
+A part that was not read is absent. The tool reads the file like the output of the tools
+on a live host; other programs can read it too.

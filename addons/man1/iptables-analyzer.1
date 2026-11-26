@@ -1,14 +1,22 @@
-.TH IPTABLES\-ANALYZER 1 "2026-11-25" "0.7.1" "iptables-analyzer manual"
+.TH IPTABLES\-ANALYZER 1 "2026-11-26" "0.7.1" "iptables-analyzer manual"
 .SH NAME
 iptables\-analyzer \- analyze iptables/ip6tables firewall rules for security issues
 .SH SYNOPSIS
 .B iptables\-analyzer
 [\fIOPTIONS\fR] [\fIFILE\fR...]
+.br
+.B iptables\-analyzer
+[\fIOPTIONS\fR] \fB\-\-trace\fR \fIPACKET\fR [\fIFILE\fR...]
+.br
+.B iptables\-analyzer
+[\fIOPTIONS\fR] \fB\-\-diff\fR \fIOLD\fR \fINEW\fR
 .SH DESCRIPTION
 .B iptables\-analyzer
 examines iptables and ip6tables rules and reports security problems: chains
 that accept by default, ports that are open to all sources, services that the
-firewall does not protect, rules that never match, Docker published ports that
+firewall does not protect, rules that never match, ports that the nat table
+sends to a different port or to a different host (REDIRECT, port forwards,
+Docker published ports, node ports of Kubernetes), Docker published ports that
 bypass the INPUT rules, DOCKER\-USER and FORWARD rules that never match
 published traffic, containers that other hosts reach by direct routing, and
 rules that stop IPv6 connectivity.
@@ -18,14 +26,23 @@ lists the findings, the most severe first. Each finding names the rules that
 cause it and says how to fix it. The tool does not change the firewall.
 .PP
 Run as root without a \fIFILE\fR, the tool reads the rules and the listening
-sockets of the system. With files, it examines saved output of
+sockets of the system. It also reads the facts that decide what the rules do:
+the interfaces and their addresses, the IPv4 routes, the kernel settings
+\fBip_forward\fR, \fBrp_filter\fR and \fBroute_localnet\fR, the contents of the
+ipsets (\fBipset save\fR) and the list of nftables tables (\fBnft list
+chains\fR). The tools \fBip\fR, \fBipset\fR and \fBnft\fR are used when they
+are installed.
+.PP
+With files, the tool examines saved output of
 .BR iptables\-save (8),
 .BR ip6tables\-save (8)
 and
-.BR ss (8).
-The tool finds out what each file holds: the save tools name themselves in the
-first line of their output, and without that line the addresses in the rules
-show the address family.
+.BR ss (8),
+or a snapshot (see \fB\-\-snapshot\fR). The output of \fBiptables \-S\fR is
+accepted too; the listings of several tables can follow one another in one
+file. The tool finds out what each file holds: the save tools name themselves
+in the first line of their output, and without that line the addresses in the
+rules show the address family.
 .SH OPTIONS
 .SS Input
 .TP
@@ -40,6 +57,12 @@ Read the IPv6 rules (ip6tables\-save output) from \fIFILE\fR.
 Read the listening sockets (output of \fBss \-tulnp\fR) from \fIFILE\fR.
 Without the listening sockets, each open port is judged as if a service uses it.
 .TP
+.BR \-\-ipset\-file " \fIFILE\fR"
+Read the contents of the ipsets (output of \fBipset save\fR) from \fIFILE\fR.
+A rule that matches the source against a set of addresses or networks is then
+evaluated like a rule with these sources. Without the contents, the report
+names the set as a restriction that it cannot read.
+.TP
 .BR \-4 ", " \-\-ipv4\-only
 Analyze only IPv4.
 .TP
@@ -51,12 +74,58 @@ Ports that are open to all sources on purpose, for example
 \fBtcp/80,tcp/443\fR. The findings for these ports are notes without a
 deduction. An entry is \fBtcp/80\fR, \fB80/tcp\fR, \fBudp/53\fR, a range such
 as \fBtcp/8000\-8100\fR, or a number (TCP).
+.SS Queries
+.TP
+.BR \-\-trace " \fIPACKET\fR"
+Show the way of one packet through the rules in place of the report: the rules
+that it matches in each chain, a new destination from the nat table, and the
+verdict. \fIPACKET\fR is
+.RS
+.PP
+.RS 4
+\fIPROTOCOL SOURCE\fR[\fB:\fIPORT\fR] \fB\->\fR [\fIDESTINATION\fR]\fB:\fIPORT\fR [\fBin\fR \fIIFACE\fR] [\fBout\fR \fIIFACE\fR] [\fBstate\fR \fISTATE\fR]
+.RE
+.PP
+for example \fB'tcp 203.0.113.5 \-> :22 in eth0'\fR. \fIPROTOCOL\fR is
+\fBtcp\fR, \fBudp\fR, \fBicmp\fR or \fBicmpv6\fR; for ICMP, \fBtype\fR \fIN\fR
+replaces the port. A destination without an address is an address of this
+host. An IPv6 address with a port is written in brackets. \fISTATE\fR is
+\fBNEW\fR (the default), \fBESTABLISHED\fR, \fBRELATED\fR, \fBINVALID\fR or
+\fBUNTRACKED\fR.
+.PP
+The trace knows the marks that rules set on the way, and it judges a rate
+limit for a first packet. When a rule can match or not (a set whose contents
+were not read, a random share of the packets, an interface that was not
+given), the trace goes on without the rule and lists how the packet ends when
+the rule does match. If these ends differ, the verdict is not certain.
+.RE
+.TP
+.BR \-\-expect " \fIVERDICT\fR"
+With \fB\-\-trace\fR: exit with status 2 unless the verdict is \fIVERDICT\fR
+(\fBaccept\fR, \fBdrop\fR or \fBreject\fR) and is certain.
+.TP
+.BR \-\-diff
+Compare two inputs in place of the report. The two \fIFILE\fR arguments are
+the old and the new input; each is the output of a save tool or a snapshot.
+The output shows the two grades, the findings that are new, gone or changed,
+the ports of the host whose sources changed, and the changes of the ports that
+are sent to other hosts. With \fB\-\-diff\fR, \fB\-\-fail\-on\fR judges only the
+findings that the new input adds, and \fB\-\-min\-grade\fR the grade of the new
+input.
 .SS Output
 .TP
 .BR \-\-html " \fIFILE\fR"
 Also write an interactive report to \fIFILE\fR. The file is one HTML page that
 loads nothing from the network. It also holds the rules and the recommended
 baseline. A symbolic link at \fIFILE\fR is not followed.
+.TP
+.BR \-\-snapshot " \fIFILE\fR"
+Also save all input to \fIFILE\fR: the output of the tools, the interfaces and
+the kernel settings, as JSON. The tool reads such a file like the host itself,
+so the analysis, \fB\-\-trace\fR and \fB\-\-diff\fR give the results of the
+host on any system and without root. A snapshot is a complete input: it cannot
+be used together with other rule files. A symbolic link at \fIFILE\fR is not
+followed.
 .TP
 .BR \-\-json
 Write the report as JSON. See \fBdocs/json.md\fR for the fields.
@@ -117,8 +186,8 @@ The analysis is complete.
 An error: the input could not be read, or an option is not correct.
 .TP
 .B 2
-The analysis is complete, and the result is below what \fB\-\-fail\-on\fR or
-\fB\-\-min\-grade\fR asks for. The report is written first.
+The analysis is complete, and the result is below what \fB\-\-fail\-on\fR,
+\fB\-\-min\-grade\fR or \fB\-\-expect\fR asks for. The output is written first.
 .SH ENVIRONMENT
 .TP
 .B NO_COLOR
@@ -163,6 +232,32 @@ iptables\-analyzer rules.v4 rules.v6 \-\-quiet \-\-fail\-on high || exit 1
 .EE
 .RE
 .PP
+Save a snapshot of a host, and examine it on a different system:
+.PP
+.RS 4
+.EX
+sudo iptables\-analyzer \-\-quiet \-\-snapshot host.json
+iptables\-analyzer host.json \-\-html report.html
+.EE
+.RE
+.PP
+Show what the rules do with one packet, and test that a port stays closed:
+.PP
+.RS 4
+.EX
+iptables\-analyzer host.json \-\-trace \(aqtcp 203.0.113.5 \-> :8443 in eth0\(aq
+iptables\-analyzer rules.v4 \-\-trace \(aqtcp 203.0.113.5 \-> :5432\(aq \-\-expect drop
+.EE
+.RE
+.PP
+Refuse a change of the rules that adds a finding of medium or higher severity:
+.PP
+.RS 4
+.EX
+iptables\-analyzer \-\-diff deployed.v4 proposed.v4 \-\-quiet \-\-fail\-on medium
+.EE
+.RE
+.PP
 Write the recommended baselines to files:
 .PP
 .RS 4
@@ -172,27 +267,33 @@ sudo iptables\-analyzer \-\-baseline=6 > baseline.v6
 .EE
 .RE
 .SH SECURITY
-Rule files, saved
+Rule files, snapshots, saved
 .BR ss (8)
-output and the live tool output are untrusted input: comments, chain names,
-interface names and process names are chosen by whoever controls the firewall
-or runs a process. The analyzer therefore:
+output and the live tool output are untrusted input: comments, the names of
+chains, interfaces, ipsets and nftables tables, and process names are chosen
+by whoever controls the firewall or runs a process. The analyzer therefore:
 .IP \(bu 2
-reads at most 64 MiB of rules and 16 MiB of
+reads at most 64 MiB of rules, of a snapshot or of the output of one tool,
+and 16 MiB of
 .BR ss (8)
 output;
 .IP \(bu 2
 in live mode, runs only root-owned, not group- or world-writable
 .BR iptables\-save ,
-.BR ip6tables\-save " and " ss
+.BR ip6tables\-save ,
+.BR ss ,
+.BR ip ,
+.BR ipset " and " nft
 from /usr/sbin, /usr/bin, /sbin or /bin (PATH is a fallback with the same
-checks), with an environment that contains only PATH and LC_ALL=C;
+checks), with an environment that contains only PATH and LC_ALL=C. Each of
+these commands only reads;
 .IP \(bu 2
 after reading its input, drops root privileges to uid and gid 65534, sets
 no_new_privs, and enforces a Landlock domain that denies all file access,
 execution, TCP and UDP, abstract UNIX sockets and signals (as far as the
 kernel's Landlock ABI supports them). Parsing, analysis and output run in this
-sandbox; the file for \fB\-\-html\fR is opened before it. Landlock needs
+sandbox; the files for \fB\-\-html\fR and \fB\-\-snapshot\fR are opened before
+it. Landlock needs
 Linux 5.13 or later with landlock in the lsm= boot parameter; binaries built
 with cgo need Linux 7.0 (Landlock ABI 8);
 .IP \(bu 2
@@ -207,14 +308,17 @@ writes text from the input into the HTML report only as text, and gives the
 page a content security policy that allows no network access and no script
 but its own.
 .PP
-The reports show the rules of the host. Keep them where only the right persons
-can read them.
+The reports and the snapshots show the rules of the host. Keep them where only
+the right persons can read them.
 .SH SEE ALSO
 .BR iptables (8),
 .BR ip6tables (8),
 .BR iptables\-save (8),
 .BR ip6tables\-save (8),
 .BR iptables\-apply (8),
+.BR ipset (8),
+.BR nft (8),
+.BR ip\-route (8),
 .BR ss (8)
 .SH AUTHORS
 iptables\-analyzer was written by c0m4r.

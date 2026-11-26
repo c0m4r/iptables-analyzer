@@ -11,7 +11,15 @@ import (
 	"github.com/c0m4r/iptables-analyzer/internal/textsafe"
 )
 
-// Parse parses iptables-save format output into a Ruleset
+// Parse parses the output of iptables-save into a Ruleset. It also reads
+// the output of "iptables -S", which lists one table without naming it:
+//
+//	-P INPUT DROP
+//	-N f2b-sshd
+//	-A INPUT -p tcp -m tcp --dport 22 -j f2b-sshd
+//
+// The table of such a listing is told from the chains whose policy it
+// states. The listings of several tables can follow each other in one file.
 func Parse(data string, ipVersion models.IPVersion) (*models.Ruleset, error) {
 	rs := &models.Ruleset{
 		IPVersion: ipVersion,
@@ -23,6 +31,21 @@ func Parse(data string, ipVersion models.IPVersion) (*models.Ruleset, error) {
 	var currentTable *models.Table
 	var parseErrs []error
 	lineNum := 0
+	// A listing has no table lines. listed is true inside the table of a
+	// listing; policies holds the -P lines of the table that starts, until
+	// its other lines follow; named is true after a table line was read.
+	listed, named := false, false
+	var policies [][2]string
+	// openListing makes the table of the -P lines that were read.
+	openListing := func() error {
+		table, err := listingTable(rs, policies)
+		policies = nil
+		if err != nil {
+			return err
+		}
+		currentTable, listed = table, true
+		return nil
+	}
 
 	for scanner.Scan() {
 		lineNum++
@@ -42,9 +65,41 @@ func Parse(data string, ipVersion models.IPVersion) (*models.Ruleset, error) {
 			continue
 		}
 
+		// The lines of a listing: -P opens a table, and the first other line
+		// after the -P lines tells that all of them were read.
+		policyLine := strings.HasPrefix(normalizedLine, "-P ")
+		if policyLine && !named && (currentTable == nil || listed) {
+			fields := strings.Fields(normalizedLine)
+			if len(fields) != 3 || (fields[2] != "ACCEPT" && fields[2] != "DROP") {
+				parseErrs = append(parseErrs, fmt.Errorf("line %d: invalid policy line %q", lineNum, line))
+				continue
+			}
+			currentTable, listed = nil, false // the table before this one is complete
+			// The chains of a listing come in the order of the hooks. A chain
+			// that is not behind the last one starts the next table.
+			if n := len(policies); n > 0 && hookOrder[fields[1]] <= hookOrder[policies[n-1][0]] {
+				if err := openListing(); err != nil {
+					parseErrs = append(parseErrs, fmt.Errorf("line %d: %w", lineNum, err))
+				}
+				currentTable, listed = nil, false
+			}
+			policies = append(policies, [2]string{fields[1], fields[2]})
+			continue
+		}
+		if len(policies) > 0 {
+			if err := openListing(); err != nil {
+				parseErrs = append(parseErrs, fmt.Errorf("line %d: %w", lineNum, err))
+			}
+		}
+
 		switch {
 		case strings.HasPrefix(normalizedLine, "*"):
 			// Table declaration: *filter, *nat, *mangle, *raw
+			named = true
+			if listed {
+				parseErrs = append(parseErrs, fmt.Errorf("line %d: a table line after the lines of a listing (iptables -S)", lineNum))
+				currentTable, listed = nil, false
+			}
 			if currentTable != nil {
 				parseErrs = append(parseErrs, fmt.Errorf("line %d: table %q is missing COMMIT", lineNum, currentTable.Name))
 			}
@@ -80,23 +135,83 @@ func Parse(data string, ipVersion models.IPVersion) (*models.Ruleset, error) {
 			}
 			currentTable.Chains[chain.Name] = chain
 
-		case strings.HasPrefix(normalizedLine, "-A "):
+		case policyLine:
+			// "-P CHAIN POLICY" in a table of a rules file sets the policy.
+			fields := strings.Fields(normalizedLine)
+			if currentTable == nil || len(fields) != 3 || (fields[2] != "ACCEPT" && fields[2] != "DROP") {
+				parseErrs = append(parseErrs, fmt.Errorf("line %d: invalid policy line %q", lineNum, line))
+				continue
+			}
+			chain, ok := currentTable.Chains[fields[1]]
+			if !ok || !isBuiltinChain(currentTable.Name, fields[1]) {
+				parseErrs = append(parseErrs, fmt.Errorf("line %d: policy for %q, which is no built-in chain of table %s", lineNum, fields[1], currentTable.Name))
+				continue
+			}
+			chain.Policy = fields[2]
+
+		case strings.HasPrefix(normalizedLine, "-N "):
+			// "-N CHAIN" declares a user-defined chain.
+			fields := strings.Fields(normalizedLine)
+			switch {
+			case currentTable == nil:
+				parseErrs = append(parseErrs, fmt.Errorf("line %d: chain %q outside a table; a listing (iptables -S) starts with its -P lines", lineNum, line))
+			case len(fields) != 2 || isBuiltinChain(currentTable.Name, fields[1]):
+				parseErrs = append(parseErrs, fmt.Errorf("line %d: invalid chain line %q", lineNum, line))
+			case currentTable.Chains[fields[1]] != nil:
+				parseErrs = append(parseErrs, fmt.Errorf("line %d: duplicate chain %q", lineNum, fields[1]))
+			default:
+				currentTable.Chains[fields[1]] = &models.Chain{Name: fields[1]}
+			}
+
+		case strings.HasPrefix(normalizedLine, "-A "), strings.HasPrefix(normalizedLine, "-I "):
 			// Rule: -A INPUT -p tcp --dport 22 -j ACCEPT
 			if currentTable == nil {
 				parseErrs = append(parseErrs, fmt.Errorf("line %d: rule outside a table", lineNum))
 				continue
+			}
+			// "-I CHAIN [N] ..." puts the rule in front of rule N, or first.
+			position, insert := 0, false
+			if strings.HasPrefix(normalizedLine, "-I ") {
+				insert = true
+				fields := strings.Fields(normalizedLine)
+				if len(fields) < 2 {
+					parseErrs = append(parseErrs, fmt.Errorf("line %d: invalid rule %q", lineNum, line))
+					continue
+				}
+				position = 1
+				rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(normalizedLine, "-I"), " "+fields[1]))
+				if len(fields) > 2 {
+					if number, err := strconv.Atoi(fields[2]); err == nil {
+						position = number
+						rest = strings.TrimSpace(strings.TrimPrefix(rest, fields[2]))
+					}
+				}
+				normalizedLine = strings.TrimSpace("-A " + fields[1] + " " + rest)
+				line = normalizedLine
 			}
 			rule, err := parseRule(normalizedLine, currentTable.Name, ipVersion)
 			if err != nil {
 				parseErrs = append(parseErrs, fmt.Errorf("line %d: %w", lineNum, err))
 				continue
 			}
-			if ch, ok := currentTable.Chains[rule.Chain]; ok {
+			ch, ok := currentTable.Chains[rule.Chain]
+			switch {
+			case !ok:
+				parseErrs = append(parseErrs, fmt.Errorf("line %d: rule references undeclared chain %q", lineNum, rule.Chain))
+			case !insert:
 				rule.RawLine = line
 				rule.RuleNum = len(ch.Rules) + 1
 				ch.Rules = append(ch.Rules, rule)
-			} else {
-				parseErrs = append(parseErrs, fmt.Errorf("line %d: rule references undeclared chain %q", lineNum, rule.Chain))
+			case position < 1 || position > len(ch.Rules)+1:
+				parseErrs = append(parseErrs, fmt.Errorf("line %d: rule number %d is not in chain %q", lineNum, position, rule.Chain))
+			default:
+				rule.RawLine = line
+				ch.Rules = append(ch.Rules, models.Rule{})
+				copy(ch.Rules[position:], ch.Rules[position-1:])
+				ch.Rules[position-1] = rule
+				for i := range ch.Rules {
+					ch.Rules[i].RuleNum = i + 1
+				}
 			}
 
 		case normalizedLine == "-F" || strings.HasPrefix(normalizedLine, "-F ") || strings.HasPrefix(normalizedLine, "--flush"):
@@ -138,7 +253,13 @@ func Parse(data string, ipVersion models.IPVersion) (*models.Ruleset, error) {
 	if err := scanner.Err(); err != nil {
 		parseErrs = append(parseErrs, err)
 	}
-	if currentTable != nil {
+	if len(policies) > 0 {
+		// A listing of a table without chains and rules of its own.
+		if err := openListing(); err != nil {
+			parseErrs = append(parseErrs, err)
+		}
+	}
+	if currentTable != nil && !listed {
 		parseErrs = append(parseErrs, fmt.Errorf("table %q is missing COMMIT", currentTable.Name))
 	}
 	if len(rs.Tables) == 0 {
@@ -146,6 +267,51 @@ func Parse(data string, ipVersion models.IPVersion) (*models.Ruleset, error) {
 	}
 
 	return rs, errors.Join(parseErrs...)
+}
+
+// hookOrder is the order in which a listing prints the built-in chains.
+var hookOrder = map[string]int{"PREROUTING": 1, "INPUT": 2, "FORWARD": 3, "OUTPUT": 4, "POSTROUTING": 5}
+
+// listingTable makes the table of a listing (iptables -S) from its -P lines.
+// The built-in chains tell the table: a listing does not name it.
+func listingTable(rs *models.Ruleset, policies [][2]string) (*models.Table, error) {
+	chains := map[string]bool{}
+	for _, policy := range policies {
+		if chains[policy[0]] {
+			return nil, fmt.Errorf("two policies for chain %q in one listing", policy[0])
+		}
+		chains[policy[0]] = true
+	}
+	name := ""
+	for _, candidate := range []string{"filter", "security", "nat", "mangle", "raw"} {
+		if _, exists := rs.Tables[candidate]; exists {
+			continue
+		}
+		fits := len(chains) > 0
+		for chain := range chains {
+			fits = fits && isBuiltinChain(candidate, chain)
+		}
+		for _, chain := range []string{"PREROUTING", "INPUT", "FORWARD", "OUTPUT", "POSTROUTING"} {
+			fits = fits && (!isBuiltinChain(candidate, chain) || chains[chain])
+		}
+		if fits {
+			name = candidate
+			break
+		}
+	}
+	if name == "" {
+		var names []string
+		for _, policy := range policies {
+			names = append(names, policy[0])
+		}
+		return nil, fmt.Errorf("a listing (iptables -S) with the policies of %s is no table, or the table is listed twice", strings.Join(names, ", "))
+	}
+	table := &models.Table{Name: name, Chains: map[string]*models.Chain{}}
+	for _, policy := range policies {
+		table.Chains[policy[0]] = &models.Chain{Name: policy[0], Policy: policy[1]}
+	}
+	rs.Tables[name] = table
+	return table, nil
 }
 
 // ParseNoTables returns the ruleset of iptables-save output that holds no

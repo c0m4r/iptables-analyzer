@@ -121,3 +121,12 @@ func FuzzEscape(f *testing.F) {
 		}
 	})
 }
+
+func TestNameShowsTabs(t *testing.T) {
+	if got := Name("web\t01\x1b[0m"); got != "web^I01^[[0m" {
+		t.Errorf("Name = %q", got)
+	}
+	if got := Name("eth0"); got != "eth0" {
+		t.Errorf("a plain name must stay: %q", got)
+	}
+}

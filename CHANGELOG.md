@@ -34,7 +34,24 @@ This release changes the report, the JSON form and some options. See "Changed" b
 - conditions on open ports (`condition`): rate limit, connection limit, time window, source port
 - service status `INTERNAL` for listeners that only containers or virtual machines of the host reach (`docker0`, `virbr0`, ...)
 - family status (`families[].status`): analyzed, no rules loaded, excluded, not supplied, or unreadable (native nftables)
-- notes for rules that `iptables-save` cannot show (`iptables-legacy tables present`, `is incompatible, use 'nft' tool`) and for `REDIRECT` rules
+- notes for rules that `iptables-save` cannot show (`iptables-legacy tables present`, `is incompatible, use 'nft' tool`)
+- one simulation of incoming connections: a new connection is followed through `raw`, `mangle` and `nat` PREROUTING and then through INPUT or FORWARD with its new destination. Docker published ports, node ports and load-balancer addresses of Kubernetes (kube-proxy), port forwards of a router, and `REDIRECT` or `DNAT` to the host itself come out of the same procedure
+- ports that `nat/PREROUTING` sends to a different local port are in the list of open ports as `80 → 8080`, with the redirecting rule; the findings are about the port that the clients use (`open_ports[].redirect`, `open_ports[].address`, rule role `redirects`)
+- a port that the rules share among several destinations (the pods of a Kubernetes service) is one entry with all of them (`forwarded_ports[].destinations`)
+- `--trace PACKET`: the way of one packet through the rules, with the rules that it matches, a new destination from the nat table, and the verdict, for example `--trace 'tcp 203.0.113.5 -> :22 in eth0'`. The trace knows packet marks, and it lists how the packet ends when a rule that can match or not does match
+- `--expect accept|drop|reject`: with `--trace`, exit status 2 unless the verdict is the given one and certain
+- `--diff OLD NEW`: what differs between two inputs: the grades, the findings that are new, gone or changed, the ports of the host whose sources changed, and the ports that are sent to other hosts. `--fail-on` then judges what the new input adds
+- `--snapshot FILE`: all that a live analysis reads, in one JSON file. The tool reads the file like the host itself, on any system and without root
+- host facts in live analysis and in snapshots: `ip_forward` and IPv6 forwarding, `rp_filter` with the IPv4 routes, `route_localnet`, the contents of the ipsets (`ipset save`), and the list of nftables tables (`nft list chains`)
+- `--ipset-file FILE`: the contents of the ipsets for saved rules. A `-m set --match-set NAME src` match against a set of addresses or networks is then evaluated like `-s`
+- a note and the grade `INCOMPLETE` when an nftables table that iptables does not manage has a chain on the way of incoming packets
+- with `rp_filter` and the routes known, a rule for one interface opens its port only to the sources that can arrive there; a note shows the limit
+- the output of `iptables -S` and `ip6tables -S` as input, also with the listings of several tables in one file
+- fixes in the commands of the program that writes the rules: `firewall-cmd` for firewalld, `csf.allow` and `csf -r` for csf, `/etc/shorewall/rules` for shorewall, and for Kubernetes a rule in the raw table in front of the translation
+- chain owners csf, shorewall and flannel
+- fixtures for a Kubernetes node, fail2ban, libvirt, firewalld and a router (rules and a snapshot)
+- a comparison with the Linux kernel in the tests: the rules of 11 scenarios are loaded with the real `iptables-restore` in network namespaces, real packets are sent, and the result must be that of `--trace` (`make test-kernel`; no root needed). A second test ties the analysis of all sources to the trace
+- fuzz targets for `--trace` and `--diff`, for the parsers of `ipset`, `nft` and `ip` output, and for the snapshot reader
 - a grade limit: F when INPUT accepts all new connections, D when it accepts by default for one protocol or interface, C for a critical Docker bypass (`score.cap` in JSON)
 - the baseline repeats the jumps of INPUT to chains of other programs (fail2ban, libvirt, Tailscale), lists the present `DOCKER-USER` rules as comments, keeps the FORWARD policy of hosts that route packets, and warns on hosts that ufw manages
 - modeled matches: `--syn` and `--tcp-flags` for the first packet of a connection, `iprange`, `multiport --ports`, `pkttype`
@@ -62,6 +79,10 @@ This release changes the report, the JSON form and some options. See "Changed" b
 - a Docker bypass is CRITICAL only when an INPUT rule names the port or the destination address
 - notes of one kind are one note with a count
 - source sets are sorted address ranges; the scope of sources follows from the addresses and no longer from the form of the rules
+- on a host that does not route packets (`ip_forward` is 0), FORWARD that accepts by default is a note without a deduction, and no port is reported as sent to a different host
+- the fix of a finding about several translated ports is written for one port and says how to do the same for the other ports, for ports of one address and for the other address family
+- `REDIRECT` rules no longer make the grade `INCOMPLETE`: the tool follows them. Only `NETMAP` and `TPROXY` rules give an assessment note
+- the cluster addresses of Kubernetes services are not examined; a note gives their number
 
 ### Removed
 
@@ -71,6 +92,9 @@ This release changes the report, the JSON form and some options. See "Changed" b
 
 ### Fixed
 
+- in live mode, a rule that names an address of the host (`-d 192.0.2.10`) never matched, because the addresses of the interfaces were stored without their host part
+- a rule that only may match (a packet mark) was named as the cause of a definite result
+- a tab in a host name or in the name of an interface was written to the terminal as it is
 - a ruleset that accepts all traffic by a rule (`-A INPUT -j ACCEPT` under a DROP policy) got grade A
 - wide accepts such as `-p tcp -j ACCEPT` were not reported without a matching listener
 - live analysis stopped with an error when `iptables-save` or `ip6tables-save` printed nothing, which is their output when no rules are loaded; an empty rules file was refused in the same way

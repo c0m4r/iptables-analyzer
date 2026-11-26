@@ -1,0 +1,70 @@
+iptables-analyzer vdev · file analysis · 2026-11-25 12:00
+inputs: ../testdata/firewalld.iptables-save, ../testdata/firewalld-services.txt
+IPv4: 38 rules in 24 chains (firewalld) · INPUT ACCEPT · FORWARD ACCEPT · OUTPUT ACCEPT
+IPv6: not supplied
+
+  Grade A  93/100    1 high · 2 low · 1 info
+
+  Policy                ▰▰▰▰▰▰▰▰▰▰ 25/25    Hygiene               ▰▰▰▰▰▰▰▰▰▰ 15/15
+  Exposure              ▰▰▰▰▰▰▰▱▱▱ 18/25    IPv6                  ▰▰▰▰▰▰▰▰▰▰ 10/10
+  Shadows and bypasses  ▰▰▰▰▰▰▰▰▰▰ 25/25    
+
+  note: No IPv6 rules were supplied: only IPv4 was analyzed, and IPv4 rules do not filter IPv6. Add
+  the output of ip6tables-save as another file.
+
+  Findings
+
+  HIGH     F1   sshd is open to any source on 22/tcp                                              -5
+                IPv4: accepted by filter/IN_public_allow rule #1.
+                filter/IN_public_allow #1:  -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW,UNTRACKED -j ACCEPT
+                  reached by INPUT #5 → INPUT_ZONES #1 → IN_public #3
+                fix  firewalld manages this rule, and a change made with iptables is lost when it
+                     writes its rules again. If the clients are known, allow the port for them and
+                     remove it for all others.
+                     Allow the known clients:
+                       firewall-cmd --permanent --zone=public --add-rich-rule='rule family="ipv4" source address="<trusted-cidr>" port port="22" protocol="tcp" accept'
+                     Remove the port for any source (when the zone lists it as a service, use
+                     --remove-service=NAME):
+                       firewall-cmd --permanent --zone=public --remove-port=22/tcp
+                     Load the permanent configuration:
+                       firewall-cmd --reload
+
+  LOW      F2   httpd is open to any source on 80/tcp                                             -1
+                IPv4: accepted by filter/IN_public_allow rule #2.
+                filter/IN_public_allow #2:  -p tcp -m tcp --dport 80 -m conntrack --ctstate NEW,UNTRACKED -j ACCEPT
+                  reached by INPUT #5 → INPUT_ZONES #1 → IN_public #3
+                fix  firewalld manages this rule, and a change made with iptables is lost when it
+                     writes its rules again. If the clients are known, allow the port for them and
+                     remove it for all others.
+                     Allow the known clients:
+                       firewall-cmd --permanent --zone=public --add-rich-rule='rule family="ipv4" source address="<trusted-cidr>" port port="80" protocol="tcp" accept'
+                     Remove the port for any source (when the zone lists it as a service, use
+                     --remove-service=NAME):
+                       firewall-cmd --permanent --zone=public --remove-port=80/tcp
+                     Load the permanent configuration:
+                       firewall-cmd --reload
+
+  LOW      F3   httpd is open to any source on 443/tcp                                            -1
+                IPv4: accepted by filter/IN_public_allow rule #3.
+                filter/IN_public_allow #3:  -p tcp -m tcp --dport 443 -m conntrack --ctstate NEW,UNTRACKED -j ACCEPT
+                  reached by INPUT #5 → INPUT_ZONES #1 → IN_public #3
+                fix  firewalld manages this rule, and a change made with iptables is lost when it
+                     writes its rules again. If the clients are known, allow the port for them and
+                     remove it for all others.
+                     Allow the known clients:
+                       firewall-cmd --permanent --zone=public --add-rich-rule='rule family="ipv4" source address="<trusted-cidr>" port port="443" protocol="tcp" accept'
+                     Remove the port for any source (when the zone lists it as a service, use
+                     --remove-service=NAME):
+                       firewall-cmd --permanent --zone=public --remove-port=443/tcp
+                     Load the permanent configuration:
+                       firewall-cmd --reload
+
+  Open to any source
+    tcp  22 sshd · 80 httpd · 443 httpd
+
+  Open to restricted sources
+    tcp  5432 postmaster (private networks)
+
+  Not shown: 38 rules (--rules) · 1 info finding, 5 listening sockets (-v) · recommended baseline
+  (--baseline)
+  Interactive report: --html FILE · machine-readable: --json

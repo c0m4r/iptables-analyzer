@@ -1,0 +1,46 @@
+iptables-analyzer vdev · snapshot of gw01 from 2026-11-25 04:46 · 2026-11-25 12:00
+inputs: ../testdata/router.snapshot.json
+IPv4: 20 rules in 7 chains · INPUT DROP · FORWARD DROP · OUTPUT ACCEPT
+IPv6: not supplied
+
+  Grade A  96/100    1 medium · 1 info
+
+  Policy                ▰▰▰▰▰▰▰▰▰▰ 25/25    Hygiene               ▰▰▰▰▰▰▰▰▰▰ 15/15
+  Exposure              ▰▰▰▰▰▰▰▰▱▱ 21/25    IPv6                  ▰▰▰▰▰▰▰▰▰▰ 10/10
+  Shadows and bypasses  ▰▰▰▰▰▰▰▰▰▰ 25/25    
+
+  note: IPv4: the reverse-path filter of the kernel (rp_filter is 1) limits the sources of packets
+  that arrive on eth0 to all but 192.168.1.0/24. The scopes in this report take that into account.
+  note: IPv4: the reverse-path filter of the kernel (rp_filter is 1) limits the sources of packets
+  that arrive on eth1 to 192.168.1.0/24. The scopes in this report take that into account.
+  note: No IPv6 rules were supplied: only IPv4 was analyzed, and IPv4 rules do not filter IPv6. Add
+  the output of ip6tables-save as another file.
+
+  Findings
+
+  MEDIUM   F1   2 forwarded ports are open to any source                                          -4
+                nat/PREROUTING translates these ports to another host, and filter/FORWARD accepts
+                them from any source; the rules of filter/INPUT do not apply: IPv4 51820/udp to
+                192.168.1.20:51820 (via eth0); IPv4 8443/tcp to 192.168.1.50:443 (via eth0).
+                fix  Each of these ports is translated by its rule in nat/PREROUTING and then passes
+                     filter/FORWARD, not filter/INPUT. If only known clients need a port, add their
+                     sources (-s <trusted-cidr>) to its rule or to the FORWARD rule that accepts its
+                     traffic. In FORWARD the packet has the translated address and port; match the
+                     port that the clients use with '-m conntrack --ctorigdstport PORT --ctdir
+                     ORIGINAL'.
+
+  Open to restricted sources
+    tcp  22 sshd (private networks, on eth1) · 53 dnsmasq (private networks, on eth1) · 80 → 3128
+         squid (private networks, on eth1) · 3128 squid (private networks, on eth1)
+    udp  53 dnsmasq (private networks, on eth1) · 67 dnsmasq (source port 68, private networks, on
+         eth1)
+
+  Translated to other hosts
+    2222/tcp → 192.168.1.10:22: specific public networks
+    8443/tcp → 192.168.1.50:443: any source
+    51820/udp → 192.168.1.20:51820: any source
+    These ports are translated in nat/PREROUTING and pass filter/FORWARD, not filter/INPUT.
+
+  Not shown: 20 rules (--rules) · 1 info finding, 5 listening sockets (-v) · recommended baseline
+  (--baseline)
+  Interactive report: --html FILE · machine-readable: --json

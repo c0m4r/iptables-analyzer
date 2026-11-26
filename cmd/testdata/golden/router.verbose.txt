@@ -1,0 +1,97 @@
+iptables-analyzer vdev · snapshot of gw01 from 2026-11-25 04:46 · 2026-11-25 12:00
+inputs: ../testdata/router.snapshot.json
+IPv4: 20 rules in 7 chains · INPUT DROP · FORWARD DROP · OUTPUT ACCEPT
+IPv6: not supplied
+
+  Grade A  96/100    1 medium · 1 info
+
+  Policy                ▰▰▰▰▰▰▰▰▰▰ 25/25    Hygiene               ▰▰▰▰▰▰▰▰▰▰ 15/15
+  Exposure              ▰▰▰▰▰▰▰▰▱▱ 21/25    IPv6                  ▰▰▰▰▰▰▰▰▰▰ 10/10
+  Shadows and bypasses  ▰▰▰▰▰▰▰▰▰▰ 25/25    
+
+  note: IPv4: the reverse-path filter of the kernel (rp_filter is 1) limits the sources of packets
+  that arrive on eth0 to all but 192.168.1.0/24. The scopes in this report take that into account.
+  note: IPv4: the reverse-path filter of the kernel (rp_filter is 1) limits the sources of packets
+  that arrive on eth1 to 192.168.1.0/24. The scopes in this report take that into account.
+  note: No IPv6 rules were supplied: only IPv4 was analyzed, and IPv4 rules do not filter IPv6. Add
+  the output of ip6tables-save as another file.
+
+  Findings
+
+  MEDIUM   F1   2 forwarded ports are open to any source                                          -4
+                nat/PREROUTING translates these ports to another host, and filter/FORWARD accepts
+                them from any source; the rules of filter/INPUT do not apply: IPv4 51820/udp to
+                192.168.1.20:51820 (via eth0); IPv4 8443/tcp to 192.168.1.50:443 (via eth0).
+                nat/PREROUTING #3:  -i eth0 -p udp -m udp --dport 51820 -j DNAT --to-destination 192.168.1.20:51820
+                nat/PREROUTING #1:  -i eth0 -p tcp -m tcp --dport 8443 -j DNAT --to-destination 192.168.1.50:443
+                fix  Each of these ports is translated by its rule in nat/PREROUTING and then passes
+                     filter/FORWARD, not filter/INPUT. If only known clients need a port, add their
+                     sources (-s <trusted-cidr>) to its rule or to the FORWARD rule that accepts its
+                     traffic. In FORWARD the packet has the translated address and port; match the
+                     port that the clients use with '-m conntrack --ctorigdstport PORT --ctdir
+                     ORIGINAL'.
+
+  INFO     F2   OUTPUT default policy is ACCEPT
+                All outbound traffic is allowed. This is the usual setup; an OUTPUT allowlist can
+                limit what a compromised service is able to reach.
+
+  Open to restricted sources
+    tcp  22 sshd (private networks, on eth1) · 53 dnsmasq (private networks, on eth1) · 80 → 3128
+         squid (private networks, on eth1) · 3128 squid (private networks, on eth1)
+    udp  53 dnsmasq (private networks, on eth1) · 67 dnsmasq (source port 68, private networks, on
+         eth1)
+
+  Translated to other hosts
+    2222/tcp → 192.168.1.10:22: specific public networks
+    8443/tcp → 192.168.1.50:443: any source
+    51820/udp → 192.168.1.20:51820: any source
+    These ports are translated in nat/PREROUTING and pass filter/FORWARD, not filter/INPUT.
+
+  Listening sockets
+    udp   53     192.168.1.1              dnsmasq            LOCALNET
+    udp   67     0.0.0.0%eth1             dnsmasq            LOCALNET
+    tcp   53     192.168.1.1              dnsmasq            LOCALNET
+    tcp   22     0.0.0.0                  sshd               LOCALNET
+    tcp   3128   *                        squid              LOCALNET
+
+  Sandbox
+    Landlock is not available
+
+  Rules, IPv4
+
+    filter/INPUT (policy DROP, 9 rules)
+       1 -i lo -j ACCEPT
+       2 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+       3 -m conntrack --ctstate INVALID -j DROP
+       4 -p icmp -m icmp --icmp-type 8 -m limit --limit 5/sec -j ACCEPT
+       5 -i eth1 -p tcp -m tcp --dport 22 -j ACCEPT
+       6 -i eth1 -p udp -m udp --dport 53 -j ACCEPT
+       7 -i eth1 -p tcp -m tcp --dport 53 -j ACCEPT
+       8 -i eth1 -p udp -m udp --sport 68 --dport 67 -j ACCEPT
+       9 -i eth1 -p tcp -m tcp --dport 3128 -j ACCEPT
+
+    filter/FORWARD (policy DROP, 6 rules)
+       1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+       2 -m conntrack --ctstate INVALID -j DROP
+       3 -i eth1 -o eth0 -j ACCEPT
+       4 -d 192.168.1.50/32 -i eth0 -o eth1 -p tcp -m tcp --dport 443 -j ACCEPT
+       5 -d 192.168.1.10/32 -i eth0 -o eth1 -p tcp -m tcp --dport 22 -j ACCEPT
+       6 -d 192.168.1.20/32 -i eth0 -o eth1 -p udp -m udp --dport 51820 -j ACCEPT
+
+    filter/OUTPUT (policy ACCEPT, 0 rules)
+
+    nat/PREROUTING (policy ACCEPT, 4 rules)
+       1 -i eth0 -p tcp -m tcp --dport 8443 -j DNAT --to-destination 192.168.1.50:443 [F1]
+       2 -s 203.0.113.0/24 -i eth0 -p tcp -m tcp --dport 2222 -j DNAT --to-destination 192.168.1.10:22
+       3 -i eth0 -p udp -m udp --dport 51820 -j DNAT --to-destination 192.168.1.20:51820 [F1]
+       4 -i eth1 -p tcp -m tcp --dport 80 -j REDIRECT --to-ports 3128
+
+    nat/INPUT (policy ACCEPT, 0 rules)
+
+    nat/OUTPUT (policy ACCEPT, 0 rules)
+
+    nat/POSTROUTING (policy ACCEPT, 1 rule)
+       1 -s 192.168.1.0/24 -o eth0 -j MASQUERADE
+
+  Not shown: recommended baseline (--baseline)
+  Interactive report: --html FILE · machine-readable: --json

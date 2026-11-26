@@ -113,7 +113,7 @@ func score(findings []Finding, notes []Note) Score {
 
 	areas := map[string]string{
 		"docker": "one or more translated ports",
-		"nat":    "ports redirected to local services",
+		"nat":    "address translation that is not followed (NETMAP, TPROXY)",
 		"rules":  "rules that could not be read or evaluated in full",
 	}
 	seen := map[string]bool{}

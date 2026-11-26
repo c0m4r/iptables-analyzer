@@ -1,0 +1,459 @@
+{
+  "schema_version": 2,
+  "tool": {
+    "name": "iptables-analyzer",
+    "version": "dev",
+    "url": "https://github.com/c0m4r/iptables-analyzer"
+  },
+  "generated": "2026-11-25T12:00:00Z",
+  "mode": "file",
+  "inputs": [
+    "../testdata/firewalld.iptables-save",
+    "../testdata/firewalld-services.txt"
+  ],
+  "families": [
+    {
+      "version": 4,
+      "status": "ANALYZED",
+      "tables": 1,
+      "chains": 24,
+      "rules": 38,
+      "policies": {
+        "FORWARD": "ACCEPT",
+        "INPUT": "ACCEPT",
+        "OUTPUT": "ACCEPT"
+      },
+      "managers": [
+        "firewalld"
+      ]
+    },
+    {
+      "version": 6,
+      "status": "NOT_SUPPLIED",
+      "tables": 0,
+      "chains": 0,
+      "rules": 0
+    }
+  ],
+  "score": {
+    "total": 93,
+    "grade": "A",
+    "complete": true,
+    "categories": [
+      {
+        "key": "policy",
+        "label": "Policy",
+        "max": 25,
+        "lost": 0
+      },
+      {
+        "key": "exposure",
+        "label": "Exposure",
+        "max": 25,
+        "lost": 7
+      },
+      {
+        "key": "paths",
+        "label": "Shadows and bypasses",
+        "max": 25,
+        "lost": 0
+      },
+      {
+        "key": "hygiene",
+        "label": "Hygiene",
+        "max": 15,
+        "lost": 0
+      },
+      {
+        "key": "ipv6",
+        "label": "IPv6",
+        "max": 10,
+        "lost": 0
+      }
+    ]
+  },
+  "counts": {
+    "critical": 0,
+    "high": 1,
+    "medium": 0,
+    "low": 2,
+    "info": 1
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "code": "exposed_service",
+      "severity": "HIGH",
+      "certainty": "DEFINITE",
+      "category": "exposure",
+      "families": [
+        4
+      ],
+      "title": "sshd is open to any source on 22/tcp",
+      "detail": "IPv4: accepted by filter/IN_public_allow rule #1.",
+      "ports": [
+        "22/tcp"
+      ],
+      "rules": [
+        {
+          "family": 4,
+          "table": "filter",
+          "chain": "IN_public_allow",
+          "num": 1,
+          "spec": "-p tcp -m tcp --dport 22 -m conntrack --ctstate NEW,UNTRACKED -j ACCEPT",
+          "role": "accepts",
+          "path": [
+            "INPUT #5",
+            "INPUT_ZONES #1",
+            "IN_public #3",
+            "IN_public_allow #1"
+          ]
+        }
+      ],
+      "fix": {
+        "summary": "firewalld manages this rule, and a change made with iptables is lost when it writes its rules again. If the clients are known, allow the port for them and remove it for all others.",
+        "steps": [
+          {
+            "text": "Allow the known clients",
+            "command": "firewall-cmd --permanent --zone=public --add-rich-rule='rule family=\"ipv4\" source address=\"\u003ctrusted-cidr\u003e\" port port=\"22\" protocol=\"tcp\" accept'"
+          },
+          {
+            "text": "Remove the port for any source (when the zone lists it as a service, use --remove-service=NAME)",
+            "command": "firewall-cmd --permanent --zone=public --remove-port=22/tcp"
+          },
+          {
+            "text": "Load the permanent configuration",
+            "command": "firewall-cmd --reload"
+          }
+        ]
+      },
+      "points": 5,
+      "gain": 5
+    },
+    {
+      "id": "F2",
+      "code": "exposed_service",
+      "severity": "LOW",
+      "certainty": "DEFINITE",
+      "category": "exposure",
+      "families": [
+        4
+      ],
+      "title": "httpd is open to any source on 80/tcp",
+      "detail": "IPv4: accepted by filter/IN_public_allow rule #2.",
+      "ports": [
+        "80/tcp"
+      ],
+      "rules": [
+        {
+          "family": 4,
+          "table": "filter",
+          "chain": "IN_public_allow",
+          "num": 2,
+          "spec": "-p tcp -m tcp --dport 80 -m conntrack --ctstate NEW,UNTRACKED -j ACCEPT",
+          "role": "accepts",
+          "path": [
+            "INPUT #5",
+            "INPUT_ZONES #1",
+            "IN_public #3",
+            "IN_public_allow #2"
+          ]
+        }
+      ],
+      "fix": {
+        "summary": "firewalld manages this rule, and a change made with iptables is lost when it writes its rules again. If the clients are known, allow the port for them and remove it for all others.",
+        "steps": [
+          {
+            "text": "Allow the known clients",
+            "command": "firewall-cmd --permanent --zone=public --add-rich-rule='rule family=\"ipv4\" source address=\"\u003ctrusted-cidr\u003e\" port port=\"80\" protocol=\"tcp\" accept'"
+          },
+          {
+            "text": "Remove the port for any source (when the zone lists it as a service, use --remove-service=NAME)",
+            "command": "firewall-cmd --permanent --zone=public --remove-port=80/tcp"
+          },
+          {
+            "text": "Load the permanent configuration",
+            "command": "firewall-cmd --reload"
+          }
+        ]
+      },
+      "points": 1,
+      "gain": 1
+    },
+    {
+      "id": "F3",
+      "code": "exposed_service",
+      "severity": "LOW",
+      "certainty": "DEFINITE",
+      "category": "exposure",
+      "families": [
+        4
+      ],
+      "title": "httpd is open to any source on 443/tcp",
+      "detail": "IPv4: accepted by filter/IN_public_allow rule #3.",
+      "ports": [
+        "443/tcp"
+      ],
+      "rules": [
+        {
+          "family": 4,
+          "table": "filter",
+          "chain": "IN_public_allow",
+          "num": 3,
+          "spec": "-p tcp -m tcp --dport 443 -m conntrack --ctstate NEW,UNTRACKED -j ACCEPT",
+          "role": "accepts",
+          "path": [
+            "INPUT #5",
+            "INPUT_ZONES #1",
+            "IN_public #3",
+            "IN_public_allow #3"
+          ]
+        }
+      ],
+      "fix": {
+        "summary": "firewalld manages this rule, and a change made with iptables is lost when it writes its rules again. If the clients are known, allow the port for them and remove it for all others.",
+        "steps": [
+          {
+            "text": "Allow the known clients",
+            "command": "firewall-cmd --permanent --zone=public --add-rich-rule='rule family=\"ipv4\" source address=\"\u003ctrusted-cidr\u003e\" port port=\"443\" protocol=\"tcp\" accept'"
+          },
+          {
+            "text": "Remove the port for any source (when the zone lists it as a service, use --remove-service=NAME)",
+            "command": "firewall-cmd --permanent --zone=public --remove-port=443/tcp"
+          },
+          {
+            "text": "Load the permanent configuration",
+            "command": "firewall-cmd --reload"
+          }
+        ]
+      },
+      "points": 1,
+      "gain": 1
+    },
+    {
+      "id": "F4",
+      "code": "policy_accept",
+      "severity": "INFO",
+      "certainty": "DEFINITE",
+      "category": "policy",
+      "families": [
+        4
+      ],
+      "title": "OUTPUT default policy is ACCEPT",
+      "detail": "All outbound traffic is allowed. This is the usual setup; an OUTPUT allowlist can limit what a compromised service is able to reach.",
+      "points": 0,
+      "gain": 0
+    }
+  ],
+  "open_ports": [
+    {
+      "families": [
+        4
+      ],
+      "protocol": "tcp",
+      "first": 22,
+      "last": 22,
+      "scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "rules": [
+        {
+          "family": 4,
+          "table": "filter",
+          "chain": "IN_public_allow",
+          "num": 1,
+          "spec": "-p tcp -m tcp --dport 22 -m conntrack --ctstate NEW,UNTRACKED -j ACCEPT",
+          "role": "accepts",
+          "path": [
+            "INPUT #5",
+            "INPUT_ZONES #1",
+            "IN_public #3",
+            "IN_public_allow #1"
+          ]
+        }
+      ],
+      "listeners": [
+        "sshd"
+      ]
+    },
+    {
+      "families": [
+        4
+      ],
+      "protocol": "tcp",
+      "first": 80,
+      "last": 80,
+      "scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "rules": [
+        {
+          "family": 4,
+          "table": "filter",
+          "chain": "IN_public_allow",
+          "num": 2,
+          "spec": "-p tcp -m tcp --dport 80 -m conntrack --ctstate NEW,UNTRACKED -j ACCEPT",
+          "role": "accepts",
+          "path": [
+            "INPUT #5",
+            "INPUT_ZONES #1",
+            "IN_public #3",
+            "IN_public_allow #2"
+          ]
+        }
+      ],
+      "listeners": [
+        "httpd"
+      ]
+    },
+    {
+      "families": [
+        4
+      ],
+      "protocol": "tcp",
+      "first": 443,
+      "last": 443,
+      "scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "rules": [
+        {
+          "family": 4,
+          "table": "filter",
+          "chain": "IN_public_allow",
+          "num": 3,
+          "spec": "-p tcp -m tcp --dport 443 -m conntrack --ctstate NEW,UNTRACKED -j ACCEPT",
+          "role": "accepts",
+          "path": [
+            "INPUT #5",
+            "INPUT_ZONES #1",
+            "IN_public #3",
+            "IN_public_allow #3"
+          ]
+        }
+      ],
+      "listeners": [
+        "httpd"
+      ]
+    },
+    {
+      "families": [
+        4
+      ],
+      "protocol": "tcp",
+      "first": 5432,
+      "last": 5432,
+      "scope": "LOCALNET",
+      "certainty": "DEFINITE",
+      "rules": [
+        {
+          "family": 4,
+          "table": "filter",
+          "chain": "IN_public_allow",
+          "num": 4,
+          "spec": "-s 10.0.0.0/8 -p tcp -m tcp --dport 5432 -m conntrack --ctstate NEW,UNTRACKED -j ACCEPT",
+          "role": "accepts",
+          "path": [
+            "INPUT #5",
+            "INPUT_ZONES #1",
+            "IN_public #3",
+            "IN_public_allow #4"
+          ]
+        }
+      ],
+      "listeners": [
+        "postmaster"
+      ]
+    }
+  ],
+  "forwarded_ports": [],
+  "services_known": true,
+  "services": [
+    {
+      "protocol": "tcp",
+      "address": "0.0.0.0",
+      "port": 22,
+      "process": "sshd",
+      "pid": 1021,
+      "processes": [
+        "sshd"
+      ],
+      "socket_family": "ipv4",
+      "status": "REACHABLE",
+      "scope": "EXPOSED"
+    },
+    {
+      "protocol": "tcp",
+      "address": "0.0.0.0",
+      "port": 80,
+      "process": "httpd",
+      "pid": 1500,
+      "processes": [
+        "httpd"
+      ],
+      "socket_family": "ipv4",
+      "status": "REACHABLE",
+      "scope": "EXPOSED"
+    },
+    {
+      "protocol": "tcp",
+      "address": "0.0.0.0",
+      "port": 443,
+      "process": "httpd",
+      "pid": 1500,
+      "processes": [
+        "httpd"
+      ],
+      "socket_family": "ipv4",
+      "status": "REACHABLE",
+      "scope": "EXPOSED"
+    },
+    {
+      "protocol": "tcp",
+      "address": "0.0.0.0",
+      "port": 5432,
+      "process": "postmaster",
+      "pid": 1610,
+      "processes": [
+        "postmaster"
+      ],
+      "socket_family": "ipv4",
+      "status": "REACHABLE",
+      "scope": "LOCALNET"
+    },
+    {
+      "protocol": "tcp",
+      "address": "127.0.0.1",
+      "port": 25,
+      "process": "master",
+      "pid": 1300,
+      "processes": [
+        "master"
+      ],
+      "socket_family": "ipv4",
+      "status": "LOCALHOST"
+    }
+  ],
+  "notes": [
+    {
+      "kind": "scope",
+      "text": "No IPv6 rules were supplied: only IPv4 was analyzed, and IPv4 rules do not filter IPv6. Add the output of ip6tables-save as another file."
+    }
+  ],
+  "sandbox": {
+    "mode": "auto",
+    "landlock": false,
+    "privileges_dropped": false
+  },
+  "baseline": {
+    "ipv4": "# Recommended IPv4 baseline generated by iptables-analyzer (iptables-restore format).\n# Default deny inbound traffic; outbound traffic is allowed. FORWARD keeps its\n# policy: this host routes packets by rules that this file does not replace.\n# Apply with \"iptables-restore --noflush\": it replaces INPUT and keeps every\n# other chain, including Docker's, intact.\n*filter\n:INPUT DROP [0:0]\n:FORWARD ACCEPT [0:0]\n:OUTPUT ACCEPT [0:0]\n-F INPUT\n-A INPUT -i lo -j ACCEPT\n-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n-A INPUT -m conntrack --ctstate INVALID -j DROP\n-A INPUT -s 127.0.0.0/8 ! -i lo -j DROP\n-A INPUT -p icmp -m icmp --icmp-type 8 -m limit --limit 10/sec --limit-burst 20 -j ACCEPT\n# Jumps of the present INPUT chain to chains that other programs manage.\n# They are repeated here because INPUT is flushed. A chain that accepts\n# traffic decides before the rules below: review what each one admits.\n-A INPUT -j INPUT_direct\n-A INPUT -j INPUT_ZONES_SOURCE\n-A INPUT -j INPUT_ZONES\n# Remote administration: new SSH connections are limited per source address.\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh4-22 -j DROP\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT\n# Other listening services found on this host. Uncomment only what must be\n# reachable, preferably with -s \u003ctrusted-cidr\u003e:\n# -A INPUT -p tcp -m tcp --dport 80 -m conntrack --ctstate NEW -j ACCEPT   # httpd\n# -A INPUT -p tcp -m tcp --dport 443 -m conntrack --ctstate NEW -j ACCEPT   # httpd\n# -A INPUT -p tcp -m tcp --dport 5432 -m conntrack --ctstate NEW -j ACCEPT   # postmaster\nCOMMIT\n",
+    "ipv6": "# Recommended IPv6 baseline generated by iptables-analyzer (ip6tables-restore format).\n# Default deny inbound and forwarded traffic; outbound traffic is allowed.\n# Apply with \"ip6tables-restore --noflush\": it replaces INPUT and keeps every\n# other chain, including Docker's, intact.\n*filter\n:INPUT DROP [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\n-F INPUT\n-A INPUT -i lo -j ACCEPT\n-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n# Neighbor discovery is untracked by conntrack and must be allowed explicitly;\n# a hop limit of 255 proves the sender is on-link.\n-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 134 -m hl --hl-eq 255 -m comment --comment \"router advertisement (SLAAC)\" -j ACCEPT\n-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 135 -m hl --hl-eq 255 -m comment --comment \"neighbor solicitation\" -j ACCEPT\n-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 136 -m hl --hl-eq 255 -m comment --comment \"neighbor advertisement\" -j ACCEPT\n-A INPUT -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 130 -m comment --comment \"multicast listener query\" -j ACCEPT\n-A INPUT -s fe80::/10 -d fe80::/10 -p udp -m udp --sport 547 --dport 546 -m comment --comment \"DHCPv6 client\" -j ACCEPT\n-A INPUT -m conntrack --ctstate INVALID -j DROP\n-A INPUT -s ::1/128 ! -i lo -j DROP\n-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 128 -m limit --limit 10/sec --limit-burst 20 -j ACCEPT\n# Remote administration: new SSH connections are limited per source address.\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh6-22 -j DROP\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT\nCOMMIT\n",
+    "notes": [
+      "SSH stays reachable on TCP port 22 (detected from the listening sshd).",
+      "Both families are always generated: IPv6 gets addresses automatically (SLAAC), so an unused stack must be closed too.",
+      "Keep a second SSH session open and apply with an automatic rollback, for example:",
+      "  printf '#!/bin/sh\\nexec iptables-restore --noflush /root/baseline.v4\\n' \u003e /root/apply.v4 \u0026\u0026 chmod +x /root/apply.v4 \u0026\u0026 iptables-apply -t 60 -c /root/apply.v4",
+      "  printf '#!/bin/sh\\nexec ip6tables-restore --noflush /root/baseline.v6\\n' \u003e /root/apply.v6 \u0026\u0026 chmod +x /root/apply.v6 \u0026\u0026 ip6tables-apply -t 60 -c /root/apply.v6",
+      "Persist the result with your distribution's mechanism (e.g. iptables-save \u003e /etc/iptables/rules.v4 with iptables-persistent).",
+      "The baseline keeps the jumps of INPUT to chains of other programs (INPUT_direct, INPUT_ZONES_SOURCE, INPUT_ZONES). Rules in those chains are not part of the baseline: a chain that accepts traffic opens it whatever the baseline says.",
+      "IPv4 FORWARD keeps its policy (ACCEPT): this host routes packets, and the baseline does not replace its forwarding rules."
+    ]
+  }
+}

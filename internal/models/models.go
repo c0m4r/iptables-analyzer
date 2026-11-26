@@ -355,12 +355,15 @@ type ShadowFinding struct {
 // path makes ineffective, or a container endpoint reachable around the
 // host firewall. Code distinguishes the individual finding kinds.
 type DockerBypassFinding struct {
-	Code          FindingCode
-	Certainty     Certainty
-	IPVersion     IPVersion
-	InputRule     Rule
-	NATRule       Rule
-	Rule          *Rule // the ineffective or fragile user rule, when one is involved
+	Code      FindingCode
+	Certainty Certainty
+	IPVersion IPVersion
+	InputRule Rule
+	NATRule   Rule
+	Rule      *Rule // the ineffective or fragile user rule, when one is involved
+	// HostAddr is the local address of a translated port, when the
+	// translation holds for one address only.
+	HostAddr      string `json:",omitempty"`
 	ExposedPort   string
 	ContainerDest string
 	Bridge        string
@@ -372,21 +375,25 @@ type DockerBypassFinding struct {
 	Severity      Severity
 }
 
-// PublishedPort is one host port translated by nat/PREROUTING to a forwarded
-// destination, together with the verdicts of both packet paths.
+// PublishedPort is a range of host ports that nat/PREROUTING translates to a
+// forwarded destination, together with the verdicts of both packet paths.
 type PublishedPort struct {
-	IPVersion     IPVersion
-	Protocol      Protocol
-	HostAddr      string // empty when the DNAT rule matches every local address
-	HostPort      int
+	IPVersion IPVersion
+	Protocol  Protocol
+	HostAddr  string // empty when the translation holds for every local address
+	HostPort  int
+	// HostPortEnd is the last port of the range; 0 or HostPort for one port.
+	HostPortEnd   int `json:",omitempty"`
 	ContainerAddr string
 	ContainerPort int
-	Bridge        string
-	NATRule       Rule
-	ForwardScope  AccessScope // "" when no source reaches the container
-	InputScope    AccessScope // what filter/INPUT would decide for the same packet
-	Certainty     Certainty
-	Interfaces    []string
+	// ContainerPortEnd is the last destination port of the range.
+	ContainerPortEnd int `json:",omitempty"`
+	Bridge           string
+	NATRule          Rule
+	ForwardScope     AccessScope // "" when no source reaches the container
+	InputScope       AccessScope // what filter/INPUT would decide for the same packet
+	Certainty        Certainty
+	Interfaces       []string
 }
 
 // OpenPort is a range of destination ports for which the firewall accepts
@@ -406,6 +413,26 @@ type OpenPort struct {
 	// Unnamed is true for ports that no rule names: they show what the
 	// firewall does by default.
 	Unnamed bool `json:",omitempty"`
+	// Address is the local address for which the entry holds, when a rule of
+	// nat/PREROUTING names one; empty for every other local address.
+	Address string `json:",omitempty"`
+	// NATRule is the rule of nat/PREROUTING that sends the connections to
+	// another local port or address (REDIRECT, or DNAT to an address of this
+	// host) before INPUT sees them. nil when the port is not translated.
+	NATRule *Rule `json:",omitempty"`
+	// LocalPort and LocalPortEnd are the ports that receive the connections to
+	// First and Last after NATRule. LocalAddr is the new local address; it is
+	// empty for REDIRECT, which uses the address of the ingress interface.
+	// INPUT judges the packet by the new port and address.
+	LocalPort    int    `json:",omitempty"`
+	LocalPortEnd int    `json:",omitempty"`
+	LocalAddr    string `json:",omitempty"`
+}
+
+// Redirected reports whether nat/PREROUTING sends the ports to other local
+// ports or to another local address.
+func (p *OpenPort) Redirected() bool {
+	return p.NATRule != nil && (p.LocalPort != p.First || p.LocalPortEnd != p.Last || p.LocalAddr != "")
 }
 
 // HostInterface describes one network interface of the analyzed host.
@@ -416,10 +443,84 @@ type HostInterface struct {
 }
 
 // HostContext carries facts about the analyzed host that are not contained in
-// the rulesets. It is only populated in live mode; nil means unknown.
+// the rulesets. Live analysis and a snapshot supply them; nil means that
+// none is known, and every part can be missing by itself.
 type HostContext struct {
+	// Interfaces is empty when the interfaces of the host are not known.
 	Interfaces []HostInterface
 	Hostname   string `json:",omitempty"`
+	// Sysctls holds kernel settings by name, such as "net.ipv4.ip_forward",
+	// as far as they were read.
+	Sysctls map[string]string `json:",omitempty"`
+	// NativeTables lists the nftables tables that iptables-save does not
+	// print. NativeKnown is false when the list was not read.
+	NativeTables []NativeTable `json:",omitempty"`
+	NativeKnown  bool          `json:",omitempty"`
+	// IPSets holds the contents of the sets that "ipset save" printed, by
+	// name. nil when they were not read.
+	IPSets map[string]IPSet `json:",omitempty"`
+	// Routes is the main IPv4 routing table. RoutesKnown is false when it
+	// was not read.
+	Routes      []Route `json:",omitempty"`
+	RoutesKnown bool    `json:",omitempty"`
+}
+
+// Route is one entry of the routing table.
+type Route struct {
+	// Destination is a network such as "192.168.1.0/24"; the default route
+	// is "0.0.0.0/0".
+	Destination string
+	// Devices are the interfaces through which the route leaves. A route
+	// that rejects packets (blackhole, unreachable) has none.
+	Devices []string `json:",omitempty"`
+	Metric  int      `json:",omitempty"`
+}
+
+// Sysctl returns a kernel setting, and whether it was read.
+func (h *HostContext) Sysctl(name string) (string, bool) {
+	if h == nil {
+		return "", false
+	}
+	value, ok := h.Sysctls[name]
+	return value, ok
+}
+
+// Forwarding reports whether the host routes packets of an address family
+// for other hosts. known is false when the setting was not read.
+func (h *HostContext) Forwarding(version IPVersion) (on, known bool) {
+	name := "net.ipv4.ip_forward"
+	if version == IPv6 {
+		name = "net.ipv6.conf.all.forwarding"
+	}
+	value, ok := h.Sysctl(name)
+	return ok && value != "0", ok
+}
+
+// NativeTable is a table of nftables that is not one of the tables that
+// iptables manages. Its rules filter packets too.
+type NativeTable struct {
+	Family string // ip, ip6, inet or netdev
+	Name   string
+	// Hooks names the hooks of its base chains: ingress, prerouting, input,
+	// forward, output, postrouting.
+	Hooks []string `json:",omitempty"`
+}
+
+// IPSet is the content of one set of the ipset tool.
+type IPSet struct {
+	Name   string
+	Type   string // hash:ip, hash:net, list:set, ...
+	Family string `json:",omitempty"` // inet or inet6
+	// Entries are addresses, networks ("10.0.0.0/8") and ranges
+	// ("10.0.0.1-10.0.0.9"); Excluded are the entries marked "nomatch".
+	Entries  []string `json:",omitempty"`
+	Excluded []string `json:",omitempty"`
+	// Members are the sets of a set of sets (list:set).
+	Members []string `json:",omitempty"`
+	// Addresses is false for a set whose entries are not plain addresses or
+	// networks (ports, interfaces, MAC addresses): a source address alone
+	// does not tell whether it matches.
+	Addresses bool
 }
 
 // Baseline is a recommended default firewall for both address families.
@@ -457,6 +558,12 @@ type ExposedServiceFinding struct {
 	// for example "ipset trusted".
 	Restriction string `json:",omitempty"`
 	Reason      string
+	// ViaPort is the port that other hosts connect to when nat/PREROUTING
+	// sends it to the port of the service (NATRule); 0 when they connect to
+	// the port of the service itself. ViaPortEnd is the last port of a range.
+	ViaPort    int   `json:",omitempty"`
+	ViaPortEnd int   `json:",omitempty"`
+	NATRule    *Rule `json:",omitempty"`
 }
 
 // UnusedRuleFinding represents a firewall rule with no matching service
@@ -470,6 +577,10 @@ type UnusedRuleFinding struct {
 	Scope     AccessScope
 	Rule      Rule
 	Reason    string
+	// NATRule sends the ports to LocalPort before INPUT; nil when they are
+	// not translated. Nothing listens on LocalPort then.
+	NATRule   *Rule `json:",omitempty"`
+	LocalPort int   `json:",omitempty"`
 }
 
 // EffectivenessFinding represents a general effectiveness issue
@@ -486,4 +597,87 @@ type EffectivenessFinding struct {
 	// Unrestricted marks a default accept that holds for every interface,
 	// both transport protocols and every packet: the chain filters nothing.
 	Unrestricted bool `json:",omitempty"`
+}
+
+// Packet is one packet, as the option --trace describes it.
+type Packet struct {
+	Protocol Protocol `json:"protocol"`
+	Source   string   `json:"source"`
+	// SourcePort is 0 when the port was not given. The trace then uses a port
+	// from the range that clients send from.
+	SourcePort int `json:"source_port,omitempty"`
+	// Destination is empty for a packet to an address of this host.
+	Destination string `json:"destination,omitempty"`
+	Port        int    `json:"port,omitempty"`
+	In          string `json:"in,omitempty"`
+	Out         string `json:"out,omitempty"`
+	// State is the connection state: NEW when not given.
+	State    string `json:"state"`
+	ICMPType string `json:"icmp_type,omitempty"`
+}
+
+// TraceStep is one rule that a traced packet matched, or may have matched.
+type TraceStep struct {
+	Table string `json:"table"`
+	Chain string `json:"chain"`
+	Num   int    `json:"num"`
+	Spec  string `json:"spec"`
+	// Depth is 0 for a rule in the built-in chain and one more for each jump.
+	Depth int `json:"depth"`
+	// Match is "yes", or "maybe" when the rule has a match that the packet
+	// alone does not decide. The trace goes on as if such a rule did not
+	// match, and lists under the alternatives what happens when it does.
+	Match string `json:"match"`
+	// Action says what the rule does with the packet: ACCEPT, DROP, REJECT,
+	// RETURN, "jump", "goto", the target of a translation (DNAT, REDIRECT,
+	// NETMAP), QUEUE or NFQUEUE, "continue" for a rule that does not decide,
+	// or "skipped" for a rule that may match.
+	Action string `json:"action"`
+	// Note says what a "maybe" depends on, or what was assumed.
+	Note string `json:"note,omitempty"`
+}
+
+// TraceStage is one hook that a traced packet passes.
+type TraceStage struct {
+	Table string      `json:"table"`
+	Chain string      `json:"chain"`
+	Steps []TraceStep `json:"steps"`
+	// Result says how the packet leaves the hook.
+	Result string `json:"result"`
+}
+
+// Trace is the way of one packet through the rules.
+type Trace struct {
+	Packet Packet       `json:"packet"`
+	Family int          `json:"family"`
+	Stages []TraceStage `json:"stages"`
+	// Verdict is ACCEPT, DROP, REJECT, or UNDECIDED when the rules hand the
+	// packet to a program or cannot be followed.
+	Verdict string `json:"verdict"`
+	// Certain is false when a rule that may match leads to another verdict.
+	Certain bool `json:"certain"`
+	// DecidedBy names the rule or the policy that gave the verdict.
+	DecidedBy string `json:"decided_by"`
+	// Delivery is "local" for a packet that this host receives and "forward"
+	// for one that it routes to another host. Destination and Port are those
+	// behind the address translation.
+	Delivery    string `json:"delivery,omitempty"`
+	Destination string `json:"destination,omitempty"`
+	Port        int    `json:"port,omitempty"`
+	// Assumptions lists what the trace took for granted.
+	Assumptions []string `json:"assumptions,omitempty"`
+	// Alternatives lists how the packet ends when rules that may match do
+	// match. The stages above follow the packet as if they did not.
+	Alternatives []TraceEnd `json:"alternatives,omitempty"`
+}
+
+// TraceEnd is how a traced packet ends on another way through the rules.
+type TraceEnd struct {
+	// If names the rules that match on this way, with what each depends on.
+	If          string `json:"if"`
+	Verdict     string `json:"verdict"`
+	DecidedBy   string `json:"decided_by"`
+	Delivery    string `json:"delivery,omitempty"`
+	Destination string `json:"destination,omitempty"`
+	Port        int    `json:"port,omitempty"`
 }

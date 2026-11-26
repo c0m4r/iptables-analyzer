@@ -59,6 +59,10 @@ func recordingDependencies(t *testing.T, events *[]string, out *bytes.Buffer) co
 			*events = append(*events, "host")
 			return &models.HostContext{Interfaces: []models.HostInterface{{Name: "lo", Up: true}}}, nil
 		},
+		collectFacts: func(*models.HostContext) loader.Facts {
+			*events = append(*events, "facts")
+			return loader.Facts{}
+		},
 		isRoot: func() bool { return true },
 		now:    func() time.Time { return testTime },
 		createFile: func(string) (io.WriteCloser, error) {
@@ -85,7 +89,7 @@ func TestSandboxFollowsLiveInputCollection(t *testing.T) {
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(events, ","); got != "rules,host,services-live,sandbox:auto" {
+	if got := strings.Join(events, ","); got != "rules,host,services-live,facts,sandbox:auto" {
 		t.Fatalf("unexpected order of input collection and sandboxing: %s", got)
 	}
 	var rep report.Report
@@ -109,7 +113,7 @@ func TestSandboxFollowsTheOpeningOfTheHTMLReport(t *testing.T) {
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(events, ","); got != "rules,host,services-live,page,sandbox:auto" {
+	if got := strings.Join(events, ","); got != "rules,host,services-live,facts,page,sandbox:auto" {
 		t.Fatalf("unexpected order of input collection and sandboxing: %s", got)
 	}
 }

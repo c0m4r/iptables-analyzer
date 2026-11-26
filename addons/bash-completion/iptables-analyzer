@@ -3,12 +3,22 @@
 # or source from ~/.bashrc
 
 _iptables_analyzer() {
-    local cur prev words cword
+    # _init_completion assigns these variables; this function reads two of them.
+    # shellcheck disable=SC2034
+    local cur prev words cword split
     _init_completion -s || return
 
     case "$prev" in
-        -f|--file|--file6|--services-file|--html)
+        -f|--file|--file6|--services-file|--ipset-file|--html|--snapshot)
             _filedir
+            return
+            ;;
+        --expect)
+            mapfile -t COMPREPLY < <(compgen -W "accept drop reject" -- "$cur")
+            return
+            ;;
+        --trace)
+            # A packet, for example: 'tcp 203.0.113.5 -> :22 in eth0'
             return
             ;;
         --sandbox)
@@ -38,9 +48,14 @@ _iptables_analyzer() {
             -f --file
             --file6
             --services-file
+            --ipset-file
             -4 --ipv4-only
             -6 --ipv6-only
             --public
+            --trace
+            --expect
+            --diff
+            --snapshot
             --html
             --json
             --rules
@@ -59,7 +74,7 @@ _iptables_analyzer() {
         return
     fi
 
-    # Saved iptables-save, ip6tables-save and ss output.
+    # Saved iptables-save, ip6tables-save and ss output, or a snapshot.
     _filedir
 }
 

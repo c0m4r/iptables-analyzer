@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"formAt\":\"iptables-analyzer snapshot\",\"version\":1,\"hostnAme\":\"\\u0009\"}")

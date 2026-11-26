@@ -151,6 +151,11 @@ func inferDockerTopology(rs *models.Ruleset) *dockerTopology {
 			if err != nil || addr.IsLoopback() {
 				continue
 			}
+			// A rule that sends an address to itself changes the port only:
+			// the address is one of this host, not one behind it.
+			if prefix, ok := parsePrefix(rule.DstAddr); ok && prefix.IsSingleIP() && prefix.Addr() == addr && !rule.Negations["dst"] {
+				continue
+			}
 			if _, known := topo.containerBridge[addr]; !known {
 				topo.containerBridge[addr] = topo.bridgeForSubnet(addr)
 			}
@@ -197,6 +202,9 @@ func (t *dockerTopology) gatewayMode(bridge string) string {
 
 func newEvalContext(rs *models.Ruleset, topo *dockerTopology, host *models.HostContext) *evalContext {
 	ctx := &evalContext{bridges: map[string]bool{}, containerAddrs: map[netip.Addr]bool{}}
+	if rs != nil {
+		ctx.sets = sourceSets(host, rs.IPVersion)
+	}
 	for bridge := range topo.bridges {
 		ctx.bridges[bridge] = true
 	}
@@ -207,19 +215,32 @@ func newEvalContext(rs *models.Ruleset, topo *dockerTopology, host *models.HostC
 		ctx.localKnown = true
 		for _, iface := range host.Interfaces {
 			for _, value := range iface.Addrs {
-				prefix, ok := parsePrefix(value)
+				addr, ok := interfaceAddr(value)
 				if !ok {
 					continue
 				}
-				addr := prefix.Addr()
 				if rs != nil && (rs.IPVersion == models.IPv6) != addr.Is6() {
 					continue
 				}
 				ctx.localAddrs = append(ctx.localAddrs, addr)
+				// An address of the host is not one behind it, whatever a
+				// translation suggests.
+				delete(ctx.containerAddrs, addr)
 			}
 		}
 	}
 	return ctx
+}
+
+// interfaceAddr returns the address of an interface from its text form
+// "address/length". The address keeps its host part: it is the address of
+// the host, not that of its network.
+func interfaceAddr(value string) (netip.Addr, bool) {
+	if prefix, err := netip.ParsePrefix(value); err == nil {
+		return prefix.Addr().WithZone(""), true
+	}
+	addr, err := netip.ParseAddr(value)
+	return addr.WithZone(""), err == nil
 }
 
 // ingressCandidate is one interface through which external traffic may arrive.

@@ -1,0 +1,513 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'sha256-(hash)'; script-src 'sha256-(hash)'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<title>Firewall report · 2026-11-25 12:00</title>
+<style>(style)</style>
+</head>
+<body>
+<header class="top"><div class="wrap">
+<h1>iptables-analyzer</h1>
+<div class="meta">vdev · file analysis · 2026-11-25 12:00</div>
+<button class="btn js-only inline" id="theme" type="button">Light / dark</button>
+</div></header>
+<nav class="sections" aria-label="Sections"><div class="wrap">
+<a href="#summary">Summary</a>
+<a href="#findings">Findings <span class="n">6</span></a>
+<a href="#reachable">Reachable <span class="n">9</span></a>
+<a href="#rules">Rules <span class="n">66</span></a>
+<a href="#baseline">Baseline</a>
+</div></nav>
+<main class="wrap">
+
+<section id="summary" aria-label="Summary">
+<div class="card pad">
+<div class="verdict">
+<div class="grade g-F"><div><b>F</b><small>56/100</small></div></div>
+<div>
+<div class="counts"><span class="chip c-HIGH">3 high</span><span class="chip c-MEDIUM">1 medium</span><span class="chip c-LOW">1 low</span><span class="chip c-INFO">1 info</span></div>
+<p class="cap">Grade limited to F: IPv4 INPUT accepts every new connection.</p>
+<div class="cats"><div class="cat"><span>Policy</span><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="0 of 25 points"><rect class="track" width="100" height="8"/><rect class="fill poor" width="0" height="8"/></svg><span class="num">0/25</span></div><div class="cat"><span>Exposure</span><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="6 of 25 points"><rect class="track" width="100" height="8"/><rect class="fill poor" width="24" height="8"/></svg><span class="num">6/25</span></div><div class="cat"><span>Shadows and bypasses</span><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="25 of 25 points"><rect class="track" width="100" height="8"/><rect class="fill full" width="100" height="8"/></svg><span class="num">25/25</span></div><div class="cat"><span>Hygiene</span><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="15 of 15 points"><rect class="track" width="100" height="8"/><rect class="fill full" width="100" height="8"/></svg><span class="num">15/15</span></div><div class="cat"><span>IPv6</span><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="10 of 10 points"><rect class="track" width="100" height="8"/><rect class="fill full" width="100" height="8"/></svg><span class="num">10/10</span></div></div>
+</div>
+</div>
+<div class="first"><h3>Fix first</h3><ol><li><span class="fid">F1</span> <a href="#f-1">INPUT accepts new connections to any port</a> <span class="gain">&#43;15, grade C</span></li><li><span class="fid">F3</span> <a href="#f-3">FORWARD accepts traffic that no rule names</a> <span class="gain">&#43;10</span></li><li><span class="fid">F4</span> <a href="#f-4">2 forwarded ports are open to any source</a> <span class="gain">&#43;4</span></li></ol></div>
+<ul class="notes"><li><b>Note:</b> IPv4: 4 cluster IP addresses of Kubernetes services were not examined. A cluster IP is no address of the node; only hosts that route the service network through this node reach it.</li><li><b>Note:</b> No IPv6 rules were supplied: only IPv4 was analyzed, and IPv4 rules do not filter IPv6. Add the output of ip6tables-save as another file.</li></ul>
+<dl class="facts"><dt>Input</dt><dd>../testdata/k8s.iptables-save, ../testdata/k8s-services.txt</dd><dt>IPv4</dt><dd>66 rules in 43 chains (flannel, kubernetes) · INPUT ACCEPT · FORWARD ACCEPT · OUTPUT ACCEPT</dd><dt>IPv6</dt><dd>not supplied</dd><dt>Sandbox</dt><dd class="warn">Landlock is not available</dd></dl>
+</div>
+</section>
+
+<section id="findings">
+<h2>Findings</h2>
+<div class="toolbar js-only">
+<button class="btn c-HIGH" type="button" data-filter="HIGH" aria-pressed="true">High <span class="n">3</span></button>
+<button class="btn c-MEDIUM" type="button" data-filter="MEDIUM" aria-pressed="true">Medium <span class="n">1</span></button>
+<button class="btn c-LOW" type="button" data-filter="LOW" aria-pressed="true">Low <span class="n">1</span></button>
+<button class="btn c-INFO" type="button" data-filter="INFO" aria-pressed="true">Info <span class="n">1</span></button>
+<input type="search" id="search" placeholder="Filter findings" aria-label="Filter findings">
+<button class="btn" type="button" data-toggle="details.finding" data-state="open">Expand all</button>
+<button class="btn" type="button" data-toggle="details.finding" data-state="closed">Collapse all</button>
+<span class="sub" id="shown" aria-live="polite"></span>
+</div>
+<details class="card finding s-HIGH" id="f-1" data-sev="HIGH" open>
+<summary><span class="sev c-HIGH">HIGH</span><span class="fid">F1</span><span class="ftitle">INPUT accepts new connections to any port</span><span class="points"><span class="part">Policy</span> −15</span></summary>
+<div class="fbody">
+<p>No rule refuses them, and the policy of filter/INPUT is ACCEPT. Every port that no rule names is open: a service that listens on one, now or later, is reachable at once.</p>
+<div class="fix"><h4>Fix</h4><div>Add rules for the traffic that is needed and test them, with a way back, then set the policy to DROP. The recommended baseline (--baseline) is a complete rule set to start from.</div><ol class="steps"><li>Deny by default (IPv4)<div class="cmd"><pre id="c-1-1">iptables -P INPUT DROP</pre><button class="btn js-only inline" type="button" data-copy="c-1-1">Copy</button></div></li></ol></div>
+</div>
+</details>
+<details class="card finding s-HIGH" id="f-2" data-sev="HIGH" open>
+<summary><span class="sev c-HIGH">HIGH</span><span class="fid">F2</span><span class="ftitle">4 services are open to any source because INPUT accepts by default</span><span class="points"><span class="part">Exposure</span> −14</span></summary>
+<div class="fbody">
+<p>No rule names their ports: A service on 8472/udp; sshd on 22/tcp; kubelet on 10250/tcp; kube-proxy on 10256/tcp. Close the default first; then accept each port that must stay reachable, for its clients only.</p>
+</div>
+</details>
+<details class="card finding s-HIGH" id="f-3" data-sev="HIGH" open>
+<summary><span class="sev c-HIGH">HIGH</span><span class="fid">F3</span><span class="ftitle">FORWARD accepts traffic that no rule names</span><span class="points"><span class="part">Policy</span> −10</span></summary>
+<div class="fbody">
+<p>No rule refuses it, and the policy of filter/FORWARD is ACCEPT. The rules show that this host routes packets (address translation or Docker), so other hosts can send traffic through it to every network it reaches, including container and virtual networks.</p>
+<div class="fix"><h4>Fix</h4><div>Set the policy to DROP after the forwarding paths that are needed have rules.</div><ol class="steps"><li>Deny forwarding by default (IPv4)<div class="cmd"><pre id="c-3-1">iptables -P FORWARD DROP</pre><button class="btn js-only inline" type="button" data-copy="c-3-1">Copy</button></div></li></ol></div>
+</div>
+</details>
+<details class="card finding s-MEDIUM" id="f-4" data-sev="MEDIUM" open>
+<summary><span class="sev c-MEDIUM">MEDIUM</span><span class="fid">F4</span><span class="ftitle">2 forwarded ports are open to any source</span><span class="points"><span class="part">Exposure</span> −4</span></summary>
+<div class="fbody">
+<p>nat/PREROUTING translates these ports to another host, and filter/FORWARD accepts them from any source; the rules of filter/INPUT do not apply: IPv4 30080/tcp to 10.244.0.10:8080, 10.244.0.11:8080; IPv4 30443/tcp to 10.244.0.12:8443.</p>
+<ul class="evidence"><li><span class="role">translates</span><a class="loc mono" href="#r4-2-15-2">nat/KUBE-SEP-KTTG6H42UOAJUCVL #2</a><code class="spec">-p tcp -m comment --comment &#34;default/web&#34; -m tcp -j DNAT --to-destination 10.244.0.10:8080</code><div class="path">reached by PREROUTING #1 → KUBE-SERVICES #3 → KUBE-SVC-2CMXP7HKUVJN7L6M #2</div></li><li><span class="role">translates</span><a class="loc mono" href="#r4-2-16-2">nat/KUBE-SEP-N4G2XR5TDX7PQE7P #2</a><code class="spec">-p tcp -m comment --comment &#34;default/web&#34; -m tcp -j DNAT --to-destination 10.244.0.11:8080</code><div class="path">reached by PREROUTING #1 → KUBE-SERVICES #3 → KUBE-SVC-2CMXP7HKUVJN7L6M #3</div></li><li><span class="role">translates</span><a class="loc mono" href="#r4-2-13-2">nat/KUBE-SEP-2Z3537XSN3RJRU3S #2</a><code class="spec">-p tcp -m comment --comment &#34;default/api&#34; -m tcp -j DNAT --to-destination 10.244.0.12:8443</code><div class="path">reached by PREROUTING #1 → KUBE-SERVICES #5 → KUBE-SVC-EDNDUDH2C75GIR6O #2</div></li></ul>
+<div class="fix"><h4>Fix</h4><div>kube-proxy writes this translation for a Service of type NodePort or LoadBalancer, and it writes its chains again all the time. Limit the Service in the cluster: set spec.loadBalancerSourceRanges, use a NetworkPolicy for the pods, or use type ClusterIP when the port needs no clients outside the cluster. To filter on the node, drop the port for other sources in the raw table, which sees the packet before the translation. The command below is for port 30080/tcp. For each of the other ports (30443/tcp), run it again with its protocol and its port.</div><ol class="steps"><li>Drop port 30080 for all but the known clients, in front of the translation<div class="cmd"><pre id="c-4-1">iptables -t raw -I PREROUTING -m addrtype --dst-type LOCAL -p tcp -m tcp --dport 30080 ! -s &lt;trusted-cidr&gt; -j DROP</pre><button class="btn js-only inline" type="button" data-copy="c-4-1">Copy</button></div></li></ol></div>
+</div>
+</details>
+<details class="card finding s-LOW" id="f-5" data-sev="LOW">
+<summary><span class="sev c-LOW">LOW</span><span class="fid">F5</span><span class="ftitle">Forwarded port 80/tcp of 203.0.113.50 is open to any source</span><span class="points"><span class="part">Exposure</span> −1</span></summary>
+<div class="fbody">
+<p>nat/PREROUTING translates these ports to another host, and filter/FORWARD accepts them from any source; the rules of filter/INPUT do not apply: IPv4 80/tcp of 203.0.113.50 to 10.244.0.10:8080, 10.244.0.11:8080.</p>
+<ul class="evidence"><li><span class="role">translates</span><a class="loc mono" href="#r4-2-15-2">nat/KUBE-SEP-KTTG6H42UOAJUCVL #2</a><code class="spec">-p tcp -m comment --comment &#34;default/web&#34; -m tcp -j DNAT --to-destination 10.244.0.10:8080</code><div class="path">reached by PREROUTING #1 → KUBE-SERVICES #3 → KUBE-SVC-2CMXP7HKUVJN7L6M #2</div></li><li><span class="role">translates</span><a class="loc mono" href="#r4-2-16-2">nat/KUBE-SEP-N4G2XR5TDX7PQE7P #2</a><code class="spec">-p tcp -m comment --comment &#34;default/web&#34; -m tcp -j DNAT --to-destination 10.244.0.11:8080</code><div class="path">reached by PREROUTING #1 → KUBE-SERVICES #3 → KUBE-SVC-2CMXP7HKUVJN7L6M #3</div></li></ul>
+<div class="fix"><h4>Fix</h4><div>kube-proxy writes this translation for a Service of type NodePort or LoadBalancer, and it writes its chains again all the time. Limit the Service in the cluster: set spec.loadBalancerSourceRanges, use a NetworkPolicy for the pods, or use type ClusterIP when the port needs no clients outside the cluster. To filter on the node, drop the port for other sources in the raw table, which sees the packet before the translation.</div><ol class="steps"><li>Drop port 80 for all but the known clients, in front of the translation<div class="cmd"><pre id="c-5-1">iptables -t raw -I PREROUTING -d 203.0.113.50 -p tcp -m tcp --dport 80 ! -s &lt;trusted-cidr&gt; -j DROP</pre><button class="btn js-only inline" type="button" data-copy="c-5-1">Copy</button></div></li></ol></div>
+</div>
+</details>
+<details class="card finding s-INFO" id="f-6" data-sev="INFO">
+<summary><span class="sev c-INFO">INFO</span><span class="fid">F6</span><span class="ftitle">OUTPUT default policy is ACCEPT</span><span class="points"></span></summary>
+<div class="fbody">
+<p>All outbound traffic is allowed. This is the usual setup; an OUTPUT allowlist can limit what a compromised service is able to reach.</p>
+</div>
+</details>
+</section>
+
+<section id="reachable">
+<h2>Reachable from other hosts</h2>
+<h3 class="block">Ports that INPUT accepts</h3>
+<div class="card tablewrap"><table>
+<thead><tr><th class="sortable">Protocol</th><th class="sortable">Port</th><th class="sortable">Open to</th><th class="sortable">Listener</th><th>Accepted by</th></tr></thead>
+<tbody><tr>
+<td>tcp</td>
+<td data-sort="22">22</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td>sshd</td>
+<td><span class="sub">the policy of the chain</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="10250">10250</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td>kubelet</td>
+<td><span class="sub">the policy of the chain</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="10256">10256</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td>kube-proxy</td>
+<td><span class="sub">the policy of the chain</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="65536">all that no rule names</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td></td>
+<td><span class="sub">the policy of the chain</span></td>
+</tr><tr>
+<td>udp</td>
+<td data-sort="8472">8472</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td>unknown process</td>
+<td><span class="sub">the policy of the chain</span></td>
+</tr><tr>
+<td>udp</td>
+<td data-sort="65536">all that no rule names</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td></td>
+<td><span class="sub">the policy of the chain</span></td>
+</tr></tbody>
+</table></div>
+<h3 class="block">Ports translated to other hosts</h3>
+<p class="sub">These ports are translated in nat/PREROUTING and pass filter/FORWARD, not filter/INPUT.</p>
+<div class="card tablewrap"><table>
+<thead><tr><th class="sortable">Host port</th><th class="sortable">Destination</th><th class="sortable">Open to</th><th>Translated by</th></tr></thead>
+<tbody><tr>
+<td class="mono" data-sort="80">203.0.113.50:80/tcp</td>
+<td><span class="mono">10.244.0.10:8080, 10.244.0.11:8080</span></td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td><a class="mono" href="#r4-2-15-2">nat/KUBE-SEP-KTTG6H42UOAJUCVL #2</a></td>
+</tr><tr>
+<td class="mono" data-sort="30080">30080/tcp</td>
+<td><span class="mono">10.244.0.10:8080, 10.244.0.11:8080</span></td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td><a class="mono" href="#r4-2-15-2">nat/KUBE-SEP-KTTG6H42UOAJUCVL #2</a></td>
+</tr><tr>
+<td class="mono" data-sort="30443">30443/tcp</td>
+<td><span class="mono">10.244.0.12:8443</span></td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td><a class="mono" href="#r4-2-13-2">nat/KUBE-SEP-2Z3537XSN3RJRU3S #2</a></td>
+</tr></tbody>
+</table></div>
+<h3 class="block">Listening sockets</h3>
+<div class="card tablewrap"><table>
+<thead><tr><th class="sortable">Protocol</th><th class="sortable">Port</th><th class="sortable">Address</th><th class="sortable">Process</th><th class="sortable">Status</th></tr></thead>
+<tbody><tr>
+<td>udp</td>
+<td data-sort="8472">8472</td>
+<td class="mono">0.0.0.0</td>
+<td></td>
+<td data-sort="0"><span class="scope sc-EXPOSED">open to any source</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="10248">10248</td>
+<td class="mono">127.0.0.1</td>
+<td>kubelet</td>
+<td data-sort="8"><span class="scope sc-LOCALHOST">loopback only</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="10249">10249</td>
+<td class="mono">127.0.0.1</td>
+<td>kube-proxy</td>
+<td data-sort="8"><span class="scope sc-LOCALHOST">loopback only</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="22">22</td>
+<td class="mono">0.0.0.0</td>
+<td>sshd</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">open to any source</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="10250">10250</td>
+<td class="mono">*</td>
+<td>kubelet</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">open to any source</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="10256">10256</td>
+<td class="mono">*</td>
+<td>kube-proxy</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">open to any source</span></td>
+</tr></tbody>
+</table></div>
+</section>
+
+<section id="rules">
+<h2>Rules</h2>
+<div class="toolbar js-only">
+<input type="search" id="rule-search" placeholder="Filter rules, for example: --dport 22" aria-label="Filter rules">
+<button class="btn" type="button" data-toggle="details.chain" data-state="open">Expand all</button>
+<button class="btn" type="button" data-toggle="details.chain" data-state="closed">Collapse all</button>
+<span class="sub" id="rules-shown" aria-live="polite"></span>
+</div>
+<h3 class="block">IPv4 · <span class="mono">filter</span> <span class="sub">12 chains, 18 rules</span></h3>
+<div class="card">
+<details class="chain" id="ch4-1-1" open>
+<summary><b>INPUT</b><span class="sub">policy <span class="policy-ACCEPT">ACCEPT</span> · 4 rules</span></summary>
+<ol class="rules"><li id="r4-1-1-1"><span class="n">1</span><code>-m conntrack --ctstate NEW -m comment --comment &#34;kubernetes load balancer firewall&#34; <span class="t-jump">-j <a href="#ch4-1-11">KUBE-PROXY-FIREWALL</a></span></code><span></span></li>
+<li id="r4-1-1-2"><span class="n">2</span><code>-m comment --comment &#34;kubernetes health check service ports&#34; <span class="t-jump">-j <a href="#ch4-1-9">KUBE-NODEPORTS</a></span></code><span></span></li>
+<li id="r4-1-1-3"><span class="n">3</span><code>-m conntrack --ctstate NEW -m comment --comment &#34;kubernetes externally-visible service portals&#34; <span class="t-jump">-j <a href="#ch4-1-5">KUBE-EXTERNAL-SERVICES</a></span></code><span></span></li>
+<li id="r4-1-1-4"><span class="n">4</span><code><span class="t-jump">-j <a href="#ch4-1-6">KUBE-FIREWALL</a></span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-1-2" open>
+<summary><b>FORWARD</b><span class="sub">policy <span class="policy-ACCEPT">ACCEPT</span> · 5 rules</span></summary>
+<ol class="rules"><li id="r4-1-2-1"><span class="n">1</span><code>-m conntrack --ctstate NEW -m comment --comment &#34;kubernetes load balancer firewall&#34; <span class="t-jump">-j <a href="#ch4-1-11">KUBE-PROXY-FIREWALL</a></span></code><span></span></li>
+<li id="r4-1-2-2"><span class="n">2</span><code>-m comment --comment &#34;kubernetes forwarding rules&#34; <span class="t-jump">-j <a href="#ch4-1-7">KUBE-FORWARD</a></span></code><span></span></li>
+<li id="r4-1-2-3"><span class="n">3</span><code>-m conntrack --ctstate NEW -m comment --comment &#34;kubernetes service portals&#34; <span class="t-jump">-j <a href="#ch4-1-12">KUBE-SERVICES</a></span></code><span></span></li>
+<li id="r4-1-2-4"><span class="n">4</span><code>-m conntrack --ctstate NEW -m comment --comment &#34;kubernetes externally-visible service portals&#34; <span class="t-jump">-j <a href="#ch4-1-5">KUBE-EXTERNAL-SERVICES</a></span></code><span></span></li>
+<li id="r4-1-2-5"><span class="n">5</span><code>-m comment --comment &#34;flanneld forward&#34; <span class="t-jump">-j <a href="#ch4-1-4">FLANNEL-FWD</a></span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-1-3" open>
+<summary><b>OUTPUT</b><span class="sub">policy <span class="policy-NONE">ACCEPT</span> · 3 rules</span></summary>
+<ol class="rules"><li id="r4-1-3-1"><span class="n">1</span><code>-m conntrack --ctstate NEW -m comment --comment &#34;kubernetes load balancer firewall&#34; <span class="t-jump">-j <a href="#ch4-1-11">KUBE-PROXY-FIREWALL</a></span></code><span></span></li>
+<li id="r4-1-3-2"><span class="n">2</span><code>-m conntrack --ctstate NEW -m comment --comment &#34;kubernetes service portals&#34; <span class="t-jump">-j <a href="#ch4-1-12">KUBE-SERVICES</a></span></code><span></span></li>
+<li id="r4-1-3-3"><span class="n">3</span><code><span class="t-jump">-j <a href="#ch4-1-6">KUBE-FIREWALL</a></span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-1-4" open>
+<summary><b>FLANNEL-FWD</b><span class="sub">2 rules · flannel</span></summary>
+<ol class="rules"><li id="r4-1-4-1"><span class="n">1</span><code>-s 10.244.0.0/16 -m comment --comment &#34;flanneld forward&#34; <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-4-2"><span class="n">2</span><code>-d 10.244.0.0/16 -m comment --comment &#34;flanneld forward&#34; <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-1-5">
+<summary><b>KUBE-EXTERNAL-SERVICES</b><span class="sub">0 rules · kubernetes</span></summary>
+<div class="none">No rules.</div>
+</details>
+<details class="chain" id="ch4-1-6" open>
+<summary><b>KUBE-FIREWALL</b><span class="sub">1 rule · kubernetes</span></summary>
+<ol class="rules"><li id="r4-1-6-1"><span class="n">1</span><code>! -s 127.0.0.0/8 -d 127.0.0.0/8 -m comment --comment &#34;block incoming localnet connections&#34; -m conntrack ! --ctstate RELATED,ESTABLISHED,DNAT <span class="t-DROP">-j DROP</span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-1-7" open>
+<summary><b>KUBE-FORWARD</b><span class="sub">3 rules · kubernetes</span></summary>
+<ol class="rules"><li id="r4-1-7-1"><span class="n">1</span><code>-m conntrack --ctstate INVALID <span class="t-DROP">-j DROP</span></code><span></span></li>
+<li id="r4-1-7-2"><span class="n">2</span><code>-m comment --comment &#34;kubernetes forwarding rules&#34; -m mark --mark 0x4000/0x4000 <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-7-3"><span class="n">3</span><code>-m comment --comment &#34;kubernetes forwarding conntrack rule&#34; -m conntrack --ctstate RELATED,ESTABLISHED <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-1-8">
+<summary><b>KUBE-KUBELET-CANARY</b><span class="sub">0 rules · kubernetes</span></summary>
+<div class="none">No rules.</div>
+</details>
+<details class="chain" id="ch4-1-9">
+<summary><b>KUBE-NODEPORTS</b><span class="sub">0 rules · kubernetes</span></summary>
+<div class="none">No rules.</div>
+</details>
+<details class="chain" id="ch4-1-10">
+<summary><b>KUBE-PROXY-CANARY</b><span class="sub">0 rules · kubernetes</span></summary>
+<div class="none">No rules.</div>
+</details>
+<details class="chain" id="ch4-1-11">
+<summary><b>KUBE-PROXY-FIREWALL</b><span class="sub">0 rules · kubernetes</span></summary>
+<div class="none">No rules.</div>
+</details>
+<details class="chain" id="ch4-1-12">
+<summary><b>KUBE-SERVICES</b><span class="sub">0 rules · kubernetes</span></summary>
+<div class="none">No rules.</div>
+</details>
+</div>
+<h3 class="block">IPv4 · <span class="mono">nat</span> <span class="sub">23 chains, 48 rules</span></h3>
+<div class="card">
+<details class="chain" id="ch4-2-1" open>
+<summary><b>PREROUTING</b><span class="sub">policy <span class="policy-NONE">ACCEPT</span> · 1 rule</span></summary>
+<ol class="rules"><li id="r4-2-1-1"><span class="n">1</span><code>-m comment --comment &#34;kubernetes service portals&#34; <span class="t-jump">-j <a href="#ch4-2-19">KUBE-SERVICES</a></span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-2">
+<summary><b>INPUT</b><span class="sub">policy <span class="policy-NONE">ACCEPT</span> · 0 rules</span></summary>
+<div class="none">No rules.</div>
+</details>
+<details class="chain" id="ch4-2-3" open>
+<summary><b>OUTPUT</b><span class="sub">policy <span class="policy-NONE">ACCEPT</span> · 1 rule</span></summary>
+<ol class="rules"><li id="r4-2-3-1"><span class="n">1</span><code>-m comment --comment &#34;kubernetes service portals&#34; <span class="t-jump">-j <a href="#ch4-2-19">KUBE-SERVICES</a></span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-4" open>
+<summary><b>POSTROUTING</b><span class="sub">policy <span class="policy-NONE">ACCEPT</span> · 2 rules</span></summary>
+<ol class="rules"><li id="r4-2-4-1"><span class="n">1</span><code>-m comment --comment &#34;kubernetes postrouting rules&#34; <span class="t-jump">-j <a href="#ch4-2-11">KUBE-POSTROUTING</a></span></code><span></span></li>
+<li id="r4-2-4-2"><span class="n">2</span><code>-m comment --comment &#34;flanneld masq&#34; <span class="t-jump">-j <a href="#ch4-2-5">FLANNEL-POSTRTG</a></span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-5" open>
+<summary><b>FLANNEL-POSTRTG</b><span class="sub">6 rules · flannel</span></summary>
+<ol class="rules"><li id="r4-2-5-1"><span class="n">1</span><code>-m mark --mark 0x4000/0x4000 -m comment --comment &#34;flanneld masq&#34; <span class="t-other">-j RETURN</span></code><span></span></li>
+<li id="r4-2-5-2"><span class="n">2</span><code>-s 10.244.0.0/24 -d 10.244.0.0/16 -m comment --comment &#34;flanneld masq&#34; <span class="t-other">-j RETURN</span></code><span></span></li>
+<li id="r4-2-5-3"><span class="n">3</span><code>-s 10.244.0.0/16 -d 10.244.0.0/24 -m comment --comment &#34;flanneld masq&#34; <span class="t-other">-j RETURN</span></code><span></span></li>
+<li id="r4-2-5-4"><span class="n">4</span><code>! -s 10.244.0.0/16 -d 10.244.0.0/24 -m comment --comment &#34;flanneld masq&#34; <span class="t-other">-j RETURN</span></code><span></span></li>
+<li id="r4-2-5-5"><span class="n">5</span><code>-s 10.244.0.0/16 ! -d 224.0.0.0/4 -m comment --comment &#34;flanneld masq&#34; <span class="t-other">-j MASQUERADE --random-fully</span></code><span></span></li>
+<li id="r4-2-5-6"><span class="n">6</span><code>! -s 10.244.0.0/16 -d 10.244.0.0/16 -m comment --comment &#34;flanneld masq&#34; <span class="t-other">-j MASQUERADE --random-fully</span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-6" open>
+<summary><b>KUBE-EXT-2CMXP7HKUVJN7L6M</b><span class="sub">2 rules · kubernetes</span></summary>
+<ol class="rules"><li id="r4-2-6-1"><span class="n">1</span><code>-m comment --comment &#34;masquerade traffic for default/web external destinations&#34; <span class="t-jump">-j <a href="#ch4-2-9">KUBE-MARK-MASQ</a></span></code><span></span></li>
+<li id="r4-2-6-2"><span class="n">2</span><code><span class="t-jump">-j <a href="#ch4-2-20">KUBE-SVC-2CMXP7HKUVJN7L6M</a></span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-7" open>
+<summary><b>KUBE-EXT-EDNDUDH2C75GIR6O</b><span class="sub">2 rules · kubernetes</span></summary>
+<ol class="rules"><li id="r4-2-7-1"><span class="n">1</span><code>-m comment --comment &#34;masquerade traffic for default/api external destinations&#34; <span class="t-jump">-j <a href="#ch4-2-9">KUBE-MARK-MASQ</a></span></code><span></span></li>
+<li id="r4-2-7-2"><span class="n">2</span><code><span class="t-jump">-j <a href="#ch4-2-21">KUBE-SVC-EDNDUDH2C75GIR6O</a></span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-8">
+<summary><b>KUBE-KUBELET-CANARY</b><span class="sub">0 rules · kubernetes</span></summary>
+<div class="none">No rules.</div>
+</details>
+<details class="chain" id="ch4-2-9" open>
+<summary><b>KUBE-MARK-MASQ</b><span class="sub">1 rule · kubernetes</span></summary>
+<ol class="rules"><li id="r4-2-9-1"><span class="n">1</span><code><span class="t-other">-j MARK --set-xmark 0x4000/0x4000</span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-10" open>
+<summary><b>KUBE-NODEPORTS</b><span class="sub">2 rules · kubernetes</span></summary>
+<ol class="rules"><li id="r4-2-10-1"><span class="n">1</span><code>-p tcp -m comment --comment &#34;default/web&#34; -m tcp --dport 30080 <span class="t-jump">-j <a href="#ch4-2-6">KUBE-EXT-2CMXP7HKUVJN7L6M</a></span></code><span></span></li>
+<li id="r4-2-10-2"><span class="n">2</span><code>-p tcp -m comment --comment &#34;default/api&#34; -m tcp --dport 30443 <span class="t-jump">-j <a href="#ch4-2-7">KUBE-EXT-EDNDUDH2C75GIR6O</a></span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-11" open>
+<summary><b>KUBE-POSTROUTING</b><span class="sub">3 rules · kubernetes</span></summary>
+<ol class="rules"><li id="r4-2-11-1"><span class="n">1</span><code>-m mark ! --mark 0x4000/0x4000 <span class="t-other">-j RETURN</span></code><span></span></li>
+<li id="r4-2-11-2"><span class="n">2</span><code><span class="t-other">-j MARK --set-xmark 0x4000/0x0</span></code><span></span></li>
+<li id="r4-2-11-3"><span class="n">3</span><code>-m comment --comment &#34;kubernetes service traffic requiring SNAT&#34; <span class="t-other">-j MASQUERADE --random-fully</span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-12">
+<summary><b>KUBE-PROXY-CANARY</b><span class="sub">0 rules · kubernetes</span></summary>
+<div class="none">No rules.</div>
+</details>
+<details class="chain" id="ch4-2-13" open>
+<summary><b>KUBE-SEP-2Z3537XSN3RJRU3S</b><span class="sub">2 rules · kubernetes</span><span class="badge">1 finding</span></summary>
+<ol class="rules"><li id="r4-2-13-1"><span class="n">1</span><code>-s 10.244.0.12/32 -m comment --comment &#34;default/api&#34; <span class="t-jump">-j <a href="#ch4-2-9">KUBE-MARK-MASQ</a></span></code><span></span></li>
+<li id="r4-2-13-2"><span class="n">2</span><code>-p tcp -m comment --comment &#34;default/api&#34; -m tcp <span class="t-other">-j DNAT --to-destination 10.244.0.12:8443</span></code><span><a class="badge" href="#f-4">F4</a></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-14" open>
+<summary><b>KUBE-SEP-6E7XQMQ4RAYOWTTM</b><span class="sub">2 rules · kubernetes</span></summary>
+<ol class="rules"><li id="r4-2-14-1"><span class="n">1</span><code>-s 10.244.0.2/32 -m comment --comment &#34;kube-system/kube-dns:dns&#34; <span class="t-jump">-j <a href="#ch4-2-9">KUBE-MARK-MASQ</a></span></code><span></span></li>
+<li id="r4-2-14-2"><span class="n">2</span><code>-p udp -m comment --comment &#34;kube-system/kube-dns:dns&#34; -m udp <span class="t-other">-j DNAT --to-destination 10.244.0.2:53</span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-15" open>
+<summary><b>KUBE-SEP-KTTG6H42UOAJUCVL</b><span class="sub">2 rules · kubernetes</span><span class="badge">2 findings</span></summary>
+<ol class="rules"><li id="r4-2-15-1"><span class="n">1</span><code>-s 10.244.0.10/32 -m comment --comment &#34;default/web&#34; <span class="t-jump">-j <a href="#ch4-2-9">KUBE-MARK-MASQ</a></span></code><span></span></li>
+<li id="r4-2-15-2"><span class="n">2</span><code>-p tcp -m comment --comment &#34;default/web&#34; -m tcp <span class="t-other">-j DNAT --to-destination 10.244.0.10:8080</span></code><span><a class="badge" href="#f-4">F4</a><a class="badge" href="#f-5">F5</a></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-16" open>
+<summary><b>KUBE-SEP-N4G2XR5TDX7PQE7P</b><span class="sub">2 rules · kubernetes</span><span class="badge">2 findings</span></summary>
+<ol class="rules"><li id="r4-2-16-1"><span class="n">1</span><code>-s 10.244.0.11/32 -m comment --comment &#34;default/web&#34; <span class="t-jump">-j <a href="#ch4-2-9">KUBE-MARK-MASQ</a></span></code><span></span></li>
+<li id="r4-2-16-2"><span class="n">2</span><code>-p tcp -m comment --comment &#34;default/web&#34; -m tcp <span class="t-other">-j DNAT --to-destination 10.244.0.11:8080</span></code><span><a class="badge" href="#f-4">F4</a><a class="badge" href="#f-5">F5</a></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-17" open>
+<summary><b>KUBE-SEP-VPILYQBSPPXYB66K</b><span class="sub">2 rules · kubernetes</span></summary>
+<ol class="rules"><li id="r4-2-17-1"><span class="n">1</span><code>-s 192.168.49.2/32 -m comment --comment &#34;default/kubernetes:https&#34; <span class="t-jump">-j <a href="#ch4-2-9">KUBE-MARK-MASQ</a></span></code><span></span></li>
+<li id="r4-2-17-2"><span class="n">2</span><code>-p tcp -m comment --comment &#34;default/kubernetes:https&#34; -m tcp <span class="t-other">-j DNAT --to-destination 192.168.49.2:6443</span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-18" open>
+<summary><b>KUBE-SEP-YIL6JZP7A3QYXJU2</b><span class="sub">2 rules · kubernetes</span></summary>
+<ol class="rules"><li id="r4-2-18-1"><span class="n">1</span><code>-s 10.244.0.3/32 -m comment --comment &#34;kube-system/kube-dns:dns&#34; <span class="t-jump">-j <a href="#ch4-2-9">KUBE-MARK-MASQ</a></span></code><span></span></li>
+<li id="r4-2-18-2"><span class="n">2</span><code>-p udp -m comment --comment &#34;kube-system/kube-dns:dns&#34; -m udp <span class="t-other">-j DNAT --to-destination 10.244.0.3:53</span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-19" open>
+<summary><b>KUBE-SERVICES</b><span class="sub">6 rules · kubernetes</span></summary>
+<ol class="rules"><li id="r4-2-19-1"><span class="n">1</span><code>-d 10.96.0.1/32 -p tcp -m comment --comment &#34;default/kubernetes:https cluster IP&#34; -m tcp --dport 443 <span class="t-jump">-j <a href="#ch4-2-22">KUBE-SVC-NPX46M4PTMTKRN6Y</a></span></code><span></span></li>
+<li id="r4-2-19-2"><span class="n">2</span><code>-d 10.96.0.10/32 -p udp -m comment --comment &#34;kube-system/kube-dns:dns cluster IP&#34; -m udp --dport 53 <span class="t-jump">-j <a href="#ch4-2-23">KUBE-SVC-TCOU7JCQXEZGVUNU</a></span></code><span></span></li>
+<li id="r4-2-19-3"><span class="n">3</span><code>-d 10.101.37.20/32 -p tcp -m comment --comment &#34;default/web cluster IP&#34; -m tcp --dport 80 <span class="t-jump">-j <a href="#ch4-2-20">KUBE-SVC-2CMXP7HKUVJN7L6M</a></span></code><span></span></li>
+<li id="r4-2-19-4"><span class="n">4</span><code>-d 203.0.113.50/32 -p tcp -m comment --comment &#34;default/web loadbalancer IP&#34; -m tcp --dport 80 <span class="t-jump">-j <a href="#ch4-2-6">KUBE-EXT-2CMXP7HKUVJN7L6M</a></span></code><span></span></li>
+<li id="r4-2-19-5"><span class="n">5</span><code>-d 10.107.201.9/32 -p tcp -m comment --comment &#34;default/api cluster IP&#34; -m tcp --dport 443 <span class="t-jump">-j <a href="#ch4-2-21">KUBE-SVC-EDNDUDH2C75GIR6O</a></span></code><span></span></li>
+<li id="r4-2-19-6"><span class="n">6</span><code>-m comment --comment &#34;kubernetes service nodeports; NOTE: this must be the last rule in this chain&#34; -m addrtype --dst-type LOCAL <span class="t-jump">-j <a href="#ch4-2-10">KUBE-NODEPORTS</a></span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-20" open>
+<summary><b>KUBE-SVC-2CMXP7HKUVJN7L6M</b><span class="sub">3 rules · kubernetes</span></summary>
+<ol class="rules"><li id="r4-2-20-1"><span class="n">1</span><code>! -s 10.244.0.0/16 -d 10.101.37.20/32 -p tcp -m comment --comment &#34;default/web cluster IP&#34; -m tcp --dport 80 <span class="t-jump">-j <a href="#ch4-2-9">KUBE-MARK-MASQ</a></span></code><span></span></li>
+<li id="r4-2-20-2"><span class="n">2</span><code>-m comment --comment &#34;default/web -&gt; 10.244.0.10:8080&#34; -m statistic --mode random --probability 0.50000000000 <span class="t-jump">-j <a href="#ch4-2-15">KUBE-SEP-KTTG6H42UOAJUCVL</a></span></code><span></span></li>
+<li id="r4-2-20-3"><span class="n">3</span><code>-m comment --comment &#34;default/web -&gt; 10.244.0.11:8080&#34; <span class="t-jump">-j <a href="#ch4-2-16">KUBE-SEP-N4G2XR5TDX7PQE7P</a></span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-21" open>
+<summary><b>KUBE-SVC-EDNDUDH2C75GIR6O</b><span class="sub">2 rules · kubernetes</span></summary>
+<ol class="rules"><li id="r4-2-21-1"><span class="n">1</span><code>! -s 10.244.0.0/16 -d 10.107.201.9/32 -p tcp -m comment --comment &#34;default/api cluster IP&#34; -m tcp --dport 443 <span class="t-jump">-j <a href="#ch4-2-9">KUBE-MARK-MASQ</a></span></code><span></span></li>
+<li id="r4-2-21-2"><span class="n">2</span><code>-m comment --comment &#34;default/api -&gt; 10.244.0.12:8443&#34; <span class="t-jump">-j <a href="#ch4-2-13">KUBE-SEP-2Z3537XSN3RJRU3S</a></span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-22" open>
+<summary><b>KUBE-SVC-NPX46M4PTMTKRN6Y</b><span class="sub">2 rules · kubernetes</span></summary>
+<ol class="rules"><li id="r4-2-22-1"><span class="n">1</span><code>! -s 10.244.0.0/16 -d 10.96.0.1/32 -p tcp -m comment --comment &#34;default/kubernetes:https cluster IP&#34; -m tcp --dport 443 <span class="t-jump">-j <a href="#ch4-2-9">KUBE-MARK-MASQ</a></span></code><span></span></li>
+<li id="r4-2-22-2"><span class="n">2</span><code>-m comment --comment &#34;default/kubernetes:https -&gt; 192.168.49.2:6443&#34; <span class="t-jump">-j <a href="#ch4-2-17">KUBE-SEP-VPILYQBSPPXYB66K</a></span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-23" open>
+<summary><b>KUBE-SVC-TCOU7JCQXEZGVUNU</b><span class="sub">3 rules · kubernetes</span></summary>
+<ol class="rules"><li id="r4-2-23-1"><span class="n">1</span><code>! -s 10.244.0.0/16 -d 10.96.0.10/32 -p udp -m comment --comment &#34;kube-system/kube-dns:dns cluster IP&#34; -m udp --dport 53 <span class="t-jump">-j <a href="#ch4-2-9">KUBE-MARK-MASQ</a></span></code><span></span></li>
+<li id="r4-2-23-2"><span class="n">2</span><code>-m comment --comment &#34;kube-system/kube-dns:dns -&gt; 10.244.0.2:53&#34; -m statistic --mode random --probability 0.50000000000 <span class="t-jump">-j <a href="#ch4-2-14">KUBE-SEP-6E7XQMQ4RAYOWTTM</a></span></code><span></span></li>
+<li id="r4-2-23-3"><span class="n">3</span><code>-m comment --comment &#34;kube-system/kube-dns:dns -&gt; 10.244.0.3:53&#34; <span class="t-jump">-j <a href="#ch4-2-18">KUBE-SEP-YIL6JZP7A3QYXJU2</a></span></code><span></span></li>
+</ol>
+</details>
+</div>
+<h3 class="block">IPv4 · <span class="mono">mangle</span> <span class="sub">8 chains, 0 rules</span></h3>
+<div class="card none">No rules. Policies: PREROUTING ACCEPT, INPUT ACCEPT, FORWARD ACCEPT, OUTPUT ACCEPT, POSTROUTING ACCEPT.</div>
+</section>
+
+
+<section id="baseline">
+<h2>Recommended baseline</h2>
+<p class="sub">A complete rule set to start from, made for this host. It is not what the report measures the loaded rules against. Read it before use: iptables-restore replaces the rules that are loaded. The same text comes from <code>iptables-analyzer --baseline</code>.</p>
+<div class="card file">
+<div class="filehead"><b>IPv4, for iptables-restore</b><button class="btn js-only inline" type="button" data-copy="baseline-4">Copy</button></div>
+<pre class="file" id="baseline-4"># Recommended IPv4 baseline generated by iptables-analyzer (iptables-restore format).
+# Default deny inbound traffic; outbound traffic is allowed. FORWARD keeps its
+# policy: this host routes packets by rules that this file does not replace.
+# Apply with &#34;iptables-restore --noflush&#34;: it replaces INPUT and keeps every
+# other chain, including Docker&#39;s, intact.
+*filter
+:INPUT DROP [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+-F INPUT
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A INPUT -m conntrack --ctstate INVALID -j DROP
+-A INPUT -s 127.0.0.0/8 ! -i lo -j DROP
+-A INPUT -p icmp -m icmp --icmp-type 8 -m limit --limit 10/sec --limit-burst 20 -j ACCEPT
+# Jumps of the present INPUT chain to chains that other programs manage.
+# They are repeated here because INPUT is flushed. A chain that accepts
+# traffic decides before the rules below: review what each one admits.
+-A INPUT -m conntrack --ctstate NEW -m comment --comment &#34;kubernetes load balancer firewall&#34; -j KUBE-PROXY-FIREWALL
+-A INPUT -m comment --comment &#34;kubernetes health check service ports&#34; -j KUBE-NODEPORTS
+-A INPUT -m conntrack --ctstate NEW -m comment --comment &#34;kubernetes externally-visible service portals&#34; -j KUBE-EXTERNAL-SERVICES
+-A INPUT -j KUBE-FIREWALL
+# Remote administration: new SSH connections are limited per source address.
+-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh4-22 -j DROP
+-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+# Other listening services found on this host. Uncomment only what must be
+# reachable, preferably with -s &lt;trusted-cidr&gt;:
+# -A INPUT -p udp -m udp --dport 8472 -j ACCEPT   # unknown process
+# -A INPUT -p tcp -m tcp --dport 10250 -m conntrack --ctstate NEW -j ACCEPT   # kubelet
+# -A INPUT -p tcp -m tcp --dport 10256 -m conntrack --ctstate NEW -j ACCEPT   # kube-proxy
+COMMIT
+</pre>
+</div>
+<div class="card file">
+<div class="filehead"><b>IPv6, for ip6tables-restore</b><button class="btn js-only inline" type="button" data-copy="baseline-6">Copy</button></div>
+<pre class="file" id="baseline-6"># Recommended IPv6 baseline generated by iptables-analyzer (ip6tables-restore format).
+# Default deny inbound and forwarded traffic; outbound traffic is allowed.
+# Apply with &#34;ip6tables-restore --noflush&#34;: it replaces INPUT and keeps every
+# other chain, including Docker&#39;s, intact.
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+-F INPUT
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+# Neighbor discovery is untracked by conntrack and must be allowed explicitly;
+# a hop limit of 255 proves the sender is on-link.
+-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 134 -m hl --hl-eq 255 -m comment --comment &#34;router advertisement (SLAAC)&#34; -j ACCEPT
+-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 135 -m hl --hl-eq 255 -m comment --comment &#34;neighbor solicitation&#34; -j ACCEPT
+-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 136 -m hl --hl-eq 255 -m comment --comment &#34;neighbor advertisement&#34; -j ACCEPT
+-A INPUT -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 130 -m comment --comment &#34;multicast listener query&#34; -j ACCEPT
+-A INPUT -s fe80::/10 -d fe80::/10 -p udp -m udp --sport 547 --dport 546 -m comment --comment &#34;DHCPv6 client&#34; -j ACCEPT
+-A INPUT -m conntrack --ctstate INVALID -j DROP
+-A INPUT -s ::1/128 ! -i lo -j DROP
+-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 128 -m limit --limit 10/sec --limit-burst 20 -j ACCEPT
+# Remote administration: new SSH connections are limited per source address.
+-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh6-22 -j DROP
+-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+# Other listening services found on this host. Uncomment only what must be
+# reachable, preferably with -s &lt;trusted-cidr&gt;:
+# -A INPUT -p tcp -m tcp --dport 10250 -m conntrack --ctstate NEW -j ACCEPT   # kubelet
+# -A INPUT -p tcp -m tcp --dport 10256 -m conntrack --ctstate NEW -j ACCEPT   # kube-proxy
+COMMIT
+</pre>
+</div>
+<ul class="notes"><li>SSH stays reachable on TCP port 22 (detected from the listening sshd).</li><li>Both families are always generated: IPv6 gets addresses automatically (SLAAC), so an unused stack must be closed too.</li><li>Keep a second SSH session open and apply with an automatic rollback, for example:</li><li>  printf &#39;#!/bin/sh\nexec iptables-restore --noflush /root/baseline.v4\n&#39; &gt; /root/apply.v4 &amp;&amp; chmod &#43;x /root/apply.v4 &amp;&amp; iptables-apply -t 60 -c /root/apply.v4</li><li>  printf &#39;#!/bin/sh\nexec ip6tables-restore --noflush /root/baseline.v6\n&#39; &gt; /root/apply.v6 &amp;&amp; chmod &#43;x /root/apply.v6 &amp;&amp; ip6tables-apply -t 60 -c /root/apply.v6</li><li>Persist the result with your distribution&#39;s mechanism (e.g. iptables-save &gt; /etc/iptables/rules.v4 with iptables-persistent).</li><li>The baseline keeps the jumps of INPUT to chains of other programs (KUBE-PROXY-FIREWALL, KUBE-NODEPORTS, KUBE-EXTERNAL-SERVICES, KUBE-FIREWALL). Rules in those chains are not part of the baseline: a chain that accepts traffic opens it whatever the baseline says.</li><li>IPv4 FORWARD keeps its policy (ACCEPT): this host routes packets, and the baseline does not replace its forwarding rules.</li></ul>
+</section>
+
+
+<footer>
+Made by <a href="https://github.com/c0m4r/iptables-analyzer" rel="noopener noreferrer">iptables-analyzer</a> vdev at 2026-11-25 12:00. This page is one file and loads nothing from the network.
+</footer>
+</main>
+
+<script>(script)</script>
+</body>
+</html>

@@ -47,6 +47,14 @@ func Escape(s string) string {
 	return b.String()
 }
 
+// Name escapes a name that is shown on one line, such as a host name or the
+// name of an interface: like Escape, and a tab is shown as ^I as well. In
+// the text of a tool a tab can separate columns; in a name it can only
+// pretend to.
+func Name(s string) string {
+	return strings.ReplaceAll(Escape(s), "\t", "^I")
+}
+
 // isPlain reports whether s is printable ASCII (plus tab), the common case.
 func isPlain(s string) bool {
 	for i := 0; i < len(s); i++ {

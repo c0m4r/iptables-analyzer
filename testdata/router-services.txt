@@ -1,0 +1,6 @@
+Netid State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+udp   UNCONN 0      0        192.168.1.1:53        0.0.0.0:*     users:(("dnsmasq",pid=640,fd=4))
+udp   UNCONN 0      0       0.0.0.0%eth1:67        0.0.0.0:*     users:(("dnsmasq",pid=640,fd=3))
+tcp   LISTEN 0      32       192.168.1.1:53        0.0.0.0:*     users:(("dnsmasq",pid=640,fd=5))
+tcp   LISTEN 0      128          0.0.0.0:22        0.0.0.0:*     users:(("sshd",pid=812,fd=3))
+tcp   LISTEN 0      256                *:3128            *:*     users:(("squid",pid=930,fd=11))

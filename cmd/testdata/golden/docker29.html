@@ -74,10 +74,10 @@
 <details class="card finding s-MEDIUM" id="f-4" data-sev="MEDIUM" open>
 <summary><span class="sev c-MEDIUM">MEDIUM</span><span class="fid">F4</span><span class="ftitle">6 Docker published ports are open to any source</span><span class="points"><span class="part">Exposure</span> −16</span></summary>
 <div class="fbody">
-<p>Docker translates these ports to containers, and filter/FORWARD accepts them from any source; the rules of filter/INPUT do not apply: IPv4 8080/tcp to 172.17.0.2:80; IPv4 8082/tcp to 172.17.0.4:80; IPv4 9053/udp to 172.17.0.5:53; IPv4 9000-9002/tcp to 172.17.0.6:9000-9002; IPv4 8091/tcp to 172.29.0.2:80; IPv4 8443/tcp to 172.30.0.2:443; IPv6 8443/tcp to [fd00:dead:beef::2]:443.</p>
+<p>Docker translates these ports to containers, and filter/FORWARD accepts them from any source; the rules of filter/INPUT do not apply: IPv4 8080/tcp to 172.17.0.2:80; IPv4 8082/tcp of 192.168.88.217 to 172.17.0.4:80; IPv4 9053/udp to 172.17.0.5:53; IPv4 9000-9002/tcp to 172.17.0.6:9000-9002; IPv4 8091/tcp to 172.29.0.2:80; IPv4 8443/tcp to 172.30.0.2:443; IPv6 8443/tcp to [fd00:dead:beef::2]:443.</p>
 <ul class="evidence"><li><span class="role">translates</span><a class="loc mono" href="#r4-2-5-1">IPv4 nat/DOCKER #1</a><code class="spec">! -i docker0 -p tcp -m tcp --dport 8080 -j DNAT --to-destination 172.17.0.2:80</code><div class="path">reached by PREROUTING #1</div></li><li><span class="role">translates</span><a class="loc mono" href="#r4-2-5-3">IPv4 nat/DOCKER #3</a><code class="spec">-d 192.168.88.217/32 ! -i docker0 -p tcp -m tcp --dport 8082 -j DNAT --to-destination 172.17.0.4:80</code><div class="path">reached by PREROUTING #1</div></li><li><span class="role">translates</span><a class="loc mono" href="#r4-2-5-4">IPv4 nat/DOCKER #4</a><code class="spec">! -i docker0 -p udp -m udp --dport 9053 -j DNAT --to-destination 172.17.0.5:53</code><div class="path">reached by PREROUTING #1</div></li><li><span class="role">translates</span><a class="loc mono" href="#r4-2-5-5">IPv4 nat/DOCKER #5</a><code class="spec">! -i docker0 -p tcp -m tcp --dport 9000 -j DNAT --to-destination 172.17.0.6:9000</code><div class="path">reached by PREROUTING #1</div></li><li><span class="role">translates</span><a class="loc mono" href="#r4-2-5-9">IPv4 nat/DOCKER #9</a><code class="spec">! -i br-982052ef0162 -p tcp -m tcp --dport 8091 -j DNAT --to-destination 172.29.0.2:80</code><div class="path">reached by PREROUTING #1</div></li><li><span class="role">translates</span><a class="loc mono" href="#r4-2-5-8">IPv4 nat/DOCKER #8</a><code class="spec">! -i br-7a3442937ee6 -p tcp -m tcp --dport 8443 -j DNAT --to-destination 172.30.0.2:443</code><div class="path">reached by PREROUTING #1</div></li></ul>
 <details class="more"><summary>and 1 more rule</summary><ul class="evidence"><li><span class="role">translates</span><a class="loc mono" href="#r6-2-5-1">IPv6 nat/DOCKER #1</a><code class="spec">! -s fe80::/10 ! -i br-7a3442937ee6 -p tcp -m tcp --dport 8443 -j DNAT --to-destination [fd00:dead:beef::2]:443</code><div class="path">reached by PREROUTING #1</div></li></ul></details>
-<div class="fix"><h4>Fix</h4><div>Docker translates published ports in nat/PREROUTING, so they are forwarded and never reach filter/INPUT (this includes INPUT rules of ufw or firewalld). Restrict them in DOCKER-USER, which runs before Docker&#39;s own rules and which Docker never flushes. Packets are already translated there: match the published port with --ctorigdstport, not --dport. A service that only local clients need can be published on loopback instead (docker run -p 127.0.0.1:8080:&lt;container-port&gt;).</div><ol class="steps"><li>Allow the trusted sources of port 8080 first<div class="cmd"><pre id="c-4-1">iptables -I DOCKER-USER 1 -p tcp -m conntrack --ctorigdstport 8080 --ctdir ORIGINAL -s &lt;trusted-cidr&gt; -j RETURN</pre><button class="btn js-only inline" type="button" data-copy="c-4-1">Copy</button></div></li><li>Then drop the rest of that port<div class="cmd"><pre id="c-4-2">iptables -I DOCKER-USER 2 -p tcp -m conntrack --ctorigdstport 8080 --ctdir ORIGINAL -j DROP</pre><button class="btn js-only inline" type="button" data-copy="c-4-2">Copy</button></div></li></ol></div>
+<div class="fix"><h4>Fix</h4><div>Docker translates published ports in nat/PREROUTING, so they are forwarded and never reach filter/INPUT (this includes INPUT rules of ufw or firewalld). Restrict them in DOCKER-USER, which runs before Docker&#39;s own rules and which Docker never flushes. Packets are already translated there: match the published port with --ctorigdstport, not --dport. A service that only local clients need can be published on loopback instead (docker run -p 127.0.0.1:8080:&lt;container-port&gt;). The commands below are for port 8080/tcp. For each of the other ports (8082/tcp of 192.168.88.217, 9053/udp, 9000-9002/tcp, 8091/tcp, 8443/tcp), run them again with its protocol and its port; write a range of ports as FIRST:LAST. For a port of one address, add --ctorigdst ADDRESS; for a port of all addresses, leave that match out. For IPv6, use ip6tables.</div><ol class="steps"><li>Allow the trusted sources of port 8080 first<div class="cmd"><pre id="c-4-1">iptables -I DOCKER-USER 1 -p tcp -m conntrack --ctorigdstport 8080 --ctdir ORIGINAL -s &lt;trusted-cidr&gt; -j RETURN</pre><button class="btn js-only inline" type="button" data-copy="c-4-1">Copy</button></div></li><li>Then drop the rest of that port<div class="cmd"><pre id="c-4-2">iptables -I DOCKER-USER 2 -p tcp -m conntrack --ctorigdstport 8080 --ctdir ORIGINAL -j DROP</pre><button class="btn js-only inline" type="button" data-copy="c-4-2">Copy</button></div></li></ol></div>
 </div>
 </details>
 <details class="card finding s-MEDIUM" id="f-5" data-sev="MEDIUM" open>
@@ -130,6 +130,13 @@
 <td><span class="sub">the policy of the chain</span></td>
 </tr><tr>
 <td>tcp</td>
+<td data-sort="8443">8443</td>
+<td>IPv6</td>
+<td data-sort="3"><span class="scope sc-LOCALNET">private networks</span></td>
+<td></td>
+<td><span class="sub">the policy of the chain</span></td>
+</tr><tr>
+<td>tcp</td>
 <td data-sort="65536">all that no rule names</td>
 <td>IPv4 and IPv6</td>
 <td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
@@ -169,16 +176,10 @@
 <td><a class="mono" href="#r4-2-5-3">IPv4 nat/DOCKER #3</a></td>
 </tr><tr>
 <td>IPv4</td>
-<td class="mono" data-sort="9053">9053/udp</td>
-<td><span class="mono">172.17.0.5:53</span> <span class="sub">docker0</span></td>
+<td class="mono" data-sort="8091">8091/tcp</td>
+<td><span class="mono">172.29.0.2:80</span> <span class="sub">br-982052ef0162</span></td>
 <td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
-<td><a class="mono" href="#r4-2-5-4">IPv4 nat/DOCKER #4</a></td>
-</tr><tr>
-<td>IPv4</td>
-<td class="mono" data-sort="9000">9000-9002/tcp</td>
-<td><span class="mono">172.17.0.6:9000-9002</span> <span class="sub">docker0</span></td>
-<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
-<td><a class="mono" href="#r4-2-5-5">IPv4 nat/DOCKER #5</a></td>
+<td><a class="mono" href="#r4-2-5-9">IPv4 nat/DOCKER #9</a></td>
 </tr><tr>
 <td>IPv4</td>
 <td class="mono" data-sort="8443">8443/tcp</td>
@@ -187,10 +188,16 @@
 <td><a class="mono" href="#r4-2-5-8">IPv4 nat/DOCKER #8</a></td>
 </tr><tr>
 <td>IPv4</td>
-<td class="mono" data-sort="8091">8091/tcp</td>
-<td><span class="mono">172.29.0.2:80</span> <span class="sub">br-982052ef0162</span></td>
+<td class="mono" data-sort="9000">9000-9002/tcp</td>
+<td><span class="mono">172.17.0.6:9000-9002</span> <span class="sub">docker0</span></td>
 <td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
-<td><a class="mono" href="#r4-2-5-9">IPv4 nat/DOCKER #9</a></td>
+<td><a class="mono" href="#r4-2-5-5">IPv4 nat/DOCKER #5</a></td>
+</tr><tr>
+<td>IPv4</td>
+<td class="mono" data-sort="9053">9053/udp</td>
+<td><span class="mono">172.17.0.5:53</span> <span class="sub">docker0</span></td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td><a class="mono" href="#r4-2-5-4">IPv4 nat/DOCKER #4</a></td>
 </tr><tr>
 <td>IPv6</td>
 <td class="mono" data-sort="8443">8443/tcp</td>
@@ -530,14 +537,14 @@
 # -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8080 --ctdir ORIGINAL -j DROP
 # -A DOCKER-USER -p tcp -m conntrack --ctorigdst 192.168.88.217 --ctorigdstport 8082 --ctdir ORIGINAL -s &lt;trusted-cidr&gt; -j RETURN   # published -&gt; 172.17.0.4:80
 # -A DOCKER-USER -p tcp -m conntrack --ctorigdst 192.168.88.217 --ctorigdstport 8082 --ctdir ORIGINAL -j DROP
-# -A DOCKER-USER -p udp -m conntrack --ctorigdstport 9053 --ctdir ORIGINAL -s &lt;trusted-cidr&gt; -j RETURN   # published -&gt; 172.17.0.5:53
-# -A DOCKER-USER -p udp -m conntrack --ctorigdstport 9053 --ctdir ORIGINAL -j DROP
-# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 9000:9002 --ctdir ORIGINAL -s &lt;trusted-cidr&gt; -j RETURN   # published -&gt; 172.17.0.6:9000-9002
-# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 9000:9002 --ctdir ORIGINAL -j DROP
-# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8443 --ctdir ORIGINAL -s &lt;trusted-cidr&gt; -j RETURN   # published -&gt; 172.30.0.2:443
-# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8443 --ctdir ORIGINAL -j DROP
 # -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8091 --ctdir ORIGINAL -s &lt;trusted-cidr&gt; -j RETURN   # published -&gt; 172.29.0.2:80
 # -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8091 --ctdir ORIGINAL -j DROP
+# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8443 --ctdir ORIGINAL -s &lt;trusted-cidr&gt; -j RETURN   # published -&gt; 172.30.0.2:443
+# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8443 --ctdir ORIGINAL -j DROP
+# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 9000:9002 --ctdir ORIGINAL -s &lt;trusted-cidr&gt; -j RETURN   # published -&gt; 172.17.0.6:9000-9002
+# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 9000:9002 --ctdir ORIGINAL -j DROP
+# -A DOCKER-USER -p udp -m conntrack --ctorigdstport 9053 --ctdir ORIGINAL -s &lt;trusted-cidr&gt; -j RETURN   # published -&gt; 172.17.0.5:53
+# -A DOCKER-USER -p udp -m conntrack --ctorigdstport 9053 --ctdir ORIGINAL -j DROP
 -A DOCKER-USER -j RETURN
 COMMIT
 </pre>

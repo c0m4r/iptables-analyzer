@@ -179,7 +179,7 @@
         6
       ],
       "title": "6 Docker published ports are open to any source",
-      "detail": "Docker translates these ports to containers, and filter/FORWARD accepts them from any source; the rules of filter/INPUT do not apply: IPv4 8080/tcp to 172.17.0.2:80; IPv4 8082/tcp to 172.17.0.4:80; IPv4 9053/udp to 172.17.0.5:53; IPv4 9000-9002/tcp to 172.17.0.6:9000-9002; IPv4 8091/tcp to 172.29.0.2:80; IPv4 8443/tcp to 172.30.0.2:443; IPv6 8443/tcp to [fd00:dead:beef::2]:443.",
+      "detail": "Docker translates these ports to containers, and filter/FORWARD accepts them from any source; the rules of filter/INPUT do not apply: IPv4 8080/tcp to 172.17.0.2:80; IPv4 8082/tcp of 192.168.88.217 to 172.17.0.4:80; IPv4 9053/udp to 172.17.0.5:53; IPv4 9000-9002/tcp to 172.17.0.6:9000-9002; IPv4 8091/tcp to 172.29.0.2:80; IPv4 8443/tcp to 172.30.0.2:443; IPv6 8443/tcp to [fd00:dead:beef::2]:443.",
       "ports": [
         "8080/tcp",
         "8082/tcp",
@@ -275,7 +275,7 @@
         }
       ],
       "fix": {
-        "summary": "Docker translates published ports in nat/PREROUTING, so they are forwarded and never reach filter/INPUT (this includes INPUT rules of ufw or firewalld). Restrict them in DOCKER-USER, which runs before Docker's own rules and which Docker never flushes. Packets are already translated there: match the published port with --ctorigdstport, not --dport. A service that only local clients need can be published on loopback instead (docker run -p 127.0.0.1:8080:\u003ccontainer-port\u003e).",
+        "summary": "Docker translates published ports in nat/PREROUTING, so they are forwarded and never reach filter/INPUT (this includes INPUT rules of ufw or firewalld). Restrict them in DOCKER-USER, which runs before Docker's own rules and which Docker never flushes. Packets are already translated there: match the published port with --ctorigdstport, not --dport. A service that only local clients need can be published on loopback instead (docker run -p 127.0.0.1:8080:\u003ccontainer-port\u003e). The commands below are for port 8080/tcp. For each of the other ports (8082/tcp of 192.168.88.217, 9053/udp, 9000-9002/tcp, 8091/tcp, 8443/tcp), run them again with its protocol and its port; write a range of ports as FIRST:LAST. For a port of one address, add --ctorigdst ADDRESS; for a port of all addresses, leave that match out. For IPv6, use ip6tables.",
         "steps": [
           {
             "text": "Allow the trusted sources of port 8080 first",
@@ -385,6 +385,16 @@
     },
     {
       "families": [
+        6
+      ],
+      "protocol": "tcp",
+      "first": 8443,
+      "last": 8443,
+      "scope": "LOCALNET",
+      "certainty": "DEFINITE"
+    },
+    {
+      "families": [
         4,
         6
       ],
@@ -477,39 +487,13 @@
     },
     {
       "family": 4,
-      "protocol": "udp",
-      "host_port": 9053,
-      "host_port_end": 9053,
-      "dest_addr": "172.17.0.5",
-      "dest_port": 53,
-      "dest_port_end": 53,
-      "bridge": "docker0",
-      "docker": true,
-      "forward_scope": "EXPOSED",
-      "input_scope": "EXPOSED",
-      "certainty": "DEFINITE",
-      "rule": {
-        "family": 4,
-        "table": "nat",
-        "chain": "DOCKER",
-        "num": 4,
-        "spec": "! -i docker0 -p udp -m udp --dport 9053 -j DNAT --to-destination 172.17.0.5:53",
-        "role": "translates",
-        "path": [
-          "PREROUTING #1",
-          "DOCKER #4"
-        ]
-      }
-    },
-    {
-      "family": 4,
       "protocol": "tcp",
-      "host_port": 9000,
-      "host_port_end": 9002,
-      "dest_addr": "172.17.0.6",
-      "dest_port": 9000,
-      "dest_port_end": 9002,
-      "bridge": "docker0",
+      "host_port": 8091,
+      "host_port_end": 8091,
+      "dest_addr": "172.29.0.2",
+      "dest_port": 80,
+      "dest_port_end": 80,
+      "bridge": "br-982052ef0162",
       "docker": true,
       "forward_scope": "EXPOSED",
       "input_scope": "EXPOSED",
@@ -518,12 +502,12 @@
         "family": 4,
         "table": "nat",
         "chain": "DOCKER",
-        "num": 5,
-        "spec": "! -i docker0 -p tcp -m tcp --dport 9000 -j DNAT --to-destination 172.17.0.6:9000",
+        "num": 9,
+        "spec": "! -i br-982052ef0162 -p tcp -m tcp --dport 8091 -j DNAT --to-destination 172.29.0.2:80",
         "role": "translates",
         "path": [
           "PREROUTING #1",
-          "DOCKER #5"
+          "DOCKER #9"
         ]
       }
     },
@@ -556,12 +540,12 @@
     {
       "family": 4,
       "protocol": "tcp",
-      "host_port": 8091,
-      "host_port_end": 8091,
-      "dest_addr": "172.29.0.2",
-      "dest_port": 80,
-      "dest_port_end": 80,
-      "bridge": "br-982052ef0162",
+      "host_port": 9000,
+      "host_port_end": 9002,
+      "dest_addr": "172.17.0.6",
+      "dest_port": 9000,
+      "dest_port_end": 9002,
+      "bridge": "docker0",
       "docker": true,
       "forward_scope": "EXPOSED",
       "input_scope": "EXPOSED",
@@ -570,12 +554,38 @@
         "family": 4,
         "table": "nat",
         "chain": "DOCKER",
-        "num": 9,
-        "spec": "! -i br-982052ef0162 -p tcp -m tcp --dport 8091 -j DNAT --to-destination 172.29.0.2:80",
+        "num": 5,
+        "spec": "! -i docker0 -p tcp -m tcp --dport 9000 -j DNAT --to-destination 172.17.0.6:9000",
         "role": "translates",
         "path": [
           "PREROUTING #1",
-          "DOCKER #9"
+          "DOCKER #5"
+        ]
+      }
+    },
+    {
+      "family": 4,
+      "protocol": "udp",
+      "host_port": 9053,
+      "host_port_end": 9053,
+      "dest_addr": "172.17.0.5",
+      "dest_port": 53,
+      "dest_port_end": 53,
+      "bridge": "docker0",
+      "docker": true,
+      "forward_scope": "EXPOSED",
+      "input_scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "rule": {
+        "family": 4,
+        "table": "nat",
+        "chain": "DOCKER",
+        "num": 4,
+        "spec": "! -i docker0 -p udp -m udp --dport 9053 -j DNAT --to-destination 172.17.0.5:53",
+        "role": "translates",
+        "path": [
+          "PREROUTING #1",
+          "DOCKER #4"
         ]
       }
     },
@@ -731,7 +741,7 @@
     "privileges_dropped": false
   },
   "baseline": {
-    "ipv4": "# Recommended IPv4 baseline generated by iptables-analyzer (iptables-restore format).\n# Default deny inbound and forwarded traffic; outbound traffic is allowed.\n# Apply with \"iptables-restore --noflush\": it replaces INPUT and DOCKER-USER and keeps every\n# other chain, including Docker's, intact.\n*filter\n:INPUT DROP [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\n:DOCKER-USER - [0:0]\n-F INPUT\n-A INPUT -i lo -j ACCEPT\n-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n-A INPUT -m conntrack --ctstate INVALID -j DROP\n-A INPUT -s 127.0.0.0/8 ! -i lo -j DROP\n-A INPUT -p icmp -m icmp --icmp-type 8 -m limit --limit 10/sec --limit-burst 20 -j ACCEPT\n# Remote administration: new SSH connections are limited per source address.\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh4-22 -j DROP\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT\n# Other listening services found on this host. Uncomment only what must be\n# reachable, preferably with -s \u003ctrusted-cidr\u003e:\n# -A INPUT -p tcp -m tcp --dport 80 -m conntrack --ctstate NEW -j ACCEPT   # nginx\n# -A INPUT -p tcp -m tcp --dport 443 -m conntrack --ctstate NEW -j ACCEPT   # nginx\n# -A INPUT -p tcp -m tcp --dport 3306 -m conntrack --ctstate NEW -j ACCEPT   # mysqld\n# -A INPUT -p udp -m udp --dport 68 -j ACCEPT   # dhclient\n# Docker: published ports never reach INPUT. Restrict them here; packets are\n# already DNATed, so match the published port with conntrack, not --dport.\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8080 --ctdir ORIGINAL -s \u003ctrusted-cidr\u003e -j RETURN   # published -\u003e 172.17.0.2:80\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8080 --ctdir ORIGINAL -j DROP\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdst 192.168.88.217 --ctorigdstport 8082 --ctdir ORIGINAL -s \u003ctrusted-cidr\u003e -j RETURN   # published -\u003e 172.17.0.4:80\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdst 192.168.88.217 --ctorigdstport 8082 --ctdir ORIGINAL -j DROP\n# -A DOCKER-USER -p udp -m conntrack --ctorigdstport 9053 --ctdir ORIGINAL -s \u003ctrusted-cidr\u003e -j RETURN   # published -\u003e 172.17.0.5:53\n# -A DOCKER-USER -p udp -m conntrack --ctorigdstport 9053 --ctdir ORIGINAL -j DROP\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 9000:9002 --ctdir ORIGINAL -s \u003ctrusted-cidr\u003e -j RETURN   # published -\u003e 172.17.0.6:9000-9002\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 9000:9002 --ctdir ORIGINAL -j DROP\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8443 --ctdir ORIGINAL -s \u003ctrusted-cidr\u003e -j RETURN   # published -\u003e 172.30.0.2:443\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8443 --ctdir ORIGINAL -j DROP\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8091 --ctdir ORIGINAL -s \u003ctrusted-cidr\u003e -j RETURN   # published -\u003e 172.29.0.2:80\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8091 --ctdir ORIGINAL -j DROP\n-A DOCKER-USER -j RETURN\nCOMMIT\n",
+    "ipv4": "# Recommended IPv4 baseline generated by iptables-analyzer (iptables-restore format).\n# Default deny inbound and forwarded traffic; outbound traffic is allowed.\n# Apply with \"iptables-restore --noflush\": it replaces INPUT and DOCKER-USER and keeps every\n# other chain, including Docker's, intact.\n*filter\n:INPUT DROP [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\n:DOCKER-USER - [0:0]\n-F INPUT\n-A INPUT -i lo -j ACCEPT\n-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n-A INPUT -m conntrack --ctstate INVALID -j DROP\n-A INPUT -s 127.0.0.0/8 ! -i lo -j DROP\n-A INPUT -p icmp -m icmp --icmp-type 8 -m limit --limit 10/sec --limit-burst 20 -j ACCEPT\n# Remote administration: new SSH connections are limited per source address.\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh4-22 -j DROP\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT\n# Other listening services found on this host. Uncomment only what must be\n# reachable, preferably with -s \u003ctrusted-cidr\u003e:\n# -A INPUT -p tcp -m tcp --dport 80 -m conntrack --ctstate NEW -j ACCEPT   # nginx\n# -A INPUT -p tcp -m tcp --dport 443 -m conntrack --ctstate NEW -j ACCEPT   # nginx\n# -A INPUT -p tcp -m tcp --dport 3306 -m conntrack --ctstate NEW -j ACCEPT   # mysqld\n# -A INPUT -p udp -m udp --dport 68 -j ACCEPT   # dhclient\n# Docker: published ports never reach INPUT. Restrict them here; packets are\n# already DNATed, so match the published port with conntrack, not --dport.\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8080 --ctdir ORIGINAL -s \u003ctrusted-cidr\u003e -j RETURN   # published -\u003e 172.17.0.2:80\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8080 --ctdir ORIGINAL -j DROP\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdst 192.168.88.217 --ctorigdstport 8082 --ctdir ORIGINAL -s \u003ctrusted-cidr\u003e -j RETURN   # published -\u003e 172.17.0.4:80\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdst 192.168.88.217 --ctorigdstport 8082 --ctdir ORIGINAL -j DROP\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8091 --ctdir ORIGINAL -s \u003ctrusted-cidr\u003e -j RETURN   # published -\u003e 172.29.0.2:80\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8091 --ctdir ORIGINAL -j DROP\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8443 --ctdir ORIGINAL -s \u003ctrusted-cidr\u003e -j RETURN   # published -\u003e 172.30.0.2:443\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8443 --ctdir ORIGINAL -j DROP\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 9000:9002 --ctdir ORIGINAL -s \u003ctrusted-cidr\u003e -j RETURN   # published -\u003e 172.17.0.6:9000-9002\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 9000:9002 --ctdir ORIGINAL -j DROP\n# -A DOCKER-USER -p udp -m conntrack --ctorigdstport 9053 --ctdir ORIGINAL -s \u003ctrusted-cidr\u003e -j RETURN   # published -\u003e 172.17.0.5:53\n# -A DOCKER-USER -p udp -m conntrack --ctorigdstport 9053 --ctdir ORIGINAL -j DROP\n-A DOCKER-USER -j RETURN\nCOMMIT\n",
     "ipv6": "# Recommended IPv6 baseline generated by iptables-analyzer (ip6tables-restore format).\n# Default deny inbound and forwarded traffic; outbound traffic is allowed.\n# Apply with \"ip6tables-restore --noflush\": it replaces INPUT and DOCKER-USER and keeps every\n# other chain, including Docker's, intact.\n*filter\n:INPUT DROP [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\n:DOCKER-USER - [0:0]\n-F INPUT\n-A INPUT -i lo -j ACCEPT\n-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n# Neighbor discovery is untracked by conntrack and must be allowed explicitly;\n# a hop limit of 255 proves the sender is on-link.\n-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 134 -m hl --hl-eq 255 -m comment --comment \"router advertisement (SLAAC)\" -j ACCEPT\n-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 135 -m hl --hl-eq 255 -m comment --comment \"neighbor solicitation\" -j ACCEPT\n-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 136 -m hl --hl-eq 255 -m comment --comment \"neighbor advertisement\" -j ACCEPT\n-A INPUT -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 130 -m comment --comment \"multicast listener query\" -j ACCEPT\n-A INPUT -s fe80::/10 -d fe80::/10 -p udp -m udp --sport 547 --dport 546 -m comment --comment \"DHCPv6 client\" -j ACCEPT\n-A INPUT -m conntrack --ctstate INVALID -j DROP\n-A INPUT -s ::1/128 ! -i lo -j DROP\n-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 128 -m limit --limit 10/sec --limit-burst 20 -j ACCEPT\n# Remote administration: new SSH connections are limited per source address.\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh6-22 -j DROP\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT\n# Docker: published ports never reach INPUT. Restrict them here; packets are\n# already DNATed, so match the published port with conntrack, not --dport.\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8443 --ctdir ORIGINAL -s \u003ctrusted-cidr\u003e -j RETURN   # published -\u003e [fd00:dead:beef::2]:443\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8443 --ctdir ORIGINAL -j DROP\n-A DOCKER-USER -j RETURN\nCOMMIT\n",
     "notes": [
       "SSH stays reachable on TCP port 22 (detected from the listening sshd).",

@@ -1,0 +1,267 @@
+iptables-analyzer vdev · file analysis · 2026-11-25 12:00
+inputs: ../testdata/k8s.iptables-save, ../testdata/k8s-services.txt
+IPv4: 66 rules in 43 chains (flannel, kubernetes) · INPUT ACCEPT · FORWARD ACCEPT · OUTPUT ACCEPT
+IPv6: not supplied
+
+  Grade F  56/100    3 high · 1 medium · 1 low · 1 info
+  Grade limited to F: IPv4 INPUT accepts every new connection.
+
+  Policy                ▱▱▱▱▱▱▱▱▱▱  0/25    Hygiene               ▰▰▰▰▰▰▰▰▰▰ 15/15
+  Exposure              ▰▰▱▱▱▱▱▱▱▱  6/25    IPv6                  ▰▰▰▰▰▰▰▰▰▰ 10/10
+  Shadows and bypasses  ▰▰▰▰▰▰▰▰▰▰ 25/25    
+
+  note: IPv4: 4 cluster IP addresses of Kubernetes services were not examined. A cluster IP is no
+  address of the node; only hosts that route the service network through this node reach it.
+  note: No IPv6 rules were supplied: only IPv4 was analyzed, and IPv4 rules do not filter IPv6. Add
+  the output of ip6tables-save as another file.
+
+  Fix first
+    1. F1   INPUT accepts new connections to any port                                   +15, grade C
+    2. F3   FORWARD accepts traffic that no rule names                                           +10
+    3. F4   2 forwarded ports are open to any source                                              +4
+
+  Findings
+
+  HIGH     F1   INPUT accepts new connections to any port                                        -15
+                No rule refuses them, and the policy of filter/INPUT is ACCEPT. Every port that no
+                rule names is open: a service that listens on one, now or later, is reachable at
+                once.
+                fix  Add rules for the traffic that is needed and test them, with a way back, then
+                     set the policy to DROP. The recommended baseline (--baseline) is a complete
+                     rule set to start from.
+                     Deny by default (IPv4):
+                       iptables -P INPUT DROP
+
+  HIGH     F2   4 services are open to any source because INPUT accepts by default               -14
+                No rule names their ports: A service on 8472/udp; sshd on 22/tcp; kubelet on
+                10250/tcp; kube-proxy on 10256/tcp. Close the default first; then accept each port
+                that must stay reachable, for its clients only.
+
+  HIGH     F3   FORWARD accepts traffic that no rule names                                       -10
+                No rule refuses it, and the policy of filter/FORWARD is ACCEPT. The rules show that
+                this host routes packets (address translation or Docker), so other hosts can send
+                traffic through it to every network it reaches, including container and virtual
+                networks.
+                fix  Set the policy to DROP after the forwarding paths that are needed have rules.
+                     Deny forwarding by default (IPv4):
+                       iptables -P FORWARD DROP
+
+  MEDIUM   F4   2 forwarded ports are open to any source                                          -4
+                nat/PREROUTING translates these ports to another host, and filter/FORWARD accepts
+                them from any source; the rules of filter/INPUT do not apply: IPv4 30080/tcp to
+                10.244.0.10:8080, 10.244.0.11:8080; IPv4 30443/tcp to 10.244.0.12:8443.
+                nat/KUBE-SEP-KTTG6H42UOAJUCVL #2:  -p tcp -m comment --comment "default/web" -m tcp -j DNAT --to-destination 10.244.0.10:8080
+                  reached by PREROUTING #1 → KUBE-SERVICES #3 → KUBE-SVC-2CMXP7HKUVJN7L6M #2
+                nat/KUBE-SEP-N4G2XR5TDX7PQE7P #2:  -p tcp -m comment --comment "default/web" -m tcp -j DNAT --to-destination 10.244.0.11:8080
+                  reached by PREROUTING #1 → KUBE-SERVICES #3 → KUBE-SVC-2CMXP7HKUVJN7L6M #3
+                nat/KUBE-SEP-2Z3537XSN3RJRU3S #2:  -p tcp -m comment --comment "default/api" -m tcp -j DNAT --to-destination 10.244.0.12:8443
+                  reached by PREROUTING #1 → KUBE-SERVICES #5 → KUBE-SVC-EDNDUDH2C75GIR6O #2
+                fix  kube-proxy writes this translation for a Service of type NodePort or
+                     LoadBalancer, and it writes its chains again all the time. Limit the Service in
+                     the cluster: set spec.loadBalancerSourceRanges, use a NetworkPolicy for the
+                     pods, or use type ClusterIP when the port needs no clients outside the cluster.
+                     To filter on the node, drop the port for other sources in the raw table, which
+                     sees the packet before the translation. The command below is for port
+                     30080/tcp. For each of the other ports (30443/tcp), run it again with its
+                     protocol and its port.
+                     Drop port 30080 for all but the known clients, in front of the translation:
+                       iptables -t raw -I PREROUTING -m addrtype --dst-type LOCAL -p tcp -m tcp --dport 30080 ! -s <trusted-cidr> -j DROP
+
+  LOW      F5   Forwarded port 80/tcp of 203.0.113.50 is open to any source                       -1
+                nat/PREROUTING translates these ports to another host, and filter/FORWARD accepts
+                them from any source; the rules of filter/INPUT do not apply: IPv4 80/tcp of
+                203.0.113.50 to 10.244.0.10:8080, 10.244.0.11:8080.
+                nat/KUBE-SEP-KTTG6H42UOAJUCVL #2:  -p tcp -m comment --comment "default/web" -m tcp -j DNAT --to-destination 10.244.0.10:8080
+                  reached by PREROUTING #1 → KUBE-SERVICES #3 → KUBE-SVC-2CMXP7HKUVJN7L6M #2
+                nat/KUBE-SEP-N4G2XR5TDX7PQE7P #2:  -p tcp -m comment --comment "default/web" -m tcp -j DNAT --to-destination 10.244.0.11:8080
+                  reached by PREROUTING #1 → KUBE-SERVICES #3 → KUBE-SVC-2CMXP7HKUVJN7L6M #3
+                fix  kube-proxy writes this translation for a Service of type NodePort or
+                     LoadBalancer, and it writes its chains again all the time. Limit the Service in
+                     the cluster: set spec.loadBalancerSourceRanges, use a NetworkPolicy for the
+                     pods, or use type ClusterIP when the port needs no clients outside the cluster.
+                     To filter on the node, drop the port for other sources in the raw table, which
+                     sees the packet before the translation.
+                     Drop port 80 for all but the known clients, in front of the translation:
+                       iptables -t raw -I PREROUTING -d 203.0.113.50 -p tcp -m tcp --dport 80 ! -s <trusted-cidr> -j DROP
+
+  INFO     F6   OUTPUT default policy is ACCEPT
+                All outbound traffic is allowed. This is the usual setup; an OUTPUT allowlist can
+                limit what a compromised service is able to reach.
+
+  Open to any source
+    tcp  22 sshd · 10250 kubelet · 10256 kube-proxy · all ports that no rule names
+    udp  8472 unknown process · all ports that no rule names
+
+  Translated to other hosts
+    203.0.113.50:80/tcp → 10.244.0.10:8080, 10.244.0.11:8080: any source
+    30080/tcp → 10.244.0.10:8080, 10.244.0.11:8080: any source
+    30443/tcp → 10.244.0.12:8443: any source
+    These ports are translated in nat/PREROUTING and pass filter/FORWARD, not filter/INPUT.
+
+  Listening sockets
+    udp   8472   0.0.0.0                  -                  EXPOSED
+    tcp   10248  127.0.0.1                kubelet            LOCALHOST
+    tcp   10249  127.0.0.1                kube-proxy         LOCALHOST
+    tcp   22     0.0.0.0                  sshd               EXPOSED
+    tcp   10250  *                        kubelet            EXPOSED
+    tcp   10256  *                        kube-proxy         EXPOSED
+
+  Sandbox
+    Landlock is not available
+
+  Rules, IPv4
+
+    filter/INPUT (policy ACCEPT, 4 rules)
+       1 -m conntrack --ctstate NEW -m comment --comment "kubernetes load balancer firewall" -j KUBE-PROXY-FIREWALL
+       2 -m comment --comment "kubernetes health check service ports" -j KUBE-NODEPORTS
+       3 -m conntrack --ctstate NEW -m comment --comment "kubernetes externally-visible service portals" -j KUBE-EXTERNAL-SERVICES
+       4 -j KUBE-FIREWALL
+
+    filter/FORWARD (policy ACCEPT, 5 rules)
+       1 -m conntrack --ctstate NEW -m comment --comment "kubernetes load balancer firewall" -j KUBE-PROXY-FIREWALL
+       2 -m comment --comment "kubernetes forwarding rules" -j KUBE-FORWARD
+       3 -m conntrack --ctstate NEW -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
+       4 -m conntrack --ctstate NEW -m comment --comment "kubernetes externally-visible service portals" -j KUBE-EXTERNAL-SERVICES
+       5 -m comment --comment "flanneld forward" -j FLANNEL-FWD
+
+    filter/OUTPUT (policy ACCEPT, 3 rules)
+       1 -m conntrack --ctstate NEW -m comment --comment "kubernetes load balancer firewall" -j KUBE-PROXY-FIREWALL
+       2 -m conntrack --ctstate NEW -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
+       3 -j KUBE-FIREWALL
+
+    filter/FLANNEL-FWD (2 rules, flannel)
+       1 -s 10.244.0.0/16 -m comment --comment "flanneld forward" -j ACCEPT
+       2 -d 10.244.0.0/16 -m comment --comment "flanneld forward" -j ACCEPT
+
+    filter/KUBE-EXTERNAL-SERVICES (0 rules, kubernetes)
+
+    filter/KUBE-FIREWALL (1 rule, kubernetes)
+       1 ! -s 127.0.0.0/8 -d 127.0.0.0/8 -m comment --comment "block incoming localnet connections" -m conntrack ! --ctstate RELATED,ESTABLISHED,DNAT -j DROP
+
+    filter/KUBE-FORWARD (3 rules, kubernetes)
+       1 -m conntrack --ctstate INVALID -j DROP
+       2 -m comment --comment "kubernetes forwarding rules" -m mark --mark 0x4000/0x4000 -j ACCEPT
+       3 -m comment --comment "kubernetes forwarding conntrack rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+    filter/KUBE-KUBELET-CANARY (0 rules, kubernetes)
+
+    filter/KUBE-NODEPORTS (0 rules, kubernetes)
+
+    filter/KUBE-PROXY-CANARY (0 rules, kubernetes)
+
+    filter/KUBE-PROXY-FIREWALL (0 rules, kubernetes)
+
+    filter/KUBE-SERVICES (0 rules, kubernetes)
+
+    nat/PREROUTING (policy ACCEPT, 1 rule)
+       1 -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
+
+    nat/INPUT (policy ACCEPT, 0 rules)
+
+    nat/OUTPUT (policy ACCEPT, 1 rule)
+       1 -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
+
+    nat/POSTROUTING (policy ACCEPT, 2 rules)
+       1 -m comment --comment "kubernetes postrouting rules" -j KUBE-POSTROUTING
+       2 -m comment --comment "flanneld masq" -j FLANNEL-POSTRTG
+
+    nat/FLANNEL-POSTRTG (6 rules, flannel)
+       1 -m mark --mark 0x4000/0x4000 -m comment --comment "flanneld masq" -j RETURN
+       2 -s 10.244.0.0/24 -d 10.244.0.0/16 -m comment --comment "flanneld masq" -j RETURN
+       3 -s 10.244.0.0/16 -d 10.244.0.0/24 -m comment --comment "flanneld masq" -j RETURN
+       4 ! -s 10.244.0.0/16 -d 10.244.0.0/24 -m comment --comment "flanneld masq" -j RETURN
+       5 -s 10.244.0.0/16 ! -d 224.0.0.0/4 -m comment --comment "flanneld masq" -j MASQUERADE --random-fully
+       6 ! -s 10.244.0.0/16 -d 10.244.0.0/16 -m comment --comment "flanneld masq" -j MASQUERADE --random-fully
+
+    nat/KUBE-EXT-2CMXP7HKUVJN7L6M (2 rules, kubernetes)
+       1 -m comment --comment "masquerade traffic for default/web external destinations" -j KUBE-MARK-MASQ
+       2 -j KUBE-SVC-2CMXP7HKUVJN7L6M
+
+    nat/KUBE-EXT-EDNDUDH2C75GIR6O (2 rules, kubernetes)
+       1 -m comment --comment "masquerade traffic for default/api external destinations" -j KUBE-MARK-MASQ
+       2 -j KUBE-SVC-EDNDUDH2C75GIR6O
+
+    nat/KUBE-KUBELET-CANARY (0 rules, kubernetes)
+
+    nat/KUBE-MARK-MASQ (1 rule, kubernetes)
+       1 -j MARK --set-xmark 0x4000/0x4000
+
+    nat/KUBE-NODEPORTS (2 rules, kubernetes)
+       1 -p tcp -m comment --comment "default/web" -m tcp --dport 30080 -j KUBE-EXT-2CMXP7HKUVJN7L6M
+       2 -p tcp -m comment --comment "default/api" -m tcp --dport 30443 -j KUBE-EXT-EDNDUDH2C75GIR6O
+
+    nat/KUBE-POSTROUTING (3 rules, kubernetes)
+       1 -m mark ! --mark 0x4000/0x4000 -j RETURN
+       2 -j MARK --set-xmark 0x4000/0x0
+       3 -m comment --comment "kubernetes service traffic requiring SNAT" -j MASQUERADE --random-fully
+
+    nat/KUBE-PROXY-CANARY (0 rules, kubernetes)
+
+    nat/KUBE-SEP-2Z3537XSN3RJRU3S (2 rules, kubernetes)
+       1 -s 10.244.0.12/32 -m comment --comment "default/api" -j KUBE-MARK-MASQ
+       2 -p tcp -m comment --comment "default/api" -m tcp -j DNAT --to-destination 10.244.0.12:8443 [F4]
+
+    nat/KUBE-SEP-6E7XQMQ4RAYOWTTM (2 rules, kubernetes)
+       1 -s 10.244.0.2/32 -m comment --comment "kube-system/kube-dns:dns" -j KUBE-MARK-MASQ
+       2 -p udp -m comment --comment "kube-system/kube-dns:dns" -m udp -j DNAT --to-destination 10.244.0.2:53
+
+    nat/KUBE-SEP-KTTG6H42UOAJUCVL (2 rules, kubernetes)
+       1 -s 10.244.0.10/32 -m comment --comment "default/web" -j KUBE-MARK-MASQ
+       2 -p tcp -m comment --comment "default/web" -m tcp -j DNAT --to-destination 10.244.0.10:8080 [F4 F5]
+
+    nat/KUBE-SEP-N4G2XR5TDX7PQE7P (2 rules, kubernetes)
+       1 -s 10.244.0.11/32 -m comment --comment "default/web" -j KUBE-MARK-MASQ
+       2 -p tcp -m comment --comment "default/web" -m tcp -j DNAT --to-destination 10.244.0.11:8080 [F4 F5]
+
+    nat/KUBE-SEP-VPILYQBSPPXYB66K (2 rules, kubernetes)
+       1 -s 192.168.49.2/32 -m comment --comment "default/kubernetes:https" -j KUBE-MARK-MASQ
+       2 -p tcp -m comment --comment "default/kubernetes:https" -m tcp -j DNAT --to-destination 192.168.49.2:6443
+
+    nat/KUBE-SEP-YIL6JZP7A3QYXJU2 (2 rules, kubernetes)
+       1 -s 10.244.0.3/32 -m comment --comment "kube-system/kube-dns:dns" -j KUBE-MARK-MASQ
+       2 -p udp -m comment --comment "kube-system/kube-dns:dns" -m udp -j DNAT --to-destination 10.244.0.3:53
+
+    nat/KUBE-SERVICES (6 rules, kubernetes)
+       1 -d 10.96.0.1/32 -p tcp -m comment --comment "default/kubernetes:https cluster IP" -m tcp --dport 443 -j KUBE-SVC-NPX46M4PTMTKRN6Y
+       2 -d 10.96.0.10/32 -p udp -m comment --comment "kube-system/kube-dns:dns cluster IP" -m udp --dport 53 -j KUBE-SVC-TCOU7JCQXEZGVUNU
+       3 -d 10.101.37.20/32 -p tcp -m comment --comment "default/web cluster IP" -m tcp --dport 80 -j KUBE-SVC-2CMXP7HKUVJN7L6M
+       4 -d 203.0.113.50/32 -p tcp -m comment --comment "default/web loadbalancer IP" -m tcp --dport 80 -j KUBE-EXT-2CMXP7HKUVJN7L6M
+       5 -d 10.107.201.9/32 -p tcp -m comment --comment "default/api cluster IP" -m tcp --dport 443 -j KUBE-SVC-EDNDUDH2C75GIR6O
+       6 -m comment --comment "kubernetes service nodeports; NOTE: this must be the last rule in this chain" -m addrtype --dst-type LOCAL -j KUBE-NODEPORTS
+
+    nat/KUBE-SVC-2CMXP7HKUVJN7L6M (3 rules, kubernetes)
+       1 ! -s 10.244.0.0/16 -d 10.101.37.20/32 -p tcp -m comment --comment "default/web cluster IP" -m tcp --dport 80 -j KUBE-MARK-MASQ
+       2 -m comment --comment "default/web -> 10.244.0.10:8080" -m statistic --mode random --probability 0.50000000000 -j KUBE-SEP-KTTG6H42UOAJUCVL
+       3 -m comment --comment "default/web -> 10.244.0.11:8080" -j KUBE-SEP-N4G2XR5TDX7PQE7P
+
+    nat/KUBE-SVC-EDNDUDH2C75GIR6O (2 rules, kubernetes)
+       1 ! -s 10.244.0.0/16 -d 10.107.201.9/32 -p tcp -m comment --comment "default/api cluster IP" -m tcp --dport 443 -j KUBE-MARK-MASQ
+       2 -m comment --comment "default/api -> 10.244.0.12:8443" -j KUBE-SEP-2Z3537XSN3RJRU3S
+
+    nat/KUBE-SVC-NPX46M4PTMTKRN6Y (2 rules, kubernetes)
+       1 ! -s 10.244.0.0/16 -d 10.96.0.1/32 -p tcp -m comment --comment "default/kubernetes:https cluster IP" -m tcp --dport 443 -j KUBE-MARK-MASQ
+       2 -m comment --comment "default/kubernetes:https -> 192.168.49.2:6443" -j KUBE-SEP-VPILYQBSPPXYB66K
+
+    nat/KUBE-SVC-TCOU7JCQXEZGVUNU (3 rules, kubernetes)
+       1 ! -s 10.244.0.0/16 -d 10.96.0.10/32 -p udp -m comment --comment "kube-system/kube-dns:dns cluster IP" -m udp --dport 53 -j KUBE-MARK-MASQ
+       2 -m comment --comment "kube-system/kube-dns:dns -> 10.244.0.2:53" -m statistic --mode random --probability 0.50000000000 -j KUBE-SEP-6E7XQMQ4RAYOWTTM
+       3 -m comment --comment "kube-system/kube-dns:dns -> 10.244.0.3:53" -j KUBE-SEP-YIL6JZP7A3QYXJU2
+
+    mangle/PREROUTING (policy ACCEPT, 0 rules)
+
+    mangle/INPUT (policy ACCEPT, 0 rules)
+
+    mangle/FORWARD (policy ACCEPT, 0 rules)
+
+    mangle/OUTPUT (policy ACCEPT, 0 rules)
+
+    mangle/POSTROUTING (policy ACCEPT, 0 rules)
+
+    mangle/KUBE-IPTABLES-HINT (0 rules, kubernetes)
+
+    mangle/KUBE-KUBELET-CANARY (0 rules, kubernetes)
+
+    mangle/KUBE-PROXY-CANARY (0 rules, kubernetes)
+
+  Not shown: recommended baseline (--baseline)
+  Interactive report: --html FILE · machine-readable: --json

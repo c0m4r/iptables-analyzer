@@ -9,7 +9,8 @@ make check        # Run vet, fmt check, tests
 make test         # Run all unit tests
 make test-race    # Run all tests with race detector (needs cgo)
 make test-sandbox # Run the Landlock enforcement tests (skipped without Landlock)
-make fuzz         # Fuzz the parsers, the whole pipeline and the HTML report (FUZZTIME=30s)
+make test-kernel  # Compare the analysis with the Linux kernel in network namespaces
+make fuzz         # Fuzz the parsers, the whole pipeline, the queries and the HTML report (FUZZTIME=30s)
 make update-golden # Rewrite the golden files of the report formats
 make check-deps   # go mod verify, go mod tidy -diff, dependency cooldown
 
@@ -19,6 +20,8 @@ make check-deps   # go mod verify, go mod tidy -diff, dependency cooldown
 # Test with fixtures
 ./iptables-analyzer testdata/docker.iptables-save
 ./iptables-analyzer testdata/ufw.iptables-save testdata/ufw-services.txt --html /tmp/report.html
+./iptables-analyzer testdata/router.snapshot.json --trace 'tcp 203.0.113.5 -> :8443 in eth0'
+./iptables-analyzer --diff testdata/basic.iptables-save testdata/insecure.iptables-save
 ```
 
 ## Project Structure
@@ -47,15 +50,20 @@ iptables-analyzer/
 ├── cmd/
 │   ├── root.go              # CLI setup with cobra, order of the steps, exit status
 │   ├── golden_test.go       # The reports of the fixtures against testdata/golden
-│   └── testdata/golden/     # Expected text, JSON and HTML reports
+│   ├── query_test.go        # --trace, --expect, --diff, --snapshot, --ipset-file, iptables -S input
+│   └── testdata/golden/     # Expected text, JSON and HTML reports, traces and comparisons
 ├── internal/
 │   ├── models/
 │   │   └── models.go        # All shared data structures
 │   ├── parser/
-│   │   ├── parser.go        # iptables-save format parser
-│   │   └── parser_test.go   # Parser unit tests
+│   │   ├── parser.go        # Parser for iptables-save output and for "iptables -S" listings
+│   │   ├── parser_test.go   # Parser unit tests
+│   │   └── listing_test.go  # "iptables -S" listings
 │   ├── loader/
-│   │   └── loader.go        # File and live system input (read, then parse)
+│   │   └── loader.go        # File and live system input (read, then parse); the facts about a live host
+│   ├── hostinfo/
+│   │   ├── hostinfo.go      # Parsers for "ipset save", "nft list chains" and "ip route"; kernel settings
+│   │   └── snapshot.go      # The snapshot file: everything that a live analysis reads
 │   ├── safeio/
 │   │   └── safeio.go        # Bounded reads, trusted tool execution
 │   ├── sandbox/
@@ -64,6 +72,9 @@ iptables-analyzer/
 │   │   └── textsafe.go      # Control-character escaping, shell quoting
 │   ├── analyzer/
 │   │   ├── evaluation.go    # Ordered jump/goto/RETURN evaluator and multi-table packet paths
+│   │   ├── ingress.go       # One new connection: PREROUTING with its translation, then INPUT or FORWARD
+│   │   ├── trace.go         # One concrete packet through the same chains (--trace)
+│   │   ├── hostfacts.go     # ipset contents, routes and kernel settings in the analysis
 │   │   ├── addrset.go       # Source-address sets as sorted ranges
 │   │   ├── shadow.go        # Shadowed rule detection (with match extension awareness)
 │   │   ├── docker.go        # Docker published-port, ineffective-rule and direct-routing analysis
@@ -73,6 +84,11 @@ iptables-analyzer/
 │   │   ├── analyzer.go      # Main analysis orchestration (with chain jump traversal)
 │   │   ├── analyzer_test.go # Analyzer unit tests
 │   │   ├── regress_test.go  # The inputs of docs/audit-0.7.1.md
+│   │   ├── ingress_test.go  # REDIRECT, DNAT to the host, node ports, port forwards
+│   │   ├── hostfacts_test.go # ipsets, forwarding, route_localnet, nftables tables, reverse path
+│   │   ├── consistency_test.go # The trace against the analysis of all sources
+│   │   ├── kernel_linux_test.go # Harness: rules in a network namespace, real packets
+│   │   ├── kernel_scenarios_linux_test.go # The scenarios that are compared with the kernel
 │   │   ├── addrset_test.go  # Set operations against membership tables
 │   │   └── perf_test.go     # Blocklist timing test and benchmarks
 │   ├── baseline/
@@ -83,11 +99,14 @@ iptables-analyzer/
 │   │   ├── model.go         # The report: the documented JSON form (docs/json.md)
 │   │   ├── build.go         # From the facts of the analysis to findings
 │   │   ├── fixes.go         # What to do about a finding, with quoted commands
+│   │   ├── owners.go        # The program that writes the rules (ufw, firewalld, csf, shorewall), and its commands
 │   │   ├── score.go         # Points, category limits, grade limits, gain of a fix
 │   │   ├── ports.go         # --public, port risk and points
-│   │   └── tables.go        # Open ports, translated ports, sockets, rules
+│   │   ├── tables.go        # Open ports, translated ports, sockets, rules
+│   │   └── diff.go          # The trace report, and the comparison of two reports (--diff)
 │   └── ui/
 │       ├── text.go          # The terminal report (lipgloss)
+│       ├── query.go         # The trace and the comparison as text
 │       ├── html.go          # The HTML report: view model, content security policy
 │       ├── assets/          # report.html (template), report.css, report.js
 │       ├── common.go        # What both renderers say in the same words
@@ -100,7 +119,14 @@ iptables-analyzer/
     ├── docker29.ip6tables-save  # Real Docker 29.9.3 IPv6 capture
     ├── insecure.iptables-save   # ACCEPT policies (score: F)
     ├── ufw.iptables-save        # A host managed by ufw (no false findings expected)
-    └── ufw-services.txt         # Its listeners
+    ├── ufw-services.txt         # Its listeners
+    ├── k8s.iptables-save        # A Kubernetes node: kube-proxy, flannel, node ports, a load balancer address
+    ├── fail2ban.iptables-save   # Jails with banned addresses in front of the services
+    ├── libvirt.iptables-save    # The default NAT network of libvirt
+    ├── firewalld.iptables-save  # firewalld with its iptables backend: zones, a rich rule, a forward port
+    ├── router.iptables-save     # A gateway: masquerading, port forwards, a transparent proxy
+    ├── router.snapshot.json     # The same gateway as a snapshot, with interfaces, routes and settings
+    └── *-services.txt           # The listeners of each of these hosts
 ```
 
 ## Dependencies
@@ -146,17 +172,19 @@ make fuzz FUZZTIME=2m
 ```
 
 `FuzzAnalysis` runs the whole command on random rules and `ss` output and fails if the
-`--no-color` report contains a control character. `FuzzHTMLReport` renders the HTML
-report for random input and fails when the page holds markup that the template does
-not write. Failing inputs are written to `testdata/fuzz/` of the package; commit them
-as regression tests after the fix.
+`--no-color` report contains a control character. `FuzzQueries` does the same for
+`--trace` and `--diff`, with random rules (or a random snapshot) and a random packet.
+`FuzzHostFacts` and `FuzzSnapshot` run the parsers of `internal/hostinfo`.
+`FuzzHTMLReport` renders the HTML report for random input and fails when the page holds
+markup that the template does not write. Failing inputs are written to `testdata/fuzz/`
+of the package; commit them as regression tests after the fix.
 
 ### Golden files
 
 `cmd/testdata/golden/` holds the report of each fixture as text (default and
 `--verbose --rules`), JSON and HTML. `TestGoldenReports` compares them with what the
-command writes. A change of the analysis or of a renderer shows as a diff of what the
-user reads:
+command writes. `TestGoldenQueries` does the same for some traces and comparisons.
+A change of the analysis or of a renderer shows as a diff of what the user reads:
 
 ```bash
 make update-golden
@@ -208,6 +236,43 @@ go test -run '^$' -bench Blocklist ./internal/analyzer
 namespace (`unshare -rn`). The test is skipped when the tools or unprivileged user
 namespaces are not available.
 
+### Comparison with the kernel
+
+```bash
+make test-kernel
+```
+
+`internal/analyzer/kernel_linux_test.go` checks the analysis against what Linux does.
+For each scenario, the test binary starts itself again in a new user and network
+namespace (the "host"), and once more for each network around it (the "peers").
+It connects them with veth pairs, loads the rules of the scenario with the real
+`iptables-restore`, and sets the kernel settings of the scenario. Each process listens
+on the ports of the scenario, and each answer names the process that gave it.
+The peers then send real TCP and UDP packets. For each packet the test knows what
+happened: which listener answered, a refusal, or no answer.
+
+`Trace` must give the same result for the same packet. Where the rules share the packets
+among several destinations (the pods of a service), the kernel selects one of them, and
+each destination that the trace lists is correct. A probe for which the trace is not
+certain is not compared; each scenario states how many of its probes must be certain.
+
+- The test needs no root. It needs `ip`, `iptables-restore` and unprivileged user
+  namespaces, and it is skipped without them. Ubuntu 24.04 restricts such namespaces:
+  `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` lifts the restriction.
+  CI does this in a step of its own.
+- A scenario whose rules do not load fails the test: the fixtures must be rules that
+  the real tool accepts.
+- `go test -short` skips the scenarios.
+
+To add a scenario, write a `kernelScenario` in `kernel_scenarios_linux_test.go`:
+the rules, the networks with their peers, and the probes. Take the fixture of a program
+(`testdata/*.iptables-save`) when you can, so that the fixture itself is tested.
+A probe from a forged source address is possible (`Forged`), for the reverse-path filter.
+
+`consistency_test.go` ties the analysis of all sources to the trace: for some thousand
+packets over the fixtures, the analysis and the trace must agree on what is accepted.
+Together the two tests mean that a result of the analysis is a statement about the kernel.
+
 ### Test coverage
 ```bash
 make test-coverage # Generates coverage.html
@@ -224,6 +289,8 @@ make test-coverage # Generates coverage.html
 - `insecure.iptables-save`: Default ACCEPT policies and rules behind a catch-all ACCEPT. Expected: grade F, one finding for the default accept and one for the unreachable rules
 - `ufw.iptables-save` with `ufw-services.txt`: the chains that ufw creates, with `ufw limit 22/tcp`. Expected: no effectiveness finding above INFO, SSH as rate limited (MEDIUM), the DHCP client as LOW, fixes as `ufw` commands
 - `docker29.iptables-save` / `docker29.ip6tables-save`: unmodified captures from Docker 29.9.3 (iptables 1.8.11, nf_tables). `internal/analyzer/docker_test.go` derives variants from them (an INPUT block, `DOCKER-USER --dport`, raw/mangle drops, removed raw protection, ...). Each variant was reproduced on a live host with a probe container, and the test asserts the observed verdict
+- `k8s`, `fail2ban`, `libvirt`, `firewalld`, `router`: written after the rules that these programs make, not captured from a host. Each loads with the real `iptables-restore`, and each is a scenario of the kernel comparison. Expected: `k8s` reports the node ports and the load-balancer address as translated ports with all pods, with a fix for Kubernetes; `firewalld` gives fixes as `firewall-cmd` commands; `router` reports the port forwards and shows the transparent proxy as `80 → 3128`
+- `router.snapshot.json`: the router as a snapshot. With its routes and `rp_filter`, the rules for the LAN interface open their ports to the LAN only
 
 ### Verifying Docker behavior on a host
 
@@ -270,9 +337,10 @@ interface, so only use it for rules that do not match on the ingress interface.
 ### New CLI Flag
 
 1. **Update `cmd/root.go`**:
-   - Add flag variable
-   - Register with `rootCmd.Flags().XxxVar()`
-   - Use in `runAnalysis()` function
+   - Add the field to `commandOptions` and register the flag in `newRootCommand`
+   - Check it in `checkOptions`, which refuses combinations that make no sense
+   - Read every file that the flag names in `collect` or `load`, before the sandbox starts.
+     Open an output file there too. Nothing can be opened later
 
 2. **Update help**:
    - Flag automatically appears in `--help`

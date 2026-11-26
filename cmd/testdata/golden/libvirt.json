@@ -1,0 +1,307 @@
+{
+  "schema_version": 2,
+  "tool": {
+    "name": "iptables-analyzer",
+    "version": "dev",
+    "url": "https://github.com/c0m4r/iptables-analyzer"
+  },
+  "generated": "2026-11-25T12:00:00Z",
+  "mode": "file",
+  "inputs": [
+    "../testdata/libvirt.iptables-save",
+    "../testdata/libvirt-services.txt"
+  ],
+  "families": [
+    {
+      "version": 4,
+      "status": "ANALYZED",
+      "tables": 3,
+      "chains": 19,
+      "rules": 31,
+      "policies": {
+        "FORWARD": "DROP",
+        "INPUT": "DROP",
+        "OUTPUT": "ACCEPT"
+      },
+      "managers": [
+        "libvirt"
+      ]
+    },
+    {
+      "version": 6,
+      "status": "NOT_SUPPLIED",
+      "tables": 0,
+      "chains": 0,
+      "rules": 0
+    }
+  ],
+  "score": {
+    "total": 94,
+    "grade": "A",
+    "complete": true,
+    "categories": [
+      {
+        "key": "policy",
+        "label": "Policy",
+        "max": 25,
+        "lost": 0
+      },
+      {
+        "key": "exposure",
+        "label": "Exposure",
+        "max": 25,
+        "lost": 6
+      },
+      {
+        "key": "paths",
+        "label": "Shadows and bypasses",
+        "max": 25,
+        "lost": 0
+      },
+      {
+        "key": "hygiene",
+        "label": "Hygiene",
+        "max": 15,
+        "lost": 0
+      },
+      {
+        "key": "ipv6",
+        "label": "IPv6",
+        "max": 10,
+        "lost": 0
+      }
+    ]
+  },
+  "counts": {
+    "critical": 0,
+    "high": 1,
+    "medium": 1,
+    "low": 0,
+    "info": 1
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "code": "exposed_service",
+      "severity": "HIGH",
+      "certainty": "DEFINITE",
+      "category": "exposure",
+      "families": [
+        4
+      ],
+      "title": "sshd is open to any source on 22/tcp",
+      "detail": "IPv4: accepted by filter/INPUT rule #4.",
+      "ports": [
+        "22/tcp"
+      ],
+      "rules": [
+        {
+          "family": 4,
+          "table": "filter",
+          "chain": "INPUT",
+          "num": 4,
+          "spec": "-p tcp -m tcp --dport 22 -j ACCEPT",
+          "role": "accepts"
+        }
+      ],
+      "fix": {
+        "summary": "If the clients are known, accept only their addresses. If SSH must stay open to any source, limit new connections for each source: the limit counts every source by itself, so one client cannot lock out the others, and it does not touch established sessions.",
+        "steps": [
+          {
+            "text": "Replace the rule with one for the known clients",
+            "command": "iptables -R INPUT 4 -s \u003ctrusted-cidr\u003e -p tcp -m tcp --dport 22 -j ACCEPT"
+          },
+          {
+            "text": "Or drop the connections of a source that opens more than 10 a minute, in front of the rule",
+            "command": "iptables -I INPUT 4 -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh4 -j DROP"
+          }
+        ]
+      },
+      "points": 5,
+      "gain": 5
+    },
+    {
+      "id": "F2",
+      "code": "docker_published_port",
+      "severity": "MEDIUM",
+      "certainty": "POSSIBLE",
+      "category": "exposure",
+      "families": [
+        4
+      ],
+      "title": "Forwarded port 8022/tcp is open to any source",
+      "detail": "nat/PREROUTING translates these ports to another host, and filter/FORWARD accepts them from any source; the rules of filter/INPUT do not apply: IPv4 8022/tcp to 192.168.122.50:22 (via eth0).",
+      "ports": [
+        "8022/tcp"
+      ],
+      "rules": [
+        {
+          "family": 4,
+          "table": "nat",
+          "chain": "PREROUTING",
+          "num": 1,
+          "spec": "-i eth0 -p tcp -m tcp --dport 8022 -j DNAT --to-destination 192.168.122.50:22",
+          "role": "translates"
+        }
+      ],
+      "fix": {
+        "summary": "The port is translated by nat/PREROUTING rule #1 and then passes filter/FORWARD, not filter/INPUT. If only known clients need it, add their sources (-s \u003ctrusted-cidr\u003e) to that rule or to the FORWARD rule that accepts the traffic. In FORWARD the packet has the translated address and port; match the original port with '-m conntrack --ctorigdstport 8022 --ctdir ORIGINAL'."
+      },
+      "points": 1,
+      "gain": 1
+    },
+    {
+      "id": "F3",
+      "code": "policy_accept",
+      "severity": "INFO",
+      "certainty": "DEFINITE",
+      "category": "policy",
+      "families": [
+        4
+      ],
+      "title": "OUTPUT default policy is ACCEPT",
+      "detail": "All outbound traffic is allowed. This is the usual setup; an OUTPUT allowlist can limit what a compromised service is able to reach.",
+      "points": 0,
+      "gain": 0
+    }
+  ],
+  "open_ports": [
+    {
+      "families": [
+        4
+      ],
+      "protocol": "tcp",
+      "first": 22,
+      "last": 22,
+      "scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "rules": [
+        {
+          "family": 4,
+          "table": "filter",
+          "chain": "INPUT",
+          "num": 4,
+          "spec": "-p tcp -m tcp --dport 22 -j ACCEPT",
+          "role": "accepts"
+        }
+      ],
+      "listeners": [
+        "sshd"
+      ]
+    }
+  ],
+  "forwarded_ports": [
+    {
+      "family": 4,
+      "protocol": "tcp",
+      "host_port": 8022,
+      "host_port_end": 8022,
+      "dest_addr": "192.168.122.50",
+      "dest_port": 22,
+      "dest_port_end": 22,
+      "docker": false,
+      "forward_scope": "EXPOSED",
+      "certainty": "POSSIBLE",
+      "interfaces": [
+        "eth0"
+      ],
+      "rule": {
+        "family": 4,
+        "table": "nat",
+        "chain": "PREROUTING",
+        "num": 1,
+        "spec": "-i eth0 -p tcp -m tcp --dport 8022 -j DNAT --to-destination 192.168.122.50:22",
+        "role": "translates"
+      }
+    }
+  ],
+  "services_known": true,
+  "services": [
+    {
+      "protocol": "udp",
+      "address": "192.168.122.1",
+      "port": 53,
+      "process": "dnsmasq",
+      "pid": 1420,
+      "processes": [
+        "dnsmasq"
+      ],
+      "socket_family": "ipv4",
+      "status": "INTERNAL"
+    },
+    {
+      "protocol": "udp",
+      "address": "0.0.0.0",
+      "device": "virbr0",
+      "port": 67,
+      "process": "dnsmasq",
+      "pid": 1420,
+      "processes": [
+        "dnsmasq"
+      ],
+      "socket_family": "ipv4",
+      "status": "INTERNAL"
+    },
+    {
+      "protocol": "tcp",
+      "address": "192.168.122.1",
+      "port": 53,
+      "process": "dnsmasq",
+      "pid": 1420,
+      "processes": [
+        "dnsmasq"
+      ],
+      "socket_family": "ipv4",
+      "status": "INTERNAL"
+    },
+    {
+      "protocol": "tcp",
+      "address": "0.0.0.0",
+      "port": 22,
+      "process": "sshd",
+      "pid": 812,
+      "processes": [
+        "sshd"
+      ],
+      "socket_family": "ipv4",
+      "status": "REACHABLE",
+      "scope": "EXPOSED"
+    },
+    {
+      "protocol": "tcp",
+      "address": "127.0.0.1",
+      "port": 16509,
+      "process": "libvirtd",
+      "pid": 1380,
+      "processes": [
+        "libvirtd"
+      ],
+      "socket_family": "ipv4",
+      "status": "LOCALHOST"
+    }
+  ],
+  "notes": [
+    {
+      "kind": "scope",
+      "text": "No IPv6 rules were supplied: only IPv4 was analyzed, and IPv4 rules do not filter IPv6. Add the output of ip6tables-save as another file."
+    }
+  ],
+  "sandbox": {
+    "mode": "auto",
+    "landlock": false,
+    "privileges_dropped": false
+  },
+  "baseline": {
+    "ipv4": "# Recommended IPv4 baseline generated by iptables-analyzer (iptables-restore format).\n# Default deny inbound and forwarded traffic; outbound traffic is allowed.\n# Apply with \"iptables-restore --noflush\": it replaces INPUT and keeps every\n# other chain, including Docker's, intact.\n*filter\n:INPUT DROP [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\n-F INPUT\n-A INPUT -i lo -j ACCEPT\n-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n-A INPUT -m conntrack --ctstate INVALID -j DROP\n-A INPUT -s 127.0.0.0/8 ! -i lo -j DROP\n-A INPUT -p icmp -m icmp --icmp-type 8 -m limit --limit 10/sec --limit-burst 20 -j ACCEPT\n# Jumps of the present INPUT chain to chains that other programs manage.\n# They are repeated here because INPUT is flushed. A chain that accepts\n# traffic decides before the rules below: review what each one admits.\n-A INPUT -j LIBVIRT_INP\n# Remote administration: new SSH connections are limited per source address.\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh4-22 -j DROP\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT\nCOMMIT\n",
+    "ipv6": "# Recommended IPv6 baseline generated by iptables-analyzer (ip6tables-restore format).\n# Default deny inbound and forwarded traffic; outbound traffic is allowed.\n# Apply with \"ip6tables-restore --noflush\": it replaces INPUT and keeps every\n# other chain, including Docker's, intact.\n*filter\n:INPUT DROP [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\n-F INPUT\n-A INPUT -i lo -j ACCEPT\n-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n# Neighbor discovery is untracked by conntrack and must be allowed explicitly;\n# a hop limit of 255 proves the sender is on-link.\n-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 134 -m hl --hl-eq 255 -m comment --comment \"router advertisement (SLAAC)\" -j ACCEPT\n-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 135 -m hl --hl-eq 255 -m comment --comment \"neighbor solicitation\" -j ACCEPT\n-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 136 -m hl --hl-eq 255 -m comment --comment \"neighbor advertisement\" -j ACCEPT\n-A INPUT -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 130 -m comment --comment \"multicast listener query\" -j ACCEPT\n-A INPUT -s fe80::/10 -d fe80::/10 -p udp -m udp --sport 547 --dport 546 -m comment --comment \"DHCPv6 client\" -j ACCEPT\n-A INPUT -m conntrack --ctstate INVALID -j DROP\n-A INPUT -s ::1/128 ! -i lo -j DROP\n-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 128 -m limit --limit 10/sec --limit-burst 20 -j ACCEPT\n# Remote administration: new SSH connections are limited per source address.\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh6-22 -j DROP\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT\nCOMMIT\n",
+    "notes": [
+      "SSH stays reachable on TCP port 22 (detected from the listening sshd).",
+      "Both families are always generated: IPv6 gets addresses automatically (SLAAC), so an unused stack must be closed too.",
+      "Keep a second SSH session open and apply with an automatic rollback, for example:",
+      "  printf '#!/bin/sh\\nexec iptables-restore --noflush /root/baseline.v4\\n' \u003e /root/apply.v4 \u0026\u0026 chmod +x /root/apply.v4 \u0026\u0026 iptables-apply -t 60 -c /root/apply.v4",
+      "  printf '#!/bin/sh\\nexec ip6tables-restore --noflush /root/baseline.v6\\n' \u003e /root/apply.v6 \u0026\u0026 chmod +x /root/apply.v6 \u0026\u0026 ip6tables-apply -t 60 -c /root/apply.v6",
+      "Persist the result with your distribution's mechanism (e.g. iptables-save \u003e /etc/iptables/rules.v4 with iptables-persistent).",
+      "The baseline keeps the jumps of INPUT to chains of other programs (LIBVIRT_INP). Rules in those chains are not part of the baseline: a chain that accepts traffic opens it whatever the baseline says."
+    ]
+  }
+}

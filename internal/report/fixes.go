@@ -30,7 +30,7 @@ func tableOption(table string) string {
 }
 
 // policyFix says what to do about a chain that accepts by default.
-func policyFix(issue *models.EffectivenessFinding) *Fix {
+func (b *builder) policyFix(issue *models.EffectivenessFinding) *Fix {
 	if issue.Chain != "INPUT" && issue.Chain != "FORWARD" {
 		return nil
 	}
@@ -39,13 +39,29 @@ func policyFix(issue *models.EffectivenessFinding) *Fix {
 		// A rule accepts everything; the policy is not what decides.
 		fix := &Fix{Summary: "This rule accepts every packet that reaches it, so the rules after it and the policy of the chain decide nothing. " +
 			"Add rules for the traffic that is needed, with a tested way back, then delete it."}
-		if owner := chainOwner(rule.Chain); owner != "" {
+		if owner := b.owner(rule); owner != "" {
 			fix.Summary += " The chain belongs to " + owner + ": make the change there."
 			return fix
 		}
 		fix.Steps = []FixStep{{"Delete the rule that accepts everything",
 			command + tableOption(rule.Table) + " -D " + shellQuote(rule.Chain) + " " + strconv.Itoa(rule.RuleNum)}}
 		return fix
+	}
+	manager := b.manager(issue.IPVersion)
+	if manager == "ufw" {
+		// ufw sets the policies of the chains itself.
+		direction := "incoming"
+		if issue.Chain == "FORWARD" {
+			direction = "routed"
+		}
+		return &Fix{
+			Summary: "ufw manages this firewall: set the default with ufw, after the rules for the traffic that is needed are in place (ufw allow ...).",
+			Steps:   []FixStep{{"Deny " + direction + " traffic by default", "ufw default deny " + direction}},
+		}
+	}
+	if manager != "" {
+		return &Fix{Summary: "The rules of this host are written by " + manager + ": set the default there. A policy set with " + command +
+			" is lost when " + manager + " writes its rules again."}
 	}
 	if issue.Chain == "INPUT" {
 		return &Fix{
@@ -63,37 +79,12 @@ func policyFix(issue *models.EffectivenessFinding) *Fix {
 // exposureFix says how to limit a port that is open to any source. rule is
 // the rule that accepts it, nil when the policy of the chain does. With
 // limiter it also gives the rate limit for SSH that stays open.
-func exposureFix(protocol models.Protocol, first, last int, rule *models.Rule, limiter bool) *Fix {
+func (b *builder) exposureFix(protocol models.Protocol, first, last int, rule *models.Rule, limiter bool) *Fix {
 	if rule == nil {
 		return &Fix{Summary: "No rule names this port: INPUT accepts it by default. Close the default first; then accept the port for its clients only."}
 	}
-	ports := strconv.Itoa(first)
-	if last > first {
-		ports += ":" + strconv.Itoa(last)
-	}
-	switch owner := chainOwner(rule.Chain); owner {
-	case "":
-	case "ufw":
-		// "ufw limit" rules accept in a chain of their own.
-		verb := "allow"
-		if strings.HasSuffix(rule.Chain, "-user-limit-accept") {
-			verb = "limit"
-		}
-		fix := &Fix{
-			Summary: "ufw manages this rule, and a change made with iptables is lost at its next reload. " +
-				"If the clients are known, allow only them and delete the open rule.",
-			Steps: []FixStep{
-				{"Allow the known clients", "ufw allow from " + trusted + " to any port " + ports + " proto " + string(protocol)},
-				{"Delete the rule for any source", "ufw delete " + verb + " " + ports + "/" + string(protocol)},
-			},
-		}
-		if limiter {
-			fix.Steps = append(fix.Steps, FixStep{"Or keep SSH open and limit new connections for each source", "ufw limit " + ports + "/" + string(protocol)})
-		}
-		return fix
-	default:
-		return &Fix{Summary: "The chain of this rule belongs to " + owner + ". If the clients are known, limit the rule to their addresses there; " +
-			"a change made with iptables is lost when " + owner + " writes its rules again."}
+	if owner := b.owner(rule); owner != "" {
+		return managedExposureFix(owner, protocol, first, last, rule, limiter)
 	}
 
 	fix := &Fix{Summary: "If the clients are known, accept only their addresses."}
@@ -143,18 +134,101 @@ func sshLimiterCommand(rule *models.Rule) (string, bool) {
 		return "", false
 	}
 	name := "ssh" + strconv.Itoa(int(rule.IPVersion))
-	limiter := slices.Concat(args[:targetAt], []string{
-		"-m", "conntrack", "--ctstate", "NEW",
-		"-m", "hashlimit", "--hashlimit-above", "10/min", "--hashlimit-burst", "20",
-		"--hashlimit-mode", "srcip", "--hashlimit-name", name, "-j", "DROP",
-	})
+	limiter := args[:targetAt:targetAt]
+	// The limit is for new connections. A rule that already matches their
+	// state needs no second match for it.
+	if !slices.Contains(limiter, "--ctstate") && !slices.Contains(limiter, "--state") {
+		limiter = append(limiter, "-m", "conntrack", "--ctstate", "NEW")
+	}
+	limiter = append(limiter, "-m", "hashlimit", "--hashlimit-above", "10/min", "--hashlimit-burst", "20",
+		"--hashlimit-mode", "srcip", "--hashlimit-name", name, "-j", "DROP")
 	return firewallCommand(rule.IPVersion) + tableOption(rule.Table) + " -I " + shellQuote(rule.Chain) + " " +
 		strconv.Itoa(rule.RuleNum) + " " + textsafe.ShellJoin(limiter), true
 }
 
+// publishedGroup describes a finding about several translated ports. The
+// commands of its fix are written for one port, and the text says how they
+// serve for the rest.
+type publishedGroup struct {
+	// others are the other ports, as the report names them: "8443/tcp", or
+	// "8443/tcp of 192.0.2.10" for a port of one address of the host.
+	others []string
+	// someAddress and someWildcard say that the finding has a port of one
+	// address, and a port of all addresses.
+	someAddress, someWildcard bool
+	// bothFamilies says that the finding is about IPv4 and IPv6.
+	bothFamilies bool
+}
+
+// pattern says what to do about the ports and the address family that the
+// commands of a fix do not name. commands and them are "The commands below
+// are" and "them", or the singular; address says how the commands match the
+// address of a port ("--ctorigdst ADDRESS") and wildcard how they match all
+// addresses of the host ("" when they need no match for that).
+func (g publishedGroup) pattern(finding *models.DockerBypassFinding, protocol models.Protocol, commands, them, address, wildcard string) string {
+	text := ""
+	if len(g.others) > 0 {
+		port := finding.ExposedPort + "/" + string(protocol)
+		if finding.HostAddr != "" {
+			port += " of " + finding.HostAddr
+		}
+		text = " " + commands + " for port " + port + ". For each of the other ports (" + abbreviate(g.others, 8) +
+			"), run " + them + " again with its protocol and its port"
+		for _, other := range g.others {
+			if port, _, _ := strings.Cut(other, "/"); strings.Contains(port, "-") {
+				text += "; write a range of ports as FIRST:LAST"
+				break
+			}
+		}
+		text += "."
+		switch {
+		case g.someAddress && g.someWildcard && wildcard == "":
+			text += " For a port of one address, add " + address + "; for a port of all addresses, leave that match out."
+		case g.someAddress && g.someWildcard:
+			text += " Match a port of one address with " + address + ", and a port of all addresses with " + wildcard + "."
+		case g.someAddress:
+			text += " Each port has its own address: use it in " + address + "."
+		}
+	}
+	if g.bothFamilies {
+		other, tool := "IPv6", "ip6tables"
+		if finding.IPVersion == models.IPv6 {
+			other, tool = "IPv4", "iptables"
+		}
+		text += " For " + other + ", use " + tool + "."
+	}
+	return text
+}
+
 // publishedFix says how to restrict a port that nat/PREROUTING translates.
-func publishedFix(finding *models.DockerBypassFinding, protocol models.Protocol) *Fix {
+// group is empty for a finding about one port.
+func publishedFix(finding *models.DockerBypassFinding, protocol models.Protocol, group publishedGroup) *Fix {
 	portSpec := strings.ReplaceAll(finding.ExposedPort, "-", ":")
+	if chainOwner(finding.NATRule.Chain) == "kubernetes" {
+		// kube-proxy rewrites its chains all the time. A rule in the raw
+		// table sees the packet before the translation, with the port that
+		// the client used.
+		destination := "-m addrtype --dst-type LOCAL"
+		if finding.HostAddr != "" {
+			destination = "-d " + shellQuote(finding.HostAddr)
+		}
+		return &Fix{
+			Summary: "kube-proxy writes this translation for a Service of type NodePort or LoadBalancer, and it writes its chains again all the time. " +
+				"Limit the Service in the cluster: set spec.loadBalancerSourceRanges, use a NetworkPolicy for the pods, or use type ClusterIP " +
+				"when the port needs no clients outside the cluster. To filter on the node, drop the port for other sources in the raw table, " +
+				"which sees the packet before the translation." +
+				group.pattern(finding, protocol, "The command below is", "it", "-d ADDRESS", "-m addrtype --dst-type LOCAL"),
+			Steps: []FixStep{{"Drop port " + finding.ExposedPort + " for all but the known clients, in front of the translation",
+				firewallCommand(finding.IPVersion) + " -t raw -I PREROUTING " + destination + " -p " + string(protocol) + " -m " + string(protocol) +
+					" --dport " + portSpec + " ! -s " + trusted + " -j DROP"}},
+		}
+	}
+	if !analyzer.IsDockerRule(&finding.NATRule) && len(group.others) > 0 {
+		return &Fix{Summary: "Each of these ports is translated by its rule in nat/PREROUTING and then passes filter/FORWARD, not filter/INPUT. " +
+			"If only known clients need a port, add their sources (-s " + trusted + ") to its rule or to the FORWARD rule that accepts its traffic. " +
+			"In FORWARD the packet has the translated address and port; match the port that the clients use with " +
+			"'-m conntrack --ctorigdstport PORT --ctdir ORIGINAL'."}
+	}
 	if !analyzer.IsDockerRule(&finding.NATRule) {
 		// A port forward of the administrator: there is no DOCKER-USER chain.
 		return &Fix{Summary: "The port is translated by " + ruleName(&finding.NATRule) + " and then passes filter/FORWARD, not filter/INPUT. " +
@@ -173,7 +247,8 @@ func publishedFix(finding *models.DockerBypassFinding, protocol models.Protocol)
 			"(this includes INPUT rules of ufw or firewalld). Restrict them in DOCKER-USER, which runs before Docker's own rules " +
 			"and which Docker never flushes. Packets are already translated there: match the published port with --ctorigdstport, not --dport. " +
 			"A service that only local clients need can be published on loopback instead (docker run -p 127.0.0.1:" +
-			strings.SplitN(finding.ExposedPort, "-", 2)[0] + ":<container-port>).",
+			strings.SplitN(finding.ExposedPort, "-", 2)[0] + ":<container-port>)." +
+			group.pattern(finding, protocol, "The commands below are", "them", "--ctorigdst ADDRESS", ""),
 		Steps: []FixStep{
 			{"Allow the trusted sources of port " + finding.ExposedPort + " first", command + " -I DOCKER-USER 1 " + match + " -s " + trusted + " -j RETURN"},
 			{"Then drop the rest of that port", command + " -I DOCKER-USER 2 " + match + " -j DROP"},

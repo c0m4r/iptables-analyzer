@@ -17,6 +17,8 @@ type DockerAnalysis struct {
 	Findings       []models.DockerBypassFinding
 	PublishedPorts []models.PublishedPort
 	Diagnostics    []models.AssessmentDiagnostic
+	// Notes say what the analysis leaves out on purpose.
+	Notes []string
 }
 
 // DetectDockerBypasses finds published ports that bypass filter/INPUT and are
@@ -25,22 +27,34 @@ func DetectDockerBypasses(rs *models.Ruleset) []models.DockerBypassFinding {
 	return AnalyzeDocker(rs, nil).Findings
 }
 
-// AnalyzeDocker evaluates every published port and every known container
-// endpoint along the Netfilter hooks a packet traverses:
+// AnalyzeDocker evaluates every port that nat/PREROUTING sends to another
+// host, and every known container endpoint, along the Netfilter hooks a
+// packet traverses:
 //
 //	raw/PREROUTING → mangle/PREROUTING → nat/PREROUTING (DNAT)
 //	→ mangle/FORWARD → filter/FORWARD → security/FORWARD
 //
 // and compares the result with what mangle/INPUT, filter/INPUT and
-// security/INPUT would have decided for the untranslated packet.
+// security/INPUT would have decided for the untranslated packet. The ports
+// are those of Docker, of kube-proxy and of plain port forwards alike: they
+// are found by following the packet, not by the form of a rule.
 func AnalyzeDocker(rs *models.Ruleset, host *models.HostContext) DockerAnalysis {
 	if rs == nil {
 		return DockerAnalysis{}
 	}
-	topo := inferDockerTopology(rs)
-	ctx := newEvalContext(rs, topo, host)
-	candidates := ingressCandidates(rs, ctx, host)
-	d := &dockerAnalyzer{rs: rs, topo: topo, ctx: ctx, host: host, candidates: candidates,
+	// A host that does not route packets sends nothing to another host,
+	// whatever the nat table and FORWARD say.
+	if on, known := host.Forwarding(rs.IPVersion); known && !on {
+		var analysis DockerAnalysis
+		if forwardsPackets(rs) {
+			analysis.Notes = append(analysis.Notes, fmt.Sprintf(
+				"%s: this host does not route packets (%s is 0), so the rules that send ports to other hosts and the FORWARD chain have no effect now. They were not examined.",
+				stackName(rs.IPVersion), forwardingSetting(rs.IPVersion)))
+		}
+		return analysis
+	}
+	eval := newInputEvaluator(rs, host)
+	d := &dockerAnalyzer{rs: rs, topo: eval.topo, ctx: eval.ctx, host: host, candidates: eval.candidates, eval: eval,
 		ruleFindings: map[string]*ruleFindingGroup{}}
 
 	d.analyzePublishedPorts()
@@ -53,8 +67,14 @@ func AnalyzeDocker(rs *models.Ruleset, host *models.HostContext) DockerAnalysis 
 	analysis.Findings = append(analysis.Findings, d.flushRuleFindings()...)
 	analysis.Findings = append(analysis.Findings, d.directFindings...)
 	analysis.Findings = append(analysis.Findings, d.fragileFindings...)
-	if ctx.limitReached() {
+	if d.ctx.limitReached() {
 		analysis.Diagnostics = append(analysis.Diagnostics, evaluationLimitDiagnostic(rs, "docker"))
+	}
+	if n := eval.clusterIPs; n > 0 {
+		analysis.Notes = append(analysis.Notes, fmt.Sprintf(
+			"%s: %d cluster IP %s of Kubernetes services %s not examined. A cluster IP is no address of the node; "+
+				"only hosts that route the service network through this node reach it.",
+			stackName(rs.IPVersion), n, pluralWord(n, "address", "addresses"), pluralWord(n, "was", "were")))
 	}
 	return analysis
 }
@@ -65,6 +85,7 @@ type dockerAnalyzer struct {
 	ctx        *evalContext
 	host       *models.HostContext
 	candidates []ingressCandidate
+	eval       *inputEvaluator
 
 	published       []models.PublishedPort
 	publishedTo     map[string]bool      // container endpoints reached through a published port
@@ -79,12 +100,14 @@ type dockerAnalyzer struct {
 }
 
 type portFinding struct {
-	finding       models.DockerBypassFinding
-	explicit      bool
-	protocol      models.Protocol
-	hostPort      int
-	containerAddr string
-	containerPort int
+	finding          models.DockerBypassFinding
+	explicit         bool
+	protocol         models.Protocol
+	hostPort         int
+	hostPortEnd      int
+	containerAddr    string
+	containerPort    int
+	containerPortEnd int
 }
 
 func endpointKey(protocol models.Protocol, addr string, port int) string {
@@ -101,7 +124,6 @@ type candidateOutcome struct {
 	// the subset established without undecidable predicates.
 	bypass         []decisionSegment
 	definiteBypass []decisionSegment
-	natUncertain   bool
 }
 
 func (d *dockerAnalyzer) analyzePublishedPorts() {
@@ -113,7 +135,48 @@ func (d *dockerAnalyzer) analyzePublishedPorts() {
 	d.publishedTo = map[string]bool{}
 	d.loopbackOnly = map[string]string{}
 	d.forwardRules = d.userForwardRules()
-	seen := map[string]bool{}
+	d.noteDockerPublications(natTable)
+
+	wildcard := "0.0.0.0"
+	if d.rs.IPVersion == models.IPv6 {
+		wildcard = "::"
+	}
+	for _, protocol := range []models.Protocol{models.ProtoTCP, models.ProtoUDP} {
+		classes := d.eval.classes(protocol)
+		for _, class := range classes {
+			d.analyzeClass(protocol, wildcard, class)
+		}
+		// A translation that a rule makes for one local address only.
+		for i := range d.eval.named {
+			dest := &d.eval.named[i]
+			for _, class := range classes {
+				if dest.names(class) {
+					d.analyzeClass(protocol, dest.addr.String(), class)
+				}
+			}
+		}
+	}
+	sort.SliceStable(d.published, func(i, j int) bool {
+		a, b := d.published[i], d.published[j]
+		if a.Protocol != b.Protocol {
+			return a.Protocol < b.Protocol
+		}
+		if a.HostPort != b.HostPort {
+			return a.HostPort < b.HostPort
+		}
+		return a.HostAddr < b.HostAddr
+	})
+	// A container port published on loopback and elsewhere is not loopback-only.
+	for endpoint := range d.publishedTo {
+		delete(d.loopbackOnly, endpoint)
+	}
+}
+
+// noteDockerPublications records the container ports that DNAT rules with a
+// port of their own name: those published on loopback only, which no packet
+// from another host reaches, and all others. The analysis of packets routed
+// straight to a container needs both.
+func (d *dockerAnalyzer) noteDockerPublications(natTable *models.Table) {
 	for _, dnat := range allDNATRules(natTable) {
 		if dnat.DstPort == "" || dnat.DNATTarget == "" || dnat.Protocol == "" || dnat.Protocol == models.ProtoAll {
 			continue
@@ -123,7 +186,7 @@ func (d *dockerAnalyzer) analyzePublishedPorts() {
 			continue
 		}
 		if target, err := netip.ParseAddr(translation.Address); err != nil || target.IsLoopback() {
-			continue // a redirect to the host itself is filtered by INPUT
+			continue
 		}
 		originalPorts := portsInSpec(dnat.DstPort)
 		if len(originalPorts) == 0 || dnat.Negations["dport"] {
@@ -136,94 +199,93 @@ func (d *dockerAnalyzer) analyzePublishedPorts() {
 				continue
 			}
 			endpoint := endpointKey(dnat.Protocol, translation.Address, containerPort)
-			if loopback {
-				if _, exists := d.loopbackOnly[endpoint]; !exists {
-					d.loopbackOnly[endpoint] = strconv.Itoa(hostPort)
-				}
-				continue
+			if !loopback {
+				d.publishedTo[endpoint] = true
+			} else if _, exists := d.loopbackOnly[endpoint]; !exists {
+				d.loopbackOnly[endpoint] = strconv.Itoa(hostPort)
 			}
-			key := string(dnat.Protocol) + ":" + dnat.DstAddr + ":" + strconv.Itoa(hostPort) + "→" + dnat.DNATTarget
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			d.analyzeMapping(natTable, dnat, translation.Address, hostPort, containerPort)
 		}
-	}
-	// A container port published on loopback and elsewhere is not loopback-only.
-	for endpoint := range d.publishedTo {
-		delete(d.loopbackOnly, endpoint)
 	}
 }
 
-func (d *dockerAnalyzer) analyzeMapping(natTable *models.Table, dnat models.Rule, containerAddr string, hostPort, containerPort int) {
-	sourcePort := 0
-	if dnat.SrcPort != "" && !dnat.Negations["sport"] {
-		if ports := portsInSpec(dnat.SrcPort); len(ports) == 1 {
-			sourcePort = ports[0]
+// natEntry is the traffic of one ingress interface that a rule of
+// nat/PREROUTING sends to another host.
+type natEntry struct {
+	candidate ingressCandidate
+	original  packetQuery
+	way       ingressWay
+}
+
+// analyzeClass follows a new connection to the ports of a class through
+// PREROUTING for every ingress interface, and evaluates each translation to
+// another host that it meets.
+func (d *dockerAnalyzer) analyzeClass(protocol models.Protocol, address string, class portClass) {
+	base := d.eval.newConnection(protocol, class.first, address)
+	entries := map[*models.Rule][]natEntry{}
+	var order []*models.Rule
+	for _, candidate := range d.candidates {
+		original := base
+		original.InIface = candidate.name
+		for _, way := range d.eval.ways(original, class) {
+			if way.rule == nil || way.local {
+				continue // INPUT decides: the survey of open ports covers it
+			}
+			if entries[way.rule] == nil {
+				order = append(order, way.rule)
+			}
+			entries[way.rule] = append(entries[way.rule], natEntry{candidate: candidate, original: original, way: way})
 		}
 	}
+	for _, rule := range order {
+		d.analyzeMapping(protocol, address, class, rule, entries[rule])
+	}
+}
+
+// maxEndpointPorts is the widest range of translated ports whose ports are
+// noted one by one for the analysis of direct routing.
+const maxEndpointPorts = 64
+
+// mappingEndpoints returns the keys of the endpoints of a mapping.
+func mappingEndpoints(mapping models.PublishedPort) []string {
+	last := max(mapping.ContainerPort, mapping.ContainerPortEnd)
+	if last-mapping.ContainerPort >= maxEndpointPorts {
+		last = mapping.ContainerPort
+	}
+	var keys []string
+	for port := mapping.ContainerPort; port <= last; port++ {
+		keys = append(keys, endpointKey(mapping.Protocol, mapping.ContainerAddr, port))
+	}
+	return keys
+}
+
+func (d *dockerAnalyzer) analyzeMapping(protocol models.Protocol, address string, class portClass, rule *models.Rule, entries []natEntry) {
+	target := entries[0].way.translation
 	hostAddr := ""
-	if !dnat.Negations["dst"] {
-		if prefix, ok := parsePrefix(dnat.DstAddr); ok && prefix.IsSingleIP() {
-			hostAddr = prefix.Addr().String()
-		}
+	if !wildcardAddress(address) {
+		hostAddr = address
 	}
-	bridge := d.topo.bridgeFor(containerAddr)
 	mapping := models.PublishedPort{
-		IPVersion:     d.rs.IPVersion,
-		Protocol:      dnat.Protocol,
-		HostAddr:      hostAddr,
-		HostPort:      hostPort,
-		ContainerAddr: containerAddr,
-		ContainerPort: containerPort,
-		Bridge:        bridge,
-		NATRule:       dnat,
-		Certainty:     models.CertaintyDefinite,
+		IPVersion:        d.rs.IPVersion,
+		Protocol:         protocol,
+		HostAddr:         hostAddr,
+		HostPort:         class.first,
+		HostPortEnd:      class.last,
+		ContainerAddr:    target.addr,
+		ContainerPort:    target.port,
+		ContainerPortEnd: target.portEnd,
+		Bridge:           d.topo.bridgeFor(target.addr),
+		NATRule:          *rule,
+		Certainty:        models.CertaintyDefinite,
 	}
 
-	root := rootSet(d.rs.IPVersion)
 	var outcomes []candidateOutcome
 	var forwardSegments, inputSegments []decisionSegment
-	for _, candidate := range d.candidates {
-		original := packetQuery{
-			Protocol:        dnat.Protocol,
-			SrcPort:         sourcePort,
-			DstPort:         hostPort,
-			DstAddr:         hostAddr,
-			DstType:         "LOCAL",
-			InIface:         candidate.name,
-			State:           "NEW",
-			NATState:        noNAT,
-			OriginalDstAddr: hostAddr,
-			OriginalDstPort: hostPort,
-			Direction:       "ORIGINAL",
-			External:        true,
-			Ctx:             d.ctx,
-		}
-		pre := evaluatePath(d.rs, preroutingPath(original), root)
-		natQuery := original
-		natQuery.Hook = "PREROUTING"
-		sources, natUncertain := sourcesReachingDNAT(natTable, dnat, natQuery, pre.acceptedSet())
-		if sources.empty() {
-			continue
-		}
-		translated := original
-		translated.DstAddr = containerAddr
-		translated.DstPort = containerPort
-		translated.DstType = "UNICAST"
-		translated.NATState = "DNAT"
-		translated.OutIface = bridge
-		forward := evaluatePath(d.rs, forwardPath(translated), sources)
-		input := evaluatePath(d.rs, inputPath(original)[2:], sources)
-
-		if natUncertain {
-			// The DNAT rule is only reached when an undecidable predicate matches.
-			for i := range forward.Accepted {
-				forward.Accepted[i].Possible = true
-			}
-		}
-		outcome := candidateOutcome{candidate: candidate, forward: forward, input: input, natUncertain: natUncertain}
+	for _, entry := range entries {
+		forward := d.eval.forward(entry.way)
+		// What INPUT would decide for the same sources, had the port not been
+		// translated.
+		input := evaluatePath(d.rs, inputPath(entry.original)[2:], segmentsUnion(entry.way.entry, nil))
+		outcome := candidateOutcome{candidate: entry.candidate, forward: forward, input: input}
 		// A source bypasses INPUT when FORWARD accepts it and INPUT does not
 		// accept it in full.
 		var certain []decisionSegment
@@ -238,11 +300,13 @@ func (d *dockerAnalyzer) analyzeMapping(natTable *models.Table, dnat models.Rule
 		forwardSegments = append(forwardSegments, forward.Accepted...)
 		inputSegments = append(inputSegments, input.Accepted...)
 		if len(forward.Accepted) > 0 {
-			d.checkForwardRules(mapping, original, translated, forward)
+			d.checkForwardRules(mapping, entry.original, entry.way.query, forward)
 		}
 	}
-	endpoint := endpointKey(dnat.Protocol, containerAddr, containerPort)
-	d.publishedTo[endpoint] = true
+	endpoints := mappingEndpoints(mapping)
+	for _, endpoint := range endpoints {
+		d.publishedTo[endpoint] = true
+	}
 	if len(outcomes) == 0 {
 		return
 	}
@@ -263,19 +327,30 @@ func (d *dockerAnalyzer) analyzeMapping(natTable *models.Table, dnat models.Rule
 	}
 	mapping.Interfaces = candidateLabels(reachable, d.candidates)
 	d.published = append(d.published, mapping)
-	if d.forwardAccepted[endpoint] == nil {
-		d.forwardAccepted[endpoint] = labelSets{}
+	for _, endpoint := range endpoints {
+		if d.forwardAccepted[endpoint] == nil {
+			d.forwardAccepted[endpoint] = labelSets{}
+		}
+		d.forwardAccepted[endpoint].add(forwardSegments)
 	}
-	d.forwardAccepted[endpoint].add(forwardSegments)
 
 	if finding, ok := d.classifyMapping(mapping, outcomes); ok {
 		explicit := finding.Fix == "true"
 		finding.Fix = ""
 		d.portFindings = append(d.portFindings, portFinding{
-			finding: finding, explicit: explicit, protocol: dnat.Protocol, hostPort: hostPort,
-			containerAddr: containerAddr, containerPort: containerPort,
+			finding: finding, explicit: explicit, protocol: protocol,
+			hostPort: mapping.HostPort, hostPortEnd: mapping.HostPortEnd, containerAddr: mapping.ContainerAddr,
+			containerPort: mapping.ContainerPort, containerPortEnd: mapping.ContainerPortEnd,
 		})
 	}
+}
+
+// portRangeOf renders the ports first-last of a mapping.
+func portRangeOf(first, last int) string {
+	if last > first {
+		return strconv.Itoa(first) + "-" + strconv.Itoa(last)
+	}
+	return strconv.Itoa(first)
 }
 
 // classifyMapping turns the per-interface outcomes of one published port into
@@ -344,13 +419,14 @@ func (d *dockerAnalyzer) classifyMapping(mapping models.PublishedPort, outcomes 
 		certainty = models.CertaintyPossible
 	}
 	interfaces := candidateLabels(selected, d.candidates)
-	port := strconv.Itoa(mapping.HostPort)
-	dest := joinHostPort(mapping.ContainerAddr, strconv.Itoa(mapping.ContainerPort))
+	port := portRangeOf(mapping.HostPort, mapping.HostPortEnd)
+	dest := joinHostPort(mapping.ContainerAddr, portRangeOf(mapping.ContainerPort, mapping.ContainerPortEnd))
 	finding := models.DockerBypassFinding{
 		Code:          best.code,
 		Certainty:     certainty,
 		IPVersion:     mapping.IPVersion,
 		NATRule:       mapping.NATRule,
+		HostAddr:      mapping.HostAddr,
 		ExposedPort:   port,
 		ContainerDest: dest,
 		Bridge:        mapping.Bridge,
@@ -457,6 +533,15 @@ func scopeAudience(scope models.AccessScope) string {
 	return "any source"
 }
 
+// forwardingSetting names the kernel setting that makes the host route
+// packets of an address family.
+func forwardingSetting(version models.IPVersion) string {
+	if version == models.IPv6 {
+		return "net.ipv6.conf.all.forwarding"
+	}
+	return "net.ipv4.ip_forward"
+}
+
 func stackName(version models.IPVersion) string {
 	if version == models.IPv6 {
 		return "IPv6"
@@ -484,12 +569,13 @@ func GroupPublishedPorts(ports []models.PublishedPort) []PublishedGroup {
 				last.Bridge == mapping.Bridge && last.ForwardScope == mapping.ForwardScope &&
 				last.InputScope == mapping.InputScope && last.Certainty == mapping.Certainty &&
 				mapping.HostPort == last.HostPortEnd+1 && mapping.ContainerPort == last.ContainerPortEnd+1 {
-				last.HostPortEnd = mapping.HostPort
-				last.ContainerPortEnd = mapping.ContainerPort
+				last.HostPortEnd = max(mapping.HostPort, mapping.HostPortEnd)
+				last.ContainerPortEnd = max(mapping.ContainerPort, mapping.ContainerPortEnd)
 				continue
 			}
 		}
-		groups = append(groups, PublishedGroup{PublishedPort: mapping, HostPortEnd: mapping.HostPort, ContainerPortEnd: mapping.ContainerPort})
+		groups = append(groups, PublishedGroup{PublishedPort: mapping,
+			HostPortEnd: max(mapping.HostPort, mapping.HostPortEnd), ContainerPortEnd: max(mapping.ContainerPort, mapping.ContainerPortEnd)})
 	}
 	return groups
 }
@@ -517,12 +603,13 @@ func mergePortFindings(findings []portFinding) []models.DockerBypassFinding {
 			j++
 		}
 		finding := findings[i].finding
-		if j-i > 1 {
-			first, last := findings[i], findings[j-1]
-			finding.ExposedPort = strconv.Itoa(first.hostPort) + "-" + strconv.Itoa(last.hostPort)
-			finding.ContainerDest = joinHostPort(first.containerAddr, strconv.Itoa(first.containerPort)+"-"+strconv.Itoa(last.containerPort))
+		first, last := findings[i], findings[j-1]
+		hostEnd, containerEnd := max(last.hostPort, last.hostPortEnd), max(last.containerPort, last.containerPortEnd)
+		if hostEnd > first.hostPort {
+			finding.ExposedPort = portRangeOf(first.hostPort, hostEnd)
+			finding.ContainerDest = joinHostPort(first.containerAddr, portRangeOf(first.containerPort, containerEnd))
 		}
-		finding.Reason = mappingReason(finding, findings[i].explicit, j-i > 1)
+		finding.Reason = mappingReason(finding, findings[i].explicit, hostEnd > first.hostPort)
 		if finding.Certainty == models.CertaintyPossible {
 			finding.Reason = "Possible path: " + finding.Reason
 		}
@@ -538,7 +625,8 @@ func samePortGroup(a, b portFinding) bool {
 		a.finding.Certainty == b.finding.Certainty && a.protocol == b.protocol &&
 		a.containerAddr == b.containerAddr && a.finding.InputRule.RuleNum == b.finding.InputRule.RuleNum &&
 		strings.Join(a.finding.Interfaces, ",") == strings.Join(b.finding.Interfaces, ",") &&
-		b.hostPort == a.hostPort+1 && b.containerPort == a.containerPort+1
+		a.finding.NATRule.Chain == b.finding.NATRule.Chain && a.finding.HostAddr == b.finding.HostAddr &&
+		b.hostPort == max(a.hostPort, a.hostPortEnd)+1 && b.containerPort == max(a.containerPort, a.containerPortEnd)+1
 }
 
 // ruleFindingGroup accumulates the published ports for which one user rule
@@ -615,8 +703,8 @@ func (d *dockerAnalyzer) checkForwardRules(mapping models.PublishedPort, origina
 
 func (d *dockerAnalyzer) addRuleFinding(rule *models.Rule, mapping models.PublishedPort, definite, preDNAT bool) {
 	key := fmt.Sprintf("%s/%s#%d|%t", rule.Table, rule.Chain, rule.RuleNum, preDNAT)
-	port := strconv.Itoa(mapping.HostPort) + "/" + string(mapping.Protocol)
-	dest := joinHostPort(mapping.ContainerAddr, strconv.Itoa(mapping.ContainerPort))
+	port := portRangeOf(mapping.HostPort, mapping.HostPortEnd) + "/" + string(mapping.Protocol)
+	dest := joinHostPort(mapping.ContainerAddr, portRangeOf(mapping.ContainerPort, mapping.ContainerPortEnd))
 	group := d.ruleFindings[key]
 	if group == nil {
 		group = &ruleFindingGroup{finding: models.DockerBypassFinding{
@@ -769,7 +857,13 @@ func (d *dockerAnalyzer) analyzeDirectRouting() {
 		}
 	}
 	for _, mapping := range d.published {
-		add(endpoint{protocol: mapping.Protocol, addr: mapping.ContainerAddr, port: mapping.ContainerPort})
+		last := max(mapping.ContainerPort, mapping.ContainerPortEnd)
+		if last-mapping.ContainerPort >= maxEndpointPorts {
+			last = mapping.ContainerPort
+		}
+		for port := mapping.ContainerPort; port <= last; port++ {
+			add(endpoint{protocol: mapping.Protocol, addr: mapping.ContainerAddr, port: port})
+		}
 	}
 	for key := range d.loopbackOnly {
 		parts := strings.Split(key, "|")
@@ -789,7 +883,6 @@ func (d *dockerAnalyzer) analyzeDirectRouting() {
 		return endpoints[i].port < endpoints[j].port
 	})
 
-	root := rootSet(d.rs.IPVersion)
 	reportedOpen := map[string]bool{}
 	for _, e := range endpoints {
 		addr, err := netip.ParseAddr(e.addr)
@@ -816,7 +909,8 @@ func (d *dockerAnalyzer) analyzeDirectRouting() {
 				External:        true,
 				Ctx:             d.ctx,
 			}
-			pre := evaluatePath(d.rs, preroutingPath(query), root)
+			sources, _ := d.eval.arriving(candidate.name)
+			pre := evaluatePath(d.rs, preroutingPath(query), sources)
 			forward := evaluatePath(d.rs, forwardPath(query), pre.acceptedSet())
 			if len(forward.Accepted) == 0 {
 				continue
@@ -962,9 +1056,12 @@ func (d *dockerAnalyzer) analyzeFragileOrder() {
 // DockerIPv6Gaps reports IPv6 forwarding that Docker does not manage while it
 // manages IPv4: with ip6tables integration disabled, IPv6-enabled container
 // networks are routed without any Docker filtering.
-func DockerIPv6Gaps(ipv4, ipv6 *models.Ruleset) []models.DockerBypassFinding {
+func DockerIPv6Gaps(ipv4, ipv6 *models.Ruleset, host *models.HostContext) []models.DockerBypassFinding {
 	if ipv4 == nil || ipv6 == nil || len(ipv6.Tables) == 0 {
 		return nil
+	}
+	if on, known := host.Forwarding(models.IPv6); known && !on {
+		return nil // the host routes no IPv6 packets to its containers
 	}
 	if !inferDockerTopology(ipv4).present || inferDockerTopology(ipv6).present {
 		return nil
@@ -991,11 +1088,10 @@ func DockerIPv6Gaps(ipv4, ipv6 *models.Ruleset) []models.DockerBypassFinding {
 	}}
 }
 
-// DockerAssessmentDiagnostics reports translations that cannot be evaluated
-// completely instead of silently omitting them. Rules with the same gap are
-// one note: kube-proxy alone writes hundreds of DNAT rules without a port.
+// DockerAssessmentDiagnostics reports translations that cannot be followed,
+// instead of leaving them out silently. Rules with the same gap are one note.
 func DockerAssessmentDiagnostics(rs *models.Ruleset) []models.AssessmentDiagnostic {
-	if rs == nil || rs.Tables["nat"] == nil {
+	if rs == nil {
 		return nil
 	}
 	type group struct {
@@ -1004,7 +1100,8 @@ func DockerAssessmentDiagnostics(rs *models.Ruleset) []models.AssessmentDiagnost
 		locations []string
 	}
 	var groups []*group
-	add := func(area, reason, location string) {
+	add := func(area, reason string, rule *models.Rule) {
+		location := fmt.Sprintf("%s/%s rule #%d", rule.Table, rule.Chain, rule.RuleNum)
 		for _, g := range groups {
 			if g.reason == reason {
 				g.locations = append(g.locations, location)
@@ -1013,41 +1110,34 @@ func DockerAssessmentDiagnostics(rs *models.Ruleset) []models.AssessmentDiagnost
 		}
 		groups = append(groups, &group{area: area, reason: reason, locations: []string{location}})
 	}
-	nat := rs.Tables["nat"]
-	for _, rule := range allDNATRules(nat) {
-		location := fmt.Sprintf("nat/%s rule #%d", rule.Chain, rule.RuleNum)
-		switch {
-		case rule.DstPort == "":
-			add("docker", "DNAT has no destination-port predicate; published-port exposure was not assessed", location)
-		case rule.Protocol == "" || rule.Protocol == models.ProtoAll:
-			add("docker", "DNAT has no specific transport protocol; published-port exposure was not assessed", location)
-		case len(portsInSpec(rule.DstPort)) == 0:
-			add("docker", "DNAT has an invalid destination-port predicate; published-port exposure was not assessed", location)
-		case rule.Negations["dport"]:
-			add("docker", "DNAT matches a negated destination port; published-port exposure was not assessed", location)
-		case rule.DNATTarget == "":
-			add("docker", "DNAT target is missing; translation was not assessed", location)
-		default:
-			translation, err := parseDNATTranslation(rule.DNATTarget)
-			if err != nil {
-				add("docker", err.Error(), location)
-			} else if translation.HasPort && translation.PortEnd > translation.PortStart &&
-				translation.PortEnd-translation.PortStart+1 < len(portsInSpec(rule.DstPort)) {
-				add("docker", "translated port range is shorter than the original port range; part of the mapping was not assessed", location)
-			}
-		}
+	// Only rules that a packet from another host can meet matter here.
+	chains := preroutingChains(rs)
+	keys := make([]string, 0, len(chains))
+	for key := range chains {
+		keys = append(keys, key)
 	}
-	// A redirect sends a port to another local port. The listener is then
-	// reachable through the redirected port as well, which the analysis of
-	// INPUT does not follow yet.
-	for _, chainName := range sortedChainNames(nat) {
-		if chainName == "OUTPUT" || chainName == "POSTROUTING" {
-			continue
-		}
-		for _, rule := range nat.Chains[chainName].Rules {
-			if rule.Target == "REDIRECT" {
-				add("nat", "REDIRECT to a local port is not followed; the service behind it is also reachable through the redirected port",
-					fmt.Sprintf("nat/%s rule #%d", rule.Chain, rule.RuleNum))
+	sort.Strings(keys)
+	for _, key := range keys {
+		chain := chains[key]
+		for i := range chain.Rules {
+			rule := &chain.Rules[i]
+			switch {
+			case rule.Table == "nat" && rule.Target == "DNAT" && rule.DNATTarget == "":
+				add("docker", "DNAT target is missing; the translation was not assessed", rule)
+			case rule.Table == "nat" && rule.Target == "DNAT":
+				translation, err := parseDNATTranslation(rule.DNATTarget)
+				switch {
+				case err != nil:
+					add("docker", err.Error()+"; the translation was not assessed", rule)
+				case translation.HasPort && translation.PortEnd > translation.PortStart && rule.DstPort != "" && !rule.Negations["dport"] &&
+					translation.PortEnd-translation.PortStart+1 < len(portsInSpec(rule.DstPort)):
+					add("docker", "translated port range is shorter than the original port range; part of the mapping was not assessed", rule)
+				}
+			case rule.Table == "nat" && rule.Target == "NETMAP":
+				add("nat", "NETMAP maps a network of addresses to another one, which is not followed; the ports behind it were not assessed", rule)
+			case rule.Table == "mangle" && rule.Target == "TPROXY":
+				add("nat", "TPROXY hands the packets to a local proxy without changing them, which is not followed; "+
+					"the proxy also receives the traffic that the rule matches", rule)
 			}
 		}
 	}
@@ -1074,80 +1164,6 @@ func allDNATRules(table *models.Table) []models.Rule {
 		}
 	}
 	return rules
-}
-
-type natWalkResult struct {
-	Reached   addrSet
-	Returned  addrSet
-	Uncertain bool
-}
-
-// sourcesReachingDNAT returns the sources whose packets reach the DNAT rule
-// target in nat/PREROUTING, and whether that depends on an undecidable
-// predicate.
-func sourcesReachingDNAT(table *models.Table, target models.Rule, query packetQuery, sources addrSet) (addrSet, bool) {
-	result := walkNATChain(table, "PREROUTING", sources, target, query, newChainWalk(query))
-	return result.Reached, result.Uncertain
-}
-
-func walkNATChain(table *models.Table, chainName string, input addrSet, target models.Rule, query packetQuery, walk *chainWalk) natWalkResult {
-	chain := table.Chains[chainName]
-	if chain == nil || walk.path[chainName] {
-		return natWalkResult{}
-	}
-	if !walk.budget.spend() {
-		// Too complex to finish: the DNAT rule may be reached from any source.
-		return natWalkResult{Reached: input, Returned: input, Uncertain: true}
-	}
-	walk.path[chainName] = true
-	defer delete(walk.path, chainName)
-
-	remaining := input
-	var result natWalkResult
-	for _, i := range ruleOrder(chain, query) {
-		if remaining.empty() {
-			break
-		}
-		rule := &chain.Rules[i]
-		certainty := ruleMatchesQuery(rule, query)
-		if certainty == matchNo {
-			continue
-		}
-		matched, unmatched, sourceKnown := splitBySource(remaining, rule, query)
-		if matched.empty() {
-			continue
-		}
-		if certainty == matchMaybe || !sourceKnown {
-			unmatched = remaining
-			result.Uncertain = true
-		}
-
-		if rule.Table == target.Table && rule.Chain == target.Chain && rule.RuleNum == target.RuleNum {
-			result.Reached = result.Reached.union(matched)
-			remaining = unmatched
-			continue
-		}
-		if _, isChain := table.Chains[rule.Target]; isChain {
-			child := walkNATChain(table, rule.Target, matched, target, query, walk)
-			result.Reached = result.Reached.union(child.Reached)
-			result.Uncertain = result.Uncertain || child.Uncertain
-			remaining = unmatched
-			if !rule.Goto {
-				remaining = remaining.union(child.Returned)
-			}
-			continue
-		}
-		switch rule.Target {
-		case "RETURN":
-			result.Returned = result.Returned.union(matched)
-			remaining = unmatched
-		case "ACCEPT", "DROP", "REJECT", "DNAT", "REDIRECT":
-			// These verdicts consume the matching branch in this hook.
-			remaining = unmatched
-		}
-	}
-	result.Returned = result.Returned.union(remaining)
-	return result
 }
 
 type dnatTranslation struct {

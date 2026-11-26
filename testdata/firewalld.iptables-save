@@ -1,0 +1,68 @@
+# A host that firewalld manages with its iptables backend (FirewallBackend=iptables):
+# zone public on eth0 with the services ssh, http and https, and a rich rule that
+# admits 10.0.0.0/8 to PostgreSQL.
+# Written after the rules of such a host, not captured.
+*filter
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:FORWARD_IN_ZONES - [0:0]
+:FORWARD_IN_ZONES_SOURCE - [0:0]
+:FORWARD_OUT_ZONES - [0:0]
+:FORWARD_OUT_ZONES_SOURCE - [0:0]
+:FORWARD_direct - [0:0]
+:FWDI_public - [0:0]
+:FWDI_public_allow - [0:0]
+:FWDI_public_deny - [0:0]
+:FWDI_public_log - [0:0]
+:FWDO_public - [0:0]
+:FWDO_public_allow - [0:0]
+:FWDO_public_deny - [0:0]
+:FWDO_public_log - [0:0]
+:INPUT_ZONES - [0:0]
+:INPUT_ZONES_SOURCE - [0:0]
+:INPUT_direct - [0:0]
+:IN_public - [0:0]
+:IN_public_allow - [0:0]
+:IN_public_deny - [0:0]
+:IN_public_log - [0:0]
+:OUTPUT_direct - [0:0]
+-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A INPUT -i lo -j ACCEPT
+-A INPUT -j INPUT_direct
+-A INPUT -j INPUT_ZONES_SOURCE
+-A INPUT -j INPUT_ZONES
+-A INPUT -m conntrack --ctstate INVALID -j DROP
+-A INPUT -j REJECT --reject-with icmp-host-prohibited
+-A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A FORWARD -i lo -j ACCEPT
+-A FORWARD -j FORWARD_direct
+-A FORWARD -j FORWARD_IN_ZONES_SOURCE
+-A FORWARD -j FORWARD_IN_ZONES
+-A FORWARD -j FORWARD_OUT_ZONES_SOURCE
+-A FORWARD -j FORWARD_OUT_ZONES
+-A FORWARD -m conntrack --ctstate INVALID -j DROP
+-A FORWARD -j REJECT --reject-with icmp-host-prohibited
+-A OUTPUT -j OUTPUT_direct
+-A FORWARD_IN_ZONES -i eth0 -g FWDI_public
+-A FORWARD_IN_ZONES -g FWDI_public
+-A FORWARD_OUT_ZONES -o eth0 -g FWDO_public
+-A FORWARD_OUT_ZONES -g FWDO_public
+-A FWDI_public -j FWDI_public_log
+-A FWDI_public -j FWDI_public_deny
+-A FWDI_public -j FWDI_public_allow
+-A FWDI_public -p icmp -j ACCEPT
+-A FWDO_public -j FWDO_public_log
+-A FWDO_public -j FWDO_public_deny
+-A FWDO_public -j FWDO_public_allow
+-A INPUT_ZONES -i eth0 -g IN_public
+-A INPUT_ZONES -g IN_public
+-A IN_public -j IN_public_log
+-A IN_public -j IN_public_deny
+-A IN_public -j IN_public_allow
+-A IN_public -p icmp -j ACCEPT
+-A IN_public_allow -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW,UNTRACKED -j ACCEPT
+-A IN_public_allow -p tcp -m tcp --dport 80 -m conntrack --ctstate NEW,UNTRACKED -j ACCEPT
+-A IN_public_allow -p tcp -m tcp --dport 443 -m conntrack --ctstate NEW,UNTRACKED -j ACCEPT
+-A IN_public_allow -s 10.0.0.0/8 -p tcp -m tcp --dport 5432 -m conntrack --ctstate NEW,UNTRACKED -j ACCEPT
+COMMIT

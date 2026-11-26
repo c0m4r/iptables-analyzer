@@ -1,0 +1,319 @@
+{
+  "schema_version": 2,
+  "tool": {
+    "name": "iptables-analyzer",
+    "version": "dev",
+    "url": "https://github.com/c0m4r/iptables-analyzer"
+  },
+  "generated": "2026-11-25T12:00:00Z",
+  "old": {
+    "mode": "file",
+    "inputs": [
+      "../testdata/basic.iptables-save"
+    ],
+    "families": [
+      {
+        "version": 4,
+        "status": "ANALYZED",
+        "tables": 1,
+        "chains": 3,
+        "rules": 7,
+        "policies": {
+          "FORWARD": "DROP",
+          "INPUT": "DROP",
+          "OUTPUT": "ACCEPT"
+        }
+      },
+      {
+        "version": 6,
+        "status": "NOT_SUPPLIED",
+        "tables": 0,
+        "chains": 0,
+        "rules": 0
+      }
+    ],
+    "score": {
+      "total": 93,
+      "grade": "A",
+      "complete": true,
+      "categories": [
+        {
+          "key": "policy",
+          "label": "Policy",
+          "max": 25,
+          "lost": 0
+        },
+        {
+          "key": "exposure",
+          "label": "Exposure",
+          "max": 25,
+          "lost": 7
+        },
+        {
+          "key": "paths",
+          "label": "Shadows and bypasses",
+          "max": 25,
+          "lost": 0
+        },
+        {
+          "key": "hygiene",
+          "label": "Hygiene",
+          "max": 15,
+          "lost": 0
+        },
+        {
+          "key": "ipv6",
+          "label": "IPv6",
+          "max": 10,
+          "lost": 0
+        }
+      ]
+    },
+    "counts": {
+      "critical": 0,
+      "high": 1,
+      "medium": 0,
+      "low": 2,
+      "info": 1
+    }
+  },
+  "new": {
+    "mode": "file",
+    "inputs": [
+      "../testdata/ufw.iptables-save"
+    ],
+    "families": [
+      {
+        "version": 4,
+        "status": "ANALYZED",
+        "tables": 1,
+        "chains": 35,
+        "rules": 71,
+        "policies": {
+          "FORWARD": "DROP",
+          "INPUT": "DROP",
+          "OUTPUT": "ACCEPT"
+        },
+        "managers": [
+          "ufw"
+        ]
+      },
+      {
+        "version": 6,
+        "status": "NOT_SUPPLIED",
+        "tables": 0,
+        "chains": 0,
+        "rules": 0
+      }
+    ],
+    "score": {
+      "total": 95,
+      "grade": "A",
+      "complete": true,
+      "categories": [
+        {
+          "key": "policy",
+          "label": "Policy",
+          "max": 25,
+          "lost": 0
+        },
+        {
+          "key": "exposure",
+          "label": "Exposure",
+          "max": 25,
+          "lost": 5
+        },
+        {
+          "key": "paths",
+          "label": "Shadows and bypasses",
+          "max": 25,
+          "lost": 0
+        },
+        {
+          "key": "hygiene",
+          "label": "Hygiene",
+          "max": 15,
+          "lost": 0
+        },
+        {
+          "key": "ipv6",
+          "label": "IPv6",
+          "max": 10,
+          "lost": 0
+        }
+      ]
+    },
+    "counts": {
+      "critical": 0,
+      "high": 0,
+      "medium": 1,
+      "low": 3,
+      "info": 1
+    }
+  },
+  "added": [
+    {
+      "id": "F4",
+      "code": "open_port",
+      "severity": "LOW",
+      "certainty": "DEFINITE",
+      "category": "exposure",
+      "families": [
+        4
+      ],
+      "title": "68/udp is open to any source",
+      "detail": "IPv4: accepted by filter/ufw-before-input rule #9. Limited by: source port 67. A rule of this form admits replies (DHCP, DNS): only a sender that uses that source port passes.",
+      "ports": [
+        "68/udp"
+      ],
+      "rules": [
+        {
+          "family": 4,
+          "table": "filter",
+          "chain": "ufw-before-input",
+          "num": 9,
+          "spec": "-p udp -m udp --sport 67 --dport 68 -j ACCEPT",
+          "role": "accepts",
+          "path": [
+            "INPUT #2",
+            "ufw-before-input #9"
+          ]
+        }
+      ],
+      "points": 1,
+      "gain": 1
+    }
+  ],
+  "removed": [],
+  "changed": [
+    {
+      "old": {
+        "id": "F1",
+        "code": "open_port",
+        "severity": "HIGH",
+        "certainty": "DEFINITE",
+        "category": "exposure",
+        "families": [
+          4
+        ],
+        "title": "22/tcp is open to any source",
+        "detail": "IPv4: accepted by filter/INPUT rule #3.",
+        "ports": [
+          "22/tcp"
+        ],
+        "rules": [
+          {
+            "family": 4,
+            "table": "filter",
+            "chain": "INPUT",
+            "num": 3,
+            "spec": "-p tcp --dport 22 -j ACCEPT",
+            "role": "accepts"
+          }
+        ],
+        "fix": {
+          "summary": "If the clients are known, accept only their addresses. If SSH must stay open to any source, limit new connections for each source: the limit counts every source by itself, so one client cannot lock out the others, and it does not touch established sessions.",
+          "steps": [
+            {
+              "text": "Replace the rule with one for the known clients",
+              "command": "iptables -R INPUT 3 -s \u003ctrusted-cidr\u003e -p tcp --dport 22 -j ACCEPT"
+            },
+            {
+              "text": "Or drop the connections of a source that opens more than 10 a minute, in front of the rule",
+              "command": "iptables -I INPUT 3 -p tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh4 -j DROP"
+            }
+          ]
+        },
+        "points": 5,
+        "gain": 5
+      },
+      "new": {
+        "id": "F1",
+        "code": "open_port",
+        "severity": "MEDIUM",
+        "certainty": "DEFINITE",
+        "category": "exposure",
+        "families": [
+          4
+        ],
+        "title": "22/tcp is open to any source",
+        "detail": "IPv4: accepted by filter/ufw-user-limit-accept rule #1. Limited by: rate limit.",
+        "ports": [
+          "22/tcp"
+        ],
+        "rules": [
+          {
+            "family": 4,
+            "table": "filter",
+            "chain": "ufw-user-limit-accept",
+            "num": 1,
+            "spec": "-j ACCEPT",
+            "role": "accepts",
+            "path": [
+              "INPUT #2",
+              "ufw-before-input #13",
+              "ufw-user-input #3",
+              "ufw-user-limit-accept #1"
+            ]
+          }
+        ],
+        "fix": {
+          "summary": "ufw manages this rule, and a change made with iptables is lost at its next reload. If the clients are known, allow only them and delete the open rule.",
+          "steps": [
+            {
+              "text": "Allow the known clients",
+              "command": "ufw allow from \u003ctrusted-cidr\u003e to any port 22 proto tcp"
+            },
+            {
+              "text": "Delete the rule for any source",
+              "command": "ufw delete limit 22/tcp"
+            }
+          ]
+        },
+        "points": 2,
+        "gain": 2
+      }
+    }
+  ],
+  "ports": [
+    {
+      "family": 4,
+      "protocol": "tcp",
+      "first": 22,
+      "last": 22,
+      "old": {
+        "scope": "EXPOSED",
+        "certainty": "DEFINITE"
+      },
+      "new": {
+        "scope": "EXPOSED",
+        "certainty": "DEFINITE",
+        "condition": "rate limit"
+      }
+    },
+    {
+      "family": 4,
+      "protocol": "tcp",
+      "first": 5432,
+      "last": 5432,
+      "old": {},
+      "new": {
+        "scope": "LOCALNET",
+        "certainty": "DEFINITE"
+      }
+    },
+    {
+      "family": 4,
+      "protocol": "udp",
+      "first": 68,
+      "last": 68,
+      "old": {},
+      "new": {
+        "scope": "EXPOSED",
+        "certainty": "DEFINITE",
+        "condition": "source port 67"
+      }
+    }
+  ],
+  "forwarded_ports": []
+}

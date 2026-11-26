@@ -13,11 +13,42 @@ Phase 2 changes the data model and the report. Phase 3 widens the analysis.
 | --- | --- |
 | 1. Correct results | Done (2026-11-25), not released. See `CHANGELOG.md`, section Unreleased |
 | 2. Report | Done (2026-11-25), not released |
-| 3. Wider analysis | Next |
+| 3. Wider analysis | Done (2026-11-26), not released. Open points below |
 
 Before the release: set `VERSION` (decision 3 names 0.8), give the section Unreleased
 of `CHANGELOG.md` its version and date, and set the same in the manual page.
 The picture in `README.md` showed the old report; the README now has a text example.
+
+Phase 3 differs from the plan below in these points:
+
+- 3.1: the cluster addresses of Kubernetes services are not examined (a note gives their number);
+  node ports and load-balancer addresses are. A destination address that a nat rule names is
+  evaluated by itself; all other addresses of the host are one case.
+- 3.3: the IPv4 routes are read too (`ip -4 route show table main`). With `rp_filter`, they limit
+  the sources that can arrive on an interface. `route_localnet` is read for `DNAT` to 127.0.0.0/8.
+- 3.4: a snapshot holds the output of the tools as text, so a later version can read more from it.
+- 3.5: `--expect VERDICT` makes a trace a test with an exit status. With `--diff`, `--fail-on`
+  judges only what the new input adds.
+- 3.6: the fixtures for Kubernetes, fail2ban, libvirt, firewalld and the router are written after
+  the rules of such hosts, not captured. Each loads with the real `iptables-restore`. The kernel
+  comparison starts the test binary again in user and network namespaces (no `unshare`, no root).
+
+Open points of Phase 3:
+
+- IPv6 is not compared with the kernel: the harness in `internal/analyzer/kernel_linux_test.go`
+  uses IPv4 only, and so does `consistency_test.go`. First point to check: a `DNAT` to `::1`.
+  The code takes it as never delivered (`translate` in `ingress.go`, `translate` in `trace.go`),
+  because IPv6 has no `route_localnet`. The kernel has no check of that kind after the
+  translation for IPv6, so the packet is probably delivered. If so, this is an exposure that
+  the tool does not report.
+- `-m rpfilter` (firewalld writes `-m rpfilter --invert -j DROP` in the raw table for IPv6) is not
+  modeled with the routes. Check what the analysis and the trace make of it.
+- `-6` with a snapshot that holds no IPv6 rules gives the general message "no rules".
+- The step of the CI workflow for the kernel comparison is not written. Ubuntu 24.04 needs
+  `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` in front of `make test-kernel`.
+  The new fuzz targets are in the smoke test of the workflow; the workflow was not run.
+- Not run after the last changes: the race detector, `make test-sandbox`, the cross-builds,
+  `make check-deps`, and a long fuzz run.
 
 Phase 1 differs from the plan below in these points:
 
@@ -307,8 +338,8 @@ Done in Phase 2: ufw, firewalld, Docker, libvirt, fail2ban, kube-proxy, Calico,
 CNI, Tailscale, sshguard and CrowdSec are recognized by chain names. The owner is in
 the report header, and fixes for ufw chains are `ufw` commands.
 
-Open: CSF and shorewall; fixes in the commands of firewalld (`firewall-cmd`) and of
-the other programs; the wording of findings for each owner.
+Done in Phase 3: CSF, shorewall and flannel; fixes in the commands of firewalld
+(`firewall-cmd`), csf and shorewall, and a fix for the ports of kube-proxy.
 
 ### 3.3 Host facts [A4]
 

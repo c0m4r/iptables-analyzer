@@ -1,0 +1,181 @@
+{
+  "schema_version": 2,
+  "tool": {
+    "name": "iptables-analyzer",
+    "version": "dev",
+    "url": "https://github.com/c0m4r/iptables-analyzer"
+  },
+  "generated": "2026-11-25T12:00:00Z",
+  "mode": "file",
+  "inputs": [
+    "../testdata/k8s.iptables-save"
+  ],
+  "trace": {
+    "packet": {
+      "protocol": "tcp",
+      "source": "203.0.113.5",
+      "port": 30080,
+      "in": "eth0",
+      "state": "NEW"
+    },
+    "family": 4,
+    "stages": [
+      {
+        "table": "mangle",
+        "chain": "PREROUTING",
+        "steps": [],
+        "result": "no rule decides: policy ACCEPT"
+      },
+      {
+        "table": "nat",
+        "chain": "PREROUTING",
+        "steps": [
+          {
+            "table": "nat",
+            "chain": "PREROUTING",
+            "num": 1,
+            "spec": "-m comment --comment \"kubernetes service portals\" -j KUBE-SERVICES",
+            "depth": 0,
+            "match": "yes",
+            "action": "jump"
+          },
+          {
+            "table": "nat",
+            "chain": "KUBE-SERVICES",
+            "num": 6,
+            "spec": "-m comment --comment \"kubernetes service nodeports; NOTE: this must be the last rule in this chain\" -m addrtype --dst-type LOCAL -j KUBE-NODEPORTS",
+            "depth": 1,
+            "match": "yes",
+            "action": "jump"
+          },
+          {
+            "table": "nat",
+            "chain": "KUBE-NODEPORTS",
+            "num": 1,
+            "spec": "-p tcp -m comment --comment \"default/web\" -m tcp --dport 30080 -j KUBE-EXT-2CMXP7HKUVJN7L6M",
+            "depth": 2,
+            "match": "yes",
+            "action": "jump"
+          },
+          {
+            "table": "nat",
+            "chain": "KUBE-EXT-2CMXP7HKUVJN7L6M",
+            "num": 1,
+            "spec": "-m comment --comment \"masquerade traffic for default/web external destinations\" -j KUBE-MARK-MASQ",
+            "depth": 3,
+            "match": "yes",
+            "action": "jump"
+          },
+          {
+            "table": "nat",
+            "chain": "KUBE-MARK-MASQ",
+            "num": 1,
+            "spec": "-j MARK --set-xmark 0x4000/0x4000",
+            "depth": 4,
+            "match": "yes",
+            "action": "continue",
+            "note": "the mark is now 0x4000"
+          },
+          {
+            "table": "nat",
+            "chain": "KUBE-EXT-2CMXP7HKUVJN7L6M",
+            "num": 2,
+            "spec": "-j KUBE-SVC-2CMXP7HKUVJN7L6M",
+            "depth": 3,
+            "match": "yes",
+            "action": "jump"
+          },
+          {
+            "table": "nat",
+            "chain": "KUBE-SVC-2CMXP7HKUVJN7L6M",
+            "num": 2,
+            "spec": "-m comment --comment \"default/web -\u003e 10.244.0.10:8080\" -m statistic --mode random --probability 0.50000000000 -j KUBE-SEP-KTTG6H42UOAJUCVL",
+            "depth": 4,
+            "match": "maybe",
+            "action": "skipped",
+            "note": "depends on: random share of packets"
+          },
+          {
+            "table": "nat",
+            "chain": "KUBE-SVC-2CMXP7HKUVJN7L6M",
+            "num": 3,
+            "spec": "-m comment --comment \"default/web -\u003e 10.244.0.11:8080\" -j KUBE-SEP-N4G2XR5TDX7PQE7P",
+            "depth": 4,
+            "match": "yes",
+            "action": "jump"
+          },
+          {
+            "table": "nat",
+            "chain": "KUBE-SEP-N4G2XR5TDX7PQE7P",
+            "num": 2,
+            "spec": "-p tcp -m comment --comment \"default/web\" -m tcp -j DNAT --to-destination 10.244.0.11:8080",
+            "depth": 5,
+            "match": "yes",
+            "action": "DNAT"
+          }
+        ],
+        "result": "new destination: 10.244.0.11, port 8080"
+      },
+      {
+        "table": "mangle",
+        "chain": "FORWARD",
+        "steps": [],
+        "result": "no rule decides: policy ACCEPT"
+      },
+      {
+        "table": "filter",
+        "chain": "FORWARD",
+        "steps": [
+          {
+            "table": "filter",
+            "chain": "FORWARD",
+            "num": 1,
+            "spec": "-m conntrack --ctstate NEW -m comment --comment \"kubernetes load balancer firewall\" -j KUBE-PROXY-FIREWALL",
+            "depth": 0,
+            "match": "yes",
+            "action": "jump"
+          },
+          {
+            "table": "filter",
+            "chain": "FORWARD",
+            "num": 2,
+            "spec": "-m comment --comment \"kubernetes forwarding rules\" -j KUBE-FORWARD",
+            "depth": 0,
+            "match": "yes",
+            "action": "jump"
+          },
+          {
+            "table": "filter",
+            "chain": "KUBE-FORWARD",
+            "num": 2,
+            "spec": "-m comment --comment \"kubernetes forwarding rules\" -m mark --mark 0x4000/0x4000 -j ACCEPT",
+            "depth": 1,
+            "match": "yes",
+            "action": "ACCEPT"
+          }
+        ],
+        "result": "ACCEPT"
+      }
+    ],
+    "verdict": "ACCEPT",
+    "certain": true,
+    "decided_by": "filter/KUBE-FORWARD #2",
+    "delivery": "forward",
+    "destination": "10.244.0.11",
+    "port": 8080,
+    "assumptions": [
+      "The source port was not given: 54321 stands for a port that a client sends from.",
+      "The egress interface is not known: a rule that names one may match (add \"out IFACE\")."
+    ],
+    "alternatives": [
+      {
+        "if": "nat/KUBE-SVC-2CMXP7HKUVJN7L6M #2 matches (depends on: random share of packets)",
+        "verdict": "ACCEPT",
+        "decided_by": "filter/KUBE-FORWARD #2",
+        "delivery": "forward",
+        "destination": "10.244.0.10",
+        "port": 8080
+      }
+    ]
+  }
+}

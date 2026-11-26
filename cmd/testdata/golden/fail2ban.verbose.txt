@@ -1,0 +1,87 @@
+iptables-analyzer vdev · file analysis · 2026-11-25 12:00
+inputs: ../testdata/fail2ban.iptables-save, ../testdata/fail2ban-services.txt
+IPv4: 14 rules in 5 chains (fail2ban) · INPUT DROP · FORWARD DROP · OUTPUT ACCEPT
+IPv6: not supplied
+
+  Grade A  93/100    1 high · 2 low · 1 info
+
+  Policy                ▰▰▰▰▰▰▰▰▰▰ 25/25    Hygiene               ▰▰▰▰▰▰▰▰▰▰ 15/15
+  Exposure              ▰▰▰▰▰▰▰▱▱▱ 18/25    IPv6                  ▰▰▰▰▰▰▰▰▰▰ 10/10
+  Shadows and bypasses  ▰▰▰▰▰▰▰▰▰▰ 25/25    
+
+  note: No IPv6 rules were supplied: only IPv4 was analyzed, and IPv4 rules do not filter IPv6. Add
+  the output of ip6tables-save as another file.
+
+  Findings
+
+  HIGH     F1   sshd is open to any source on 22/tcp                                              -5
+                IPv4: accepted by filter/INPUT rule #7.
+                filter/INPUT #7:  -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+                fix  If the clients are known, accept only their addresses. If SSH must stay open to
+                     any source, limit new connections for each source: the limit counts every
+                     source by itself, so one client cannot lock out the others, and it does not
+                     touch established sessions.
+                     Replace the rule with one for the known clients:
+                       iptables -R INPUT 7 -s <trusted-cidr> -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+                     Or drop the connections of a source that opens more than 10 a minute, in front
+                     of the rule:
+                       iptables -I INPUT 7 -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh4 -j DROP
+
+  LOW      F2   nginx is open to any source on 80/tcp                                             -1
+                IPv4: accepted by filter/INPUT rule #8.
+                filter/INPUT #8:  -p tcp -m multiport --dports 80,443 -m conntrack --ctstate NEW -j ACCEPT
+                fix  If the clients are known, accept only their addresses.
+                     Replace the rule with one for the known clients:
+                       iptables -R INPUT 8 -s <trusted-cidr> -p tcp -m multiport --dports 80,443 -m conntrack --ctstate NEW -j ACCEPT
+
+  LOW      F3   nginx is open to any source on 443/tcp                                            -1
+                IPv4: accepted by filter/INPUT rule #8.
+                filter/INPUT #8:  -p tcp -m multiport --dports 80,443 -m conntrack --ctstate NEW -j ACCEPT
+                fix  If the clients are known, accept only their addresses.
+                     Replace the rule with one for the known clients:
+                       iptables -R INPUT 8 -s <trusted-cidr> -p tcp -m multiport --dports 80,443 -m conntrack --ctstate NEW -j ACCEPT
+
+  INFO     F4   OUTPUT default policy is ACCEPT
+                All outbound traffic is allowed. This is the usual setup; an OUTPUT allowlist can
+                limit what a compromised service is able to reach.
+
+  Open to any source
+    tcp  22 sshd · 80 nginx · 443 nginx
+
+  Listening sockets
+    tcp   22     0.0.0.0                  sshd               EXPOSED
+    tcp   80     0.0.0.0                  nginx              EXPOSED
+    tcp   443    0.0.0.0                  nginx              EXPOSED
+    tcp   25     127.0.0.1                master             LOCALHOST
+
+  Sandbox
+    Landlock is not available
+
+  Rules, IPv4
+
+    filter/INPUT (policy DROP, 8 rules)
+       1 -p tcp -m multiport --dports 80,443 -j f2b-nginx-http-auth
+       2 -p tcp -m multiport --dports 22 -j f2b-sshd
+       3 -i lo -j ACCEPT
+       4 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+       5 -m conntrack --ctstate INVALID -j DROP
+       6 -p icmp -m icmp --icmp-type 8 -j ACCEPT
+       7 -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT [F1]
+       8 -p tcp -m multiport --dports 80,443 -m conntrack --ctstate NEW -j ACCEPT [F2 F3]
+
+    filter/FORWARD (policy DROP, 0 rules)
+
+    filter/OUTPUT (policy ACCEPT, 0 rules)
+
+    filter/f2b-nginx-http-auth (2 rules, fail2ban)
+       1 -s 192.0.2.44/32 -j REJECT --reject-with icmp-port-unreachable
+       2 -j RETURN
+
+    filter/f2b-sshd (4 rules, fail2ban)
+       1 -s 198.51.100.23/32 -j REJECT --reject-with icmp-port-unreachable
+       2 -s 203.0.113.66/32 -j REJECT --reject-with icmp-port-unreachable
+       3 -s 203.0.113.67/32 -j REJECT --reject-with icmp-port-unreachable
+       4 -j RETURN
+
+  Not shown: recommended baseline (--baseline)
+  Interactive report: --html FILE · machine-readable: --json

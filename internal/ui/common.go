@@ -106,6 +106,51 @@ func portRange(first, last int) string {
 	return strconv.Itoa(first)
 }
 
+// openPortName names the ports of an entry. An entry that holds for one
+// local address only names it.
+func openPortName(open report.OpenPort) string {
+	if open.Default {
+		return "all ports that no rule names"
+	}
+	name := portRange(open.First, open.Last)
+	if open.Address != "" {
+		name = bracket(open.Address) + ":" + name
+	}
+	return name
+}
+
+// redirectName names the local port, and the address when one is given, to
+// which nat/PREROUTING sends the ports of an entry.
+func redirectName(redirect *report.Redirect) string {
+	switch {
+	case redirect.First == 0 && redirect.Address == "":
+		return "this host"
+	case redirect.First == 0:
+		return redirect.Address
+	case redirect.Address != "":
+		return bracket(redirect.Address) + ":" + portRange(redirect.First, redirect.Last)
+	}
+	return portRange(redirect.First, redirect.Last)
+}
+
+// shownDestinations is the number of destinations of one translated port
+// that the lists name.
+const shownDestinations = 4
+
+// forwardDestination names where a translated port goes. A port that the
+// rules share among several destinations names the first of them.
+func forwardDestination(forward report.Forward) string {
+	if len(forward.Destinations) == 0 {
+		return bracket(forward.DestAddr) + ":" + portRange(forward.DestPort, forward.DestPortEnd)
+	}
+	shown := forward.Destinations[:min(len(forward.Destinations), shownDestinations)]
+	text := strings.Join(shown, ", ")
+	if more := len(forward.Destinations) - len(shown); more > 0 {
+		text += " and " + strconv.Itoa(more) + " more"
+	}
+	return text
+}
+
 // bracket puts an IPv6 address in brackets, for use in front of a port.
 func bracket(addr string) string {
 	if strings.Contains(addr, ":") {
@@ -152,13 +197,23 @@ func familySummary(family report.Family) (text string, warning bool) {
 
 // sourceText says where the input came from.
 func sourceText(rep *report.Report) string {
-	if rep.Mode != "live" {
-		return "file analysis"
+	switch rep.Mode {
+	case "live":
+		if rep.Host != "" {
+			return "live system " + rep.Host
+		}
+		return "live system"
+	case "snapshot":
+		text := "snapshot"
+		if rep.Host != "" {
+			text += " of " + rep.Host
+		}
+		if len(rep.Captured) >= 16 {
+			text += " from " + strings.Replace(rep.Captured[:16], "T", " ", 1)
+		}
+		return text
 	}
-	if rep.Host != "" {
-		return "live system " + rep.Host
-	}
-	return "live system"
+	return "file analysis"
 }
 
 // timeText renders the time of the report without seconds and zone.

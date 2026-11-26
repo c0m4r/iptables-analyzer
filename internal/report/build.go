@@ -18,7 +18,11 @@ const repoURL = "https://github.com/c0m4r/iptables-analyzer"
 type Options struct {
 	Version string
 	Live    bool
-	Now     time.Time
+	// Snapshot is true when the input is a snapshot of a host; Captured is
+	// the time when the snapshot was taken.
+	Snapshot bool
+	Captured string
+	Now      time.Time
 	// Inputs names the files that were read, for the header of the report.
 	Inputs []string
 	// Public lists ports that are open to any source on purpose. They are
@@ -32,6 +36,9 @@ type builder struct {
 	result   *models.AnalysisResult
 	opts     Options
 	findings []Finding
+	// managers holds the program that writes the filter table of each
+	// address family, when its chains show one.
+	managers map[models.IPVersion]string
 }
 
 // Build makes the report of an analysis.
@@ -45,8 +52,11 @@ func Build(result *models.AnalysisResult, opts Options) *Report {
 		Inputs:        opts.Inputs,
 		ServicesKnown: result.ServiceAssessment == models.AssessmentComplete,
 	}
-	if opts.Live {
+	switch {
+	case opts.Live:
 		rep.Mode = "live"
+	case opts.Snapshot:
+		rep.Mode, rep.Captured = "snapshot", opts.Captured
 	}
 	if result.Host != nil {
 		rep.Host = result.Host.Hostname
@@ -143,6 +153,9 @@ func (b *builder) families() []Family {
 		if rs := b.ruleset(version); rs != nil {
 			family.Tables = len(rs.Tables)
 			owners := map[string]bool{}
+			if manager := b.manager(version); manager != "" {
+				owners[manager] = true
+			}
 			for _, table := range rs.Tables {
 				for name, chain := range table.Chains {
 					family.Chains++
@@ -168,38 +181,6 @@ func (b *builder) families() []Family {
 		families = append(families, family)
 	}
 	return families
-}
-
-// chainOwner names the program that manages a chain, where the name of the
-// chain tells. Rules in such a chain are changed with that program: a
-// direct change is lost when it writes its rules again.
-func chainOwner(chain string) string {
-	switch {
-	case strings.HasPrefix(chain, "ufw-") || strings.HasPrefix(chain, "ufw6-"):
-		return "ufw"
-	case strings.HasPrefix(chain, "DOCKER"):
-		return "docker"
-	case strings.HasPrefix(chain, "f2b-") || strings.HasPrefix(chain, "fail2ban-"):
-		return "fail2ban"
-	case strings.HasPrefix(chain, "LIBVIRT_"):
-		return "libvirt"
-	case strings.HasPrefix(chain, "KUBE-"):
-		return "kubernetes"
-	case strings.HasPrefix(chain, "cali-"):
-		return "calico"
-	case strings.HasPrefix(chain, "CNI-"):
-		return "cni"
-	case strings.HasPrefix(chain, "ts-"):
-		return "tailscale"
-	case strings.HasPrefix(chain, "IN_") || strings.HasPrefix(chain, "FWDI_") || strings.HasPrefix(chain, "FWDO_") ||
-		strings.HasSuffix(chain, "_direct") || strings.HasSuffix(chain, "_ZONES"):
-		return "firewalld"
-	case chain == "sshguard":
-		return "sshguard"
-	case strings.HasPrefix(chain, "CROWDSEC"):
-		return "crowdsec"
-	}
-	return ""
 }
 
 // ipv6InUse reports whether the host is known to have an IPv6 address
@@ -298,11 +279,14 @@ func (b *builder) effectiveness() {
 				b.limitForDefaultAccept(&finding, issue)
 			case "FORWARD":
 				finding.Points, finding.key = 5, "policy/FORWARD"
-				if issue.Severity >= models.SeverityHigh {
+				switch {
+				case issue.Severity >= models.SeverityHigh:
 					finding.Points = 10
+				case issue.Severity == models.SeverityInfo:
+					finding.Points = 0 // the host does not route packets
 				}
 			}
-			finding.Fix = policyFix(issue)
+			finding.Fix = b.policyFix(issue)
 		case models.FindingBroadAccept:
 			finding.Category, finding.Points = "exposure", 10
 			finding.Fix = &Fix{Summary: "Replace the wide range with rules for the ports that services use, and add -s where the clients are known."}
@@ -364,9 +348,12 @@ func (b *builder) limitForDefaultAccept(finding *Finding, issue *models.Effectiv
 // exposedServices reports listeners that any source can reach. A service
 // that listens on both address families is one finding.
 func (b *builder) exposedServices() {
+	// A finding is about the port that other hosts connect to. That is the
+	// port of the listener, or a port that nat/PREROUTING sends to it.
 	type key struct {
 		protocol models.Protocol
 		port     int
+		last     int
 		process  string
 	}
 	groups := map[key][]*models.ExposedServiceFinding{}
@@ -376,7 +363,10 @@ func (b *builder) exposedServices() {
 		if exposed.Scope != models.ScopeExposed {
 			continue // the service table shows restricted scopes
 		}
-		k := key{exposed.Service.Protocol, exposed.Service.Port, exposed.Service.Process}
+		k := key{exposed.Service.Protocol, exposed.Service.Port, exposed.Service.Port, exposed.Service.Process}
+		if exposed.ViaPort != 0 {
+			k.port, k.last = exposed.ViaPort, max(exposed.ViaPort, exposed.ViaPortEnd)
+		}
 		if groups[k] == nil {
 			order = append(order, k)
 		}
@@ -391,11 +381,11 @@ func (b *builder) exposedServices() {
 		var families []int
 		var details []string
 		var refs []RuleRef
-		var sshRule *models.Rule
-		viaDefault := !b.declaredPublic(k.protocol, k.port, k.port)
+		redirected := false
+		viaDefault := !b.declaredPublic(k.protocol, k.port, k.last)
 		for _, member := range members {
 			usual := defaults[stackProtocol{member.IPVersion, k.protocol}]
-			viaDefault = viaDefault && usual != nil && sameRule(usual.Rule, member.AllowingRule) && usual.Condition == member.Condition
+			viaDefault = viaDefault && member.NATRule == nil && usual != nil && sameRule(usual.Rule, member.AllowingRule) && usual.Condition == member.Condition
 			if member.Condition != condition {
 				condition = "" // without a condition for one family
 			}
@@ -403,22 +393,25 @@ func (b *builder) exposedServices() {
 				certainty = models.CertaintyDefinite
 			}
 			families = appendUnique(families, int(member.IPVersion))
-			details = append(details, stack(member.IPVersion)+": "+b.acceptedBy(member.AllowingRule, member.Interfaces, member.Certainty)+".")
+			detail := stack(member.IPVersion) + ": "
+			if member.NATRule != nil {
+				redirected = true
+				detail += fmt.Sprintf("%s sends the port to local port %d, where the service listens; ", ruleName(member.NATRule), member.Service.Port)
+				refs = append(refs, b.ref(member.NATRule, "redirects"))
+			}
+			details = append(details, detail+b.acceptedBy(member.AllowingRule, member.Interfaces, member.Certainty)+".")
 			if member.AllowingRule != nil {
 				refs = append(refs, b.ref(member.AllowingRule, "accepts"))
-				if sshRule == nil {
-					sshRule = member.AllowingRule
-				}
 			}
 		}
 		name := k.process
 		if name == "" {
 			name = "A service"
 		}
-		port := portText(k.protocol, k.port, k.port)
+		port := portText(k.protocol, k.port, k.last)
 		finding := Finding{
 			Code:      string(models.FindingExposedService),
-			Severity:  analyzer.ExposureSeverity(k.port, k.port, condition),
+			Severity:  analyzer.ExposureSeverity(k.port, k.last, condition),
 			Certainty: certainty,
 			Category:  "exposure",
 			Families:  families,
@@ -426,8 +419,11 @@ func (b *builder) exposedServices() {
 			Detail:    strings.Join(details, " "),
 			Ports:     []string{port},
 			Rules:     refs,
-			Points:    weigh(exposurePoints(k.port, k.port, condition), certainty),
+			Points:    weigh(exposurePoints(k.port, k.last, condition), certainty),
 			key:       "port/" + port,
+		}
+		if redirected {
+			finding.Detail += " INPUT sees the redirected packets with the new port, so a rule for it decides about both ports."
 		}
 		if condition != "" {
 			finding.Detail += " Limited by: " + condition + "."
@@ -446,14 +442,14 @@ func (b *builder) exposedServices() {
 			continue
 		}
 		switch {
-		case b.declaredPublic(k.protocol, k.port, k.port):
+		case b.declaredPublic(k.protocol, k.port, k.last):
 			finding.Severity, finding.Points = models.SeverityInfo, 0
 			finding.Title = name + " on " + port + " is public, as declared"
 		case strings.HasPrefix(condition, "source port"):
 			finding.Detail += " A rule of this form admits replies (DHCP, DNS): only a sender that uses that source port passes."
 		default:
 			ssh := k.protocol == models.ProtoTCP && (k.process == "sshd" || strings.HasPrefix(k.process, "sshd-") || k.port == 22)
-			finding.Fix = exposureFix(k.protocol, k.port, k.port, members[0].AllowingRule, ssh && condition == "")
+			finding.Fix = b.exposureFix(k.protocol, k.port, k.last, members[0].AllowingRule, ssh && condition == "" && !redirected)
 		}
 		b.add(finding)
 	}
@@ -560,6 +556,7 @@ func (b *builder) openPortFindings() {
 	type key struct {
 		protocol    models.Protocol
 		first, last int
+		address     string
 	}
 	byDefault := b.defaultAccepts()
 	groups := map[key][]*models.OpenPort{}
@@ -569,10 +566,10 @@ func (b *builder) openPortFindings() {
 		if open.Scope != models.ScopeExposed || open.Unnamed || open.Last-open.First+1 >= 1024 {
 			continue // default accept and wide ranges are findings of their own
 		}
-		if usual := byDefault[stackProtocol{open.IPVersion, open.Protocol}]; usual != nil && sameRule(usual.Rule, open.Rule) {
+		if usual := byDefault[stackProtocol{open.IPVersion, open.Protocol}]; usual != nil && sameRule(usual.Rule, open.Rule) && !open.Redirected() {
 			continue // open like every port that no rule names: the default-accept finding says it
 		}
-		k := key{open.Protocol, open.First, open.Last}
+		k := key{open.Protocol, open.First, open.Last, open.Address}
 		if groups[k] == nil {
 			order = append(order, k)
 		}
@@ -594,19 +591,28 @@ func (b *builder) openPortFindings() {
 				certainty = models.CertaintyDefinite
 			}
 			families = appendUnique(families, int(member.IPVersion))
-			details = append(details, stack(member.IPVersion)+": "+b.acceptedBy(member.Rule, member.Interfaces, member.Certainty)+".")
+			detail := stack(member.IPVersion) + ": "
+			if member.Redirected() {
+				detail += redirectText(member) + "; "
+				refs = append(refs, b.ref(member.NATRule, "redirects"))
+			}
+			details = append(details, detail+b.acceptedBy(member.Rule, member.Interfaces, member.Certainty)+".")
 			if member.Rule != nil {
 				refs = append(refs, b.ref(member.Rule, "accepts"))
 			}
 		}
 		port := portText(k.protocol, k.first, k.last)
+		name := port
+		if k.address != "" {
+			name += " of " + k.address
+		}
 		finding := Finding{
 			Code:      "open_port",
 			Severity:  analyzer.ExposureSeverity(k.first, k.last, condition),
 			Certainty: certainty,
 			Category:  "exposure",
 			Families:  families,
-			Title:     port + " is open to any source",
+			Title:     name + " is open to any source",
 			Detail:    strings.Join(details, " "),
 			Ports:     []string{port},
 			Rules:     refs,
@@ -619,11 +625,11 @@ func (b *builder) openPortFindings() {
 		switch {
 		case b.declaredPublic(k.protocol, k.first, k.last):
 			finding.Severity, finding.Points = models.SeverityInfo, 0
-			finding.Title = port + " is public, as declared"
+			finding.Title = name + " is public, as declared"
 		case strings.HasPrefix(condition, "source port"):
 			finding.Detail += " A rule of this form admits replies (DHCP, DNS): only a sender that uses that source port passes."
 		default:
-			finding.Fix = exposureFix(k.protocol, k.first, k.last, members[0].Rule, k.protocol == models.ProtoTCP && k.first == 22 && k.last == 22 && condition == "")
+			finding.Fix = b.exposureFix(k.protocol, k.first, k.last, members[0].Rule, k.protocol == models.ProtoTCP && k.first == 22 && k.last == 22 && condition == "")
 		}
 		found = append(found, finding)
 	}
@@ -633,6 +639,21 @@ func (b *builder) openPortFindings() {
 			"delete the rule when the port is not needed. The rules are listed with the finding.") {
 		b.add(finding)
 	}
+}
+
+// redirectText says where nat/PREROUTING sends the ports of an entry.
+func redirectText(open *models.OpenPort) string {
+	target := "local port " + strconv.Itoa(open.LocalPort)
+	if open.LocalPortEnd > open.LocalPort {
+		target = "local ports " + strconv.Itoa(open.LocalPort) + "-" + strconv.Itoa(open.LocalPortEnd)
+	}
+	if open.LocalPort == open.First && open.LocalPortEnd == open.Last {
+		target = "the same port"
+	}
+	if open.LocalAddr != "" {
+		target += " of " + open.LocalAddr
+	}
+	return ruleName(open.NATRule) + " sends the port to " + target
 }
 
 // joinMany returns the findings as they are while they are few. More than
@@ -697,8 +718,16 @@ func (b *builder) unusedPorts() {
 			Rules: []RuleRef{b.ref(rule, "accepts")},
 			Fix:   &Fix{Summary: "Remove the port from the rule if the service is gone."},
 		}
+		if unused.NATRule != nil {
+			local := strconv.Itoa(unused.LocalPort)
+			finding.Title = port + " is redirected to local port " + local + ", but nothing listens there"
+			finding.Detail = stack(unused.IPVersion) + ": " + ruleName(unused.NATRule) + " sends the port to local port " + local + ", and " +
+				ruleName(rule) + " accepts it from " + audience(unused.Scope) + ". A service that starts on port " + local + " later is reachable at once."
+			finding.Rules = append([]RuleRef{b.ref(unused.NATRule, "redirects")}, finding.Rules...)
+			finding.Fix = &Fix{Summary: "Delete the redirect and the rule that accepts its port if the service is gone."}
+		}
 		// Only a rule that opens exactly these ports can be deleted for them.
-		if ranges := strings.ReplaceAll(rule.DstPort, ":", "-"); ranges == strings.TrimSuffix(port, "/"+string(unused.Protocol)) && chainOwner(rule.Chain) == "" {
+		if ranges := strings.ReplaceAll(rule.DstPort, ":", "-"); ranges == strings.TrimSuffix(port, "/"+string(unused.Protocol)) && b.owner(rule) == "" {
 			finding.Fix = &Fix{
 				Summary: "Delete the rule if the service is gone.",
 				Steps: []FixStep{{"Delete the rule", firewallCommand(unused.IPVersion) + tableOption(rule.Table) + " -D " +
@@ -835,6 +864,21 @@ func (b *builder) translatedPorts() {
 	open := map[openKey]*Finding{}
 	var openOrder []openKey
 	seenPort := map[string]bool{}
+	// example holds, for each group, the port for which the fix is written,
+	// and what the fix must say about the other ports.
+	type openExample struct {
+		source   *models.DockerBypassFinding
+		protocol models.Protocol
+		names    []string
+		group    publishedGroup
+	}
+	examples := map[openKey]*openExample{}
+	// destinations holds, for each group, its ports with their destinations.
+	type portDestinations struct {
+		port  string
+		dests []string
+	}
+	destinations := map[openKey][]*portDestinations{}
 
 	for i := range b.result.DockerBypasses {
 		source := &b.result.DockerBypasses[i]
@@ -879,9 +923,7 @@ func (b *builder) translatedPorts() {
 			group := open[k]
 			if group == nil {
 				group = &Finding{Code: string(source.Code), Severity: severity, Certainty: source.Certainty, Category: "exposure"}
-				if severity > models.SeverityInfo {
-					group.Fix = publishedFix(source, protocol)
-				}
+				examples[k] = &openExample{source: source, protocol: protocol}
 				open[k] = group
 				openOrder = append(openOrder, k)
 			}
@@ -891,11 +933,27 @@ func (b *builder) translatedPorts() {
 				group.Ports = append(group.Ports, port)
 				group.Points += points
 			}
-			entry := stack(source.IPVersion) + " " + port + " to " + source.ContainerDest
-			if len(source.Interfaces) > 0 {
-				entry += " (via " + strings.Join(source.Interfaces, ", ") + ")"
+			// The endpoints of one port (a Kubernetes service) are one entry.
+			name := stack(source.IPVersion) + " " + port
+			if source.HostAddr != "" {
+				name += " of " + source.HostAddr
 			}
-			group.Detail = joinList(group.Detail, entry)
+			example := examples[k]
+			if _, own, _ := strings.Cut(name, " "); !containsString(example.names, own) {
+				example.names = append(example.names, own)
+			}
+			example.group.someAddress = example.group.someAddress || source.HostAddr != ""
+			example.group.someWildcard = example.group.someWildcard || source.HostAddr == ""
+			dest := source.ContainerDest
+			if len(source.Interfaces) > 0 {
+				dest += " (via " + strings.Join(source.Interfaces, ", ") + ")"
+			}
+			entries := destinations[k]
+			if n := len(entries); n > 0 && entries[n-1].port == name {
+				entries[n-1].dests = append(entries[n-1].dests, dest)
+			} else {
+				destinations[k] = append(entries, &portDestinations{port: name, dests: []string{dest}})
+			}
 			if len(group.Rules) < 12 {
 				group.Rules = append(group.Rules, b.ref(&source.NATRule, "translates"))
 			}
@@ -915,7 +973,7 @@ func (b *builder) translatedPorts() {
 				finding.Title = fmt.Sprintf("%s port %s passes the default deny of INPUT", strings.ToUpper(kind[:1])+kind[1:], port)
 			}
 			finding.Rules = append(finding.Rules, b.ref(&source.NATRule, "translates"))
-			finding.Fix = publishedFix(source, protocol)
+			finding.Fix = publishedFix(source, protocol, publishedGroup{})
 			if source.Severity == models.SeverityCritical && source.Certainty == models.CertaintyDefinite {
 				finding.limit("C", "a published port passes an INPUT rule that names it, for every source")
 			}
@@ -963,8 +1021,20 @@ func (b *builder) translatedPorts() {
 			kind, where = "Forwarded", "nat/PREROUTING translates these ports to another host, and filter/FORWARD accepts them from any source; the rules of filter/INPUT do not apply: "
 		}
 		sort.Ints(group.Families)
+		if k.severity > models.SeverityInfo {
+			// The fix is written for the first port and names the others.
+			example := examples[k]
+			example.group.others = example.names[1:]
+			example.group.bothFamilies = len(group.Families) > 1
+			group.Fix = publishedFix(example.source, example.protocol, example.group)
+		}
 		if len(group.Ports) == 1 {
-			group.Title = kind + " port " + group.Ports[0] + " is open to any source"
+			// The entry names the port with its address, when it has one.
+			name := group.Ports[0]
+			if entries := destinations[k]; len(entries) > 0 {
+				_, name, _ = strings.Cut(entries[0].port, " ")
+			}
+			group.Title = kind + " port " + name + " is open to any source"
 		} else {
 			group.Title = fmt.Sprintf("%d %s ports are open to any source", len(group.Ports), strings.ToLower(kind[:1])+kind[1:])
 			if k.docker {
@@ -974,16 +1044,18 @@ func (b *builder) translatedPorts() {
 		if k.severity == models.SeverityInfo {
 			group.Title = strings.Replace(group.Title, "open to any source", "public, as declared", 1)
 		}
-		group.Detail = where + group.Detail + "."
+		var entries []string
+		for _, entry := range destinations[k] {
+			entries = append(entries, entry.port+" to "+abbreviate(entry.dests, 4))
+		}
+		const shown = 12
+		group.Detail = where + strings.Join(entries[:min(len(entries), shown)], "; ")
+		if more := len(entries) - shown; more > 0 {
+			group.Detail += fmt.Sprintf("; and %d more (see the list of translated ports)", more)
+		}
+		group.Detail += "."
 		b.add(*group)
 	}
-}
-
-func joinList(list, item string) string {
-	if list == "" {
-		return item
-	}
-	return list + "; " + item
 }
 
 func bridgeName(bridge string) string {
@@ -1091,8 +1163,11 @@ func (b *builder) notes() []Note {
 	}
 	if b.result.ServiceAssessment != models.AssessmentComplete {
 		hint := "Add the output of \"ss -tulnp\" as another file to tell used ports from unused ones."
-		if b.opts.Live {
+		switch {
+		case b.opts.Live:
 			hint = "The listening sockets could not be read."
+		case b.opts.Snapshot:
+			hint = "The snapshot holds no list of listening sockets."
 		}
 		notes = append(notes, Note{Kind: "scope", Area: "services",
 			Text: "No list of listening sockets was read, so every open port is judged as if a service uses it. " + hint})

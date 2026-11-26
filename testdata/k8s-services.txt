@@ -1,0 +1,7 @@
+Netid State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+udp   UNCONN 0      0            0.0.0.0:8472      0.0.0.0:*
+tcp   LISTEN 0      4096       127.0.0.1:10248     0.0.0.0:*     users:(("kubelet",pid=1201,fd=18))
+tcp   LISTEN 0      4096       127.0.0.1:10249     0.0.0.0:*     users:(("kube-proxy",pid=2110,fd=12))
+tcp   LISTEN 0      128          0.0.0.0:22        0.0.0.0:*     users:(("sshd",pid=812,fd=3))
+tcp   LISTEN 0      4096               *:10250           *:*     users:(("kubelet",pid=1201,fd=22))
+tcp   LISTEN 0      4096               *:10256           *:*     users:(("kube-proxy",pid=2110,fd=11))

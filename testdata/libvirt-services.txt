@@ -1,0 +1,6 @@
+Netid State  Recv-Q Send-Q    Local Address:Port Peer Address:Port Process
+udp   UNCONN 0      0         192.168.122.1:53        0.0.0.0:*     users:(("dnsmasq",pid=1420,fd=5))
+udp   UNCONN 0      0        0.0.0.0%virbr0:67        0.0.0.0:*     users:(("dnsmasq",pid=1420,fd=3))
+tcp   LISTEN 0      32        192.168.122.1:53        0.0.0.0:*     users:(("dnsmasq",pid=1420,fd=6))
+tcp   LISTEN 0      128             0.0.0.0:22        0.0.0.0:*     users:(("sshd",pid=812,fd=3))
+tcp   LISTEN 0      4096          127.0.0.1:16509     0.0.0.0:*     users:(("libvirtd",pid=1380,fd=14))

@@ -119,15 +119,26 @@ func TestHTMLPageForEveryFixture(t *testing.T) {
 		{"docker29.iptables-save", "docker29.ip6tables-save", "services.txt"},
 		{"insecure.iptables-save", "", ""},
 		{"ufw.iptables-save", "", "ufw-services.txt"},
+		{"k8s.iptables-save", "", "k8s-services.txt"},
+		{"router.iptables-save", "", "router-services.txt"},
+		{"libvirt.iptables-save", "", "libvirt-services.txt"},
+		{"firewalld.iptables-save", "", "firewalld-services.txt"},
+		{"fail2ban.iptables-save", "", "fail2ban-services.txt"},
 	} {
 		page := renderHTML(t, fixtureReport(t, c.v4, c.v6, c.ss))
 		if err := checkMarkup(page); err != nil {
 			t.Errorf("%s: %v", c.v4, err)
 		}
 	}
+	// A port that is sent to another local port names the port and the rule.
+	page := renderHTML(t, fixtureReport(t, "router.iptables-save", "", "router-services.txt"))
+	if !strings.Contains(page, "80 → 3128") || !strings.Contains(page, "sent there by <a class=\"mono\" href=\"#r4-") ||
+		!strings.Contains(page, "8443/tcp") {
+		t.Error("the page does not show the redirected port with its rule")
+	}
 	// A report with nothing in it.
 	empty := &report.Report{Tool: report.Tool{Name: "iptables-analyzer", Version: "0", URL: "https://github.com/c0m4r/iptables-analyzer"}}
-	page := renderHTML(t, empty)
+	page = renderHTML(t, empty)
 	if err := checkMarkup(page); err != nil {
 		t.Errorf("empty report: %v", err)
 	}
@@ -346,7 +357,8 @@ func itoa(n int) string {
 // page must keep the markup of the template, whatever the input holds.
 func FuzzHTMLReport(f *testing.F) {
 	ss := fixture(f, "services.txt")
-	for _, name := range []string{"basic.iptables-save", "docker.iptables-save", "docker29.iptables-save", "insecure.iptables-save", "ufw.iptables-save"} {
+	for _, name := range []string{"basic.iptables-save", "docker.iptables-save", "docker29.iptables-save", "insecure.iptables-save", "ufw.iptables-save",
+		"k8s.iptables-save", "router.iptables-save", "libvirt.iptables-save", "firewalld.iptables-save"} {
 		f.Add(fixture(f, name), ss)
 	}
 	f.Add("*filter\n:INPUT ACCEPT [0:0]\n:\"<i>\" - [0:0]\n-A INPUT -i \"\\\"><script>\" -p tcp --dport 22 -m comment --comment \"</style><script>alert(1)</script>\" -j ACCEPT\nCOMMIT\n",
