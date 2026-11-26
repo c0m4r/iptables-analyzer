@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -89,8 +90,25 @@ func defaultCommandDependencies() commandDependencies {
 // a snapshot. The file is not truncated here: an existing file stays whole
 // until the new content is ready. A symbolic link is not followed, so that a
 // file written as root does not land where another user of the host chose.
+//
+// The file holds what only root can read on the host: the rules, the
+// contents of the ipsets and the names of the listening processes. A new
+// file is therefore for its owner alone. An existing file keeps the mode
+// that somebody gave it. Under sudo the new file goes to the user who called
+// sudo, who would otherwise not be able to open the report just written.
 func createReportFile(path string) (io.WriteCloser, error) {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|syscall.O_NOFOLLOW, 0o644)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	created := err == nil
+	if errors.Is(err, os.ErrExist) {
+		file, err = os.OpenFile(path, os.O_WRONLY|syscall.O_NOFOLLOW, 0)
+	}
+	if created {
+		if uid, gid, ok := sudoOwner(os.Geteuid(), os.Getenv); ok {
+			// Without the change of owner the file stays with root: the
+			// report is still written.
+			_ = file.Chown(uid, gid)
+		}
+	}
 	if errors.Is(err, syscall.ELOOP) {
 		return nil, fmt.Errorf("%s is a symbolic link", path)
 	}
@@ -102,6 +120,20 @@ func createReportFile(path string) (io.WriteCloser, error) {
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
 	return file, nil
+}
+
+// sudoOwner returns the user and group that called sudo, for a process that
+// runs as root through it.
+func sudoOwner(euid int, getenv func(string) string) (uid, gid int, ok bool) {
+	if euid != 0 {
+		return 0, 0, false
+	}
+	uid, errUID := strconv.Atoi(getenv("SUDO_UID"))
+	gid, errGID := strconv.Atoi(getenv("SUDO_GID"))
+	if errUID != nil || errGID != nil || uid <= 0 || gid < 0 {
+		return 0, 0, false
+	}
+	return uid, gid, true
 }
 
 // sameFile reports whether two paths name one existing file.
@@ -713,8 +745,13 @@ func (state *loaded) useSnapshot(data string, opts *commandOptions) error {
 	if snapshot.IPv6 != nil && !opts.ipv4Only {
 		state.sources.IPv6 = &loader.Source{Version: models.IPv6, Data: snapshot.IPv6.Data, Warnings: snapshot.IPv6.Warnings}
 	}
-	if snapshot.IPv4 == nil && snapshot.IPv6 == nil {
+	switch {
+	case snapshot.IPv4 == nil && snapshot.IPv6 == nil:
 		return fmt.Errorf("the snapshot holds no rules")
+	case snapshot.IPv6 == nil && opts.ipv6Only:
+		return fmt.Errorf("the snapshot holds no IPv6 rules, and --ipv6-only leaves out the others")
+	case snapshot.IPv4 == nil && opts.ipv4Only:
+		return fmt.Errorf("the snapshot holds no IPv4 rules, and --ipv4-only leaves out the others")
 	}
 	if snapshot.Sockets != nil {
 		state.haveServices, state.fromFile = true, true

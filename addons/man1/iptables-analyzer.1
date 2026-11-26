@@ -117,7 +117,10 @@ input.
 .BR \-\-html " \fIFILE\fR"
 Also write an interactive report to \fIFILE\fR. The file is one HTML page that
 loads nothing from the network. It also holds the rules and the recommended
-baseline. A symbolic link at \fIFILE\fR is not followed.
+baseline. A symbolic link at \fIFILE\fR is not followed. A new file is readable
+only by its owner; with
+.BR sudo (8),
+the owner is the user who started it.
 .TP
 .BR \-\-snapshot " \fIFILE\fR"
 Also save all input to \fIFILE\fR: the output of the tools, the interfaces and
@@ -125,7 +128,7 @@ the kernel settings, as JSON. The tool reads such a file like the host itself,
 so the analysis, \fB\-\-trace\fR and \fB\-\-diff\fR give the results of the
 host on any system and without root. A snapshot is a complete input: it cannot
 be used together with other rule files. A symbolic link at \fIFILE\fR is not
-followed.
+followed, and a new file is readable only by its owner, as for \fB\-\-html\fR.
 .TP
 .BR \-\-json
 Write the report as JSON. See \fBdocs/json.md\fR for the fields.

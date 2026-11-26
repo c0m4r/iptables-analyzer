@@ -66,10 +66,16 @@ func analyzeBlocklist(tb testing.TB, n int, jail bool) *models.AnalysisResult {
 
 // Audit C4: analysis time grew with the square of the number of blocked
 // addresses; 3,000 took 30 seconds. The bound is generous for slow machines
-// and still fails for quadratic behavior.
+// and still fails for quadratic behavior, which would need many minutes.
+// The race detector and the coverage counters make the code about ten times
+// slower, so the bound is wider with them.
 func TestLargeBlocklistsAreAnalyzedQuickly(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing test")
+	}
+	limit := 10 * time.Second
+	if raceDetector || testing.CoverMode() != "" {
+		limit = 90 * time.Second
 	}
 	for _, jail := range []bool{true, false} {
 		start := time.Now()
@@ -83,7 +89,7 @@ func TestLargeBlocklistsAreAnalyzedQuickly(t *testing.T) {
 				t.Errorf("jail=%v: a blocklist must leave the service exposed: %+v", jail, finding)
 			}
 		}
-		if elapsed > 10*time.Second {
+		if elapsed > limit {
 			t.Errorf("jail=%v: 20,000 blocked addresses took %s", jail, elapsed)
 		}
 	}

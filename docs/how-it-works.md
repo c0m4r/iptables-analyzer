@@ -170,7 +170,8 @@ and a rule for a named address does not apply to them.
 
 A `DNAT` to a loopback address reaches the host only when `route_localnet` is set for the
 ingress interface. The kernel drops the packet otherwise. Without that setting in the
-input, the way is `POSSIBLE`.
+input, the way is `POSSIBLE`. IPv6 has no such setting: the kernel always drops a packet
+of a different host that is translated to `::1`.
 
 ### Host facts
 
@@ -209,11 +210,12 @@ answers, and the result must be equal to the trace of the same packet. This need
 the namespaces are in a user namespace.
 
 The scenarios cover the fixtures (ufw, a Docker 29 capture, a Kubernetes node, a router,
-libvirt, firewalld, fail2ban), `REDIRECT` and `DNAT` in all their forms, most of the match
-extensions, and the reverse-path filter with forged source addresses.
+libvirt, firewalld, fail2ban), `REDIRECT` and `DNAT` in all their forms for IPv4 and IPv6,
+most of the match extensions, and the reverse-path filter with forged source addresses.
 
 A second test compares the trace with the analysis of all sources: for some thousand
-packets, a source that the analysis accepts must be accepted by the trace, and the reverse.
+IPv4 and IPv6 packets, a source that the analysis accepts must be accepted by the trace,
+and the reverse.
 Thus the analysis is tied to what the kernel does.
 
 ### Docker bypass detection
@@ -327,4 +329,3 @@ shows an assessment note. A real Docker host with many networks uses approximate
   ordinary interfaces: they can carry traffic of other hosts.
 - Of the ipsets, only sets of addresses and networks are evaluated. A set with ports,
   interfaces or MAC addresses restricts the sources to a set that the tool cannot read.
-- The kernel comparison in the tests uses IPv4 packets.

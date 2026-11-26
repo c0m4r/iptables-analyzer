@@ -598,3 +598,74 @@ func TestVersionAndUsage(t *testing.T) {
 		}
 	}
 }
+
+// A report or a snapshot holds what only root reads on the host. A new file
+// is for its owner alone; a file that exists keeps its mode and its content
+// until the new content is written.
+func TestOutputFilesAreForTheirOwner(t *testing.T) {
+	dir := t.TempDir()
+	fresh := filepath.Join(dir, "report.html")
+	file, err := createReportFile(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+	if info, err := os.Stat(fresh); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("a new file must have mode 0600: %v %v", info.Mode().Perm(), err)
+	}
+
+	existing := filepath.Join(dir, "shared.html")
+	if err := os.WriteFile(existing, []byte("old report"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(existing, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	file, err = createReportFile(existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+	info, err := os.Stat(existing)
+	content, _ := os.ReadFile(existing)
+	if err != nil || info.Mode().Perm() != 0o644 || string(content) != "old report" {
+		t.Errorf("an existing file keeps its mode and its content: %v %q %v", info.Mode().Perm(), content, err)
+	}
+
+	link := filepath.Join(dir, "link.html")
+	if err := os.Symlink(filepath.Join(dir, "target"), link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := createReportFile(link); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Errorf("a symbolic link must be refused, also one that leads nowhere: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "target")); err == nil {
+		t.Error("the target of the link was created")
+	}
+}
+
+func TestSudoOwner(t *testing.T) {
+	env := func(values map[string]string) func(string) string {
+		return func(name string) string { return values[name] }
+	}
+	for _, test := range []struct {
+		euid     int
+		values   map[string]string
+		uid, gid int
+		ok       bool
+	}{
+		{0, map[string]string{"SUDO_UID": "1000", "SUDO_GID": "1000"}, 1000, 1000, true},
+		{0, map[string]string{"SUDO_UID": "1000", "SUDO_GID": "0"}, 1000, 0, true},
+		{0, map[string]string{}, 0, 0, false},                                          // root without sudo
+		{0, map[string]string{"SUDO_UID": "0", "SUDO_GID": "0"}, 0, 0, false},          // root called sudo
+		{0, map[string]string{"SUDO_UID": "x", "SUDO_GID": "1000"}, 0, 0, false},       // not a number
+		{0, map[string]string{"SUDO_UID": "-5", "SUDO_GID": "1000"}, 0, 0, false},      // not an ID
+		{0, map[string]string{"SUDO_UID": "1000"}, 0, 0, false},                        // half of the pair
+		{1000, map[string]string{"SUDO_UID": "1001", "SUDO_GID": "1001"}, 0, 0, false}, // not root: the variables are not from sudo
+	} {
+		uid, gid, ok := sudoOwner(test.euid, env(test.values))
+		if ok != test.ok || (ok && (uid != test.uid || gid != test.gid)) {
+			t.Errorf("sudoOwner(%d, %v) = %d, %d, %v", test.euid, test.values, uid, gid, ok)
+		}
+	}
+}

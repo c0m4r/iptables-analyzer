@@ -356,3 +356,60 @@ func TestKernelReversePathFilter(t *testing.T) {
 		}
 	}
 }
+
+// The same host with IPv6 addresses.
+var (
+	kernelClients6 = []kernelNet{{Iface: "eth0", HostAddr: "2001:db8:1::1/64", Peers: []string{"2001:db8:1::2", "2001:db8:9::9", "fd00:1::3"}}}
+	kernelInner6   = []kernelNet{{Iface: "eth1", HostAddr: "2001:db8:8::1/64", Peers: []string{"2001:db8:8::2", "2001:db8:8::3"}}}
+	kernelSources6 = []string{"2001:db8:1::2", "2001:db8:9::9", "fd00:1::3"}
+)
+
+// ip6tables: the translations and the filter rules of the IPv4 scenario.
+// IPv6 has no route_localnet; what the kernel does with a DNAT to ::1 is
+// what this test is for.
+func TestKernelIPv6RedirectAndDNAT(t *testing.T) {
+	scenario := kernelScenario{
+		IPv6: true,
+		Rules: natRules([]string{
+			"-A PREROUTING -p tcp -m tcp --dport 80 -j REDIRECT --to-ports 8080",
+			"-A PREROUTING -p tcp -m tcp --dport 8443 -j DNAT --to-destination [2001:db8:8::2]:443",
+			"-A PREROUTING -p tcp -m tcp --dport 2222 -j DNAT --to-destination [2001:db8:1::1]:22",
+			"-A PREROUTING -p tcp -m tcp --dport 2323 -j DNAT --to-destination [::1]:22",
+			"-A PREROUTING -s 2001:db8:9::/48 -p tcp -m tcp --dport 9000 -j REDIRECT --to-ports 3128",
+			"-A PREROUTING -p udp -m udp --dport 5353 -j REDIRECT --to-ports 53",
+			"-A PREROUTING -p udp -m udp --dport 5354 -j DNAT --to-destination [::1]:53",
+			"-A PREROUTING -p tcp -m addrtype --dst-type LOCAL -m tcp --dport 30080 -j DNAT --to-destination [2001:db8:8::3]:8080",
+		},
+			"-A INPUT -p tcp -m tcp --dport 8080 -j ACCEPT",
+			"-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate DNAT -j ACCEPT",
+			"-A INPUT -p tcp -m tcp --dport 9000 -j ACCEPT",
+			"-A INPUT -p tcp -m conntrack --ctorigdstport 9000 -j ACCEPT",
+			"-A INPUT -p udp -m udp --dport 53 -j ACCEPT",
+			"-A INPUT -p tcp -m tcp --dport 25 -j REJECT --reject-with tcp-reset",
+			"-A INPUT -s fd00::/8 -p tcp -m tcp --dport 5000 -j ACCEPT",
+			"-A INPUT -d 2001:db8:1::1/128 -p tcp -m tcp --dport 5001 -j ACCEPT",
+			"-A INPUT -p tcp -m addrtype --dst-type LOCAL -m tcp --dport 5002 -j ACCEPT",
+			"-A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+			"-A FORWARD -d 2001:db8:8::2/128 -p tcp -m tcp --dport 443 -j ACCEPT",
+			"-A FORWARD -d 2001:db8:8::3/128 -p tcp -m tcp --dport 8080 -m conntrack --ctorigdstport 30080 -j ACCEPT"),
+		Clients: kernelClients6, Inner: kernelInner6, Forward: true,
+	}
+	scenario.Probes = kernelProbes("tcp", kernelSources6, "2001:db8:1::1", 22, 25, 80, 443, 2222, 2323, 3128, 5000, 5001, 5002, 8080, 8443, 9000, 30080)
+	scenario.Probes = append(scenario.Probes, kernelProbes("udp", kernelSources6, "2001:db8:1::1", 53, 5353)...)
+	// One datagram each, without a wait for an answer: does a socket of the
+	// host receive it? This tells a packet that the kernel drops from one
+	// whose answer is lost. Port 5353 arrives; port 5354, sent to ::1, does not.
+	scenario.Probes = append(scenario.Probes, kernelProbes("udp1", kernelSources6[:1], "2001:db8:1::1", 5353, 5354)...)
+	scenario.Probes = append(scenario.Probes, kernelProbes("tcp", kernelSources6, "2001:db8:8::2", 80, 443, 8080)...)
+	scenario.Probes = append(scenario.Probes, kernelProbes("tcp", kernelSources6, "2001:db8:8::3", 443, 8080)...)
+	if certain := kernelCompare(t, scenario); certain != len(scenario.Probes) {
+		t.Errorf("%d of %d probes had a certain trace", certain, len(scenario.Probes))
+	}
+
+	// A host that does not route packets drops what it would have to send on.
+	scenario.Forward = false
+	scenario.Probes = append(kernelProbes("tcp", kernelSources6, "2001:db8:1::1", 8443, 80, 30080), kernelProbes("tcp", kernelSources6, "2001:db8:8::2", 443)...)
+	if certain := kernelCompare(t, scenario); certain != len(scenario.Probes) {
+		t.Errorf("no forwarding: %d of %d probes had a certain trace", certain, len(scenario.Probes))
+	}
+}

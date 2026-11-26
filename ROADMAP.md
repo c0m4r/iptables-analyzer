@@ -35,20 +35,16 @@ Phase 3 differs from the plan below in these points:
 
 Open points of Phase 3:
 
-- IPv6 is not compared with the kernel: the harness in `internal/analyzer/kernel_linux_test.go`
-  uses IPv4 only, and so does `consistency_test.go`. First point to check: a `DNAT` to `::1`.
-  The code takes it as never delivered (`translate` in `ingress.go`, `translate` in `trace.go`),
-  because IPv6 has no `route_localnet`. The kernel has no check of that kind after the
-  translation for IPv6, so the packet is probably delivered. If so, this is an exposure that
-  the tool does not report.
-- `-m rpfilter` (firewalld writes `-m rpfilter --invert -j DROP` in the raw table for IPv6) is not
-  modeled with the routes. Check what the analysis and the trace make of it.
-- `-6` with a snapshot that holds no IPv6 rules gives the general message "no rules".
-- The step of the CI workflow for the kernel comparison is not written. Ubuntu 24.04 needs
+- `-m rpfilter` (firewalld writes `-m rpfilter --invert -j DROP` in the raw table for IPv6) is a
+  match that the packet alone does not decide. The analysis reports the sources that pass it,
+  and a trace through such a rule is not certain. With the routes of the host the match can be
+  decided; the IPv6 routes are not read yet.
+- The CI workflow has no step for the kernel comparison. Ubuntu 24.04 needs
   `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` in front of `make test-kernel`.
-  The new fuzz targets are in the smoke test of the workflow; the workflow was not run.
-- Not run after the last changes: the race detector, `make test-sandbox`, the cross-builds,
-  `make check-deps`, and a long fuzz run.
+  Try the step on a branch first: a kernel module that the runner lacks would fail it.
+
+Checked after Phase 3 (2026-11-26): IPv6 is compared with the kernel too. A `DNAT` to `::1`
+is not delivered, as the code assumed.
 
 Phase 1 differs from the plan below in these points:
 

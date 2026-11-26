@@ -80,7 +80,10 @@ func (p kernelProbe) String() string {
 
 // kernelScenario is a ruleset with the networks around the host.
 type kernelScenario struct {
-	Rules   string
+	Rules string
+	// IPv6 says that the rules are for ip6tables and that the addresses of
+	// the networks are IPv6 addresses.
+	IPv6    bool
 	Clients []kernelNet
 	Inner   []kernelNet
 	// Forward turns on the routing of packets between the interfaces, and
@@ -115,18 +118,20 @@ type kernelReply struct {
 const kernelTimeout = 700 * time.Millisecond
 
 // kernelReceived holds the datagrams that the sockets of the host under
-// test received, as "source port".
+// test received, as "source port". The port is the one that the client sent
+// to, which the datagram names: a rule can have sent it to a different one.
 var kernelReceived sync.Map
 
 // listen answers every connection and datagram on the ports with
 // "name:port". name is the address for a listener on one address, and
 // "host" for the listeners of the host under test.
 func kernelListen(name, addr string, ports []int, tcp bool) error {
+	family := kernelFamily(addr)
 	for _, port := range ports {
 		banner := []byte(name + ":" + strconv.Itoa(port))
 		endpoint := net.JoinHostPort(addr, strconv.Itoa(port))
 		if tcp {
-			listener, err := net.Listen("tcp4", endpoint)
+			listener, err := net.Listen("tcp"+family, endpoint)
 			if err != nil {
 				return err
 			}
@@ -144,22 +149,22 @@ func kernelListen(name, addr string, ports []int, tcp bool) error {
 		// A datagram socket on the wildcard address answers from the address
 		// of the egress interface, which is not always the one that the client
 		// sent to. The sockets for datagrams are bound to one address each.
-		if addr == "0.0.0.0" {
+		if addr == "0.0.0.0" || addr == "::" {
 			continue
 		}
-		socket, err := net.ListenPacket("udp4", endpoint)
+		socket, err := net.ListenPacket("udp"+family, endpoint)
 		if err != nil {
 			return err
 		}
 		go func() {
 			buffer := make([]byte, 64)
 			for {
-				_, from, err := socket.ReadFrom(buffer)
+				n, from, err := socket.ReadFrom(buffer)
 				if err != nil {
 					return
 				}
 				if sender, ok := from.(*net.UDPAddr); ok {
-					kernelReceived.Store(sender.IP.String()+" "+strconv.Itoa(port), true)
+					kernelReceived.Store(sender.IP.String()+" "+strings.TrimPrefix(string(buffer[:n]), "probe "), true)
 				}
 				socket.WriteTo(banner, from)
 			}
@@ -168,9 +173,19 @@ func kernelListen(name, addr string, ports []int, tcp bool) error {
 	return nil
 }
 
+// kernelFamily returns the suffix of the Go network names for an address:
+// "4" or "6".
+func kernelFamily(addr string) string {
+	if strings.Contains(addr, ":") {
+		return "6"
+	}
+	return "4"
+}
+
 // kernelConnect sends one probe and says what came back: "open name:port",
 // "rejected" or "timeout".
 func kernelConnect(probe kernelProbe) string {
+	family := kernelFamily(probe.Source)
 	local := net.JoinHostPort(probe.Source, "0")
 	remote := net.JoinHostPort(probe.Destination, strconv.Itoa(probe.Port))
 	var dialer net.Dialer
@@ -178,11 +193,11 @@ func kernelConnect(probe kernelProbe) string {
 	network := probe.Protocol
 	if network == "udp" || network == "udp1" {
 		network = "udp"
-		dialer.LocalAddr, _ = net.ResolveUDPAddr("udp4", local)
+		dialer.LocalAddr, _ = net.ResolveUDPAddr("udp"+family, local)
 	} else {
-		dialer.LocalAddr, _ = net.ResolveTCPAddr("tcp4", local)
+		dialer.LocalAddr, _ = net.ResolveTCPAddr("tcp"+family, local)
 	}
-	conn, err := dialer.Dial(network+"4", remote)
+	conn, err := dialer.Dial(network+family, remote)
 	if err != nil {
 		var timeout net.Error
 		if errors.As(err, &timeout) && timeout.Timeout() {
@@ -192,7 +207,7 @@ func kernelConnect(probe kernelProbe) string {
 	}
 	defer conn.Close()
 	if network == "udp" {
-		if _, err := conn.Write([]byte("probe")); err != nil {
+		if _, err := conn.Write([]byte("probe " + strconv.Itoa(probe.Port))); err != nil {
 			return "rejected"
 		}
 	}
@@ -370,6 +385,31 @@ func kernelScenarioRun(scenario kernelScenario) ([]string, error) {
 	sysctl("conf/all/route_localnet", onOff[scenario.RouteLocalnet])
 	sysctl("conf/default/route_localnet", "0")
 	sysctl("ip_forward", onOff[scenario.Forward])
+	// The kernel limits how many ICMP errors it sends. Many probes meet a
+	// REJECT rule at the same time here, and a refusal that the limit holds
+	// back would look like a dropped packet.
+	sysctl("icmp_ratelimit", "0")
+	sysctl("icmp_msgs_per_sec", "100000")
+	sysctl("icmp_msgs_burst", "10000")
+	os.WriteFile("/proc/sys/net/ipv6/icmp/ratelimit", []byte("0"), 0o644)
+	// What differs for IPv6: the tool that loads the rules, the length of a
+	// single address, and the addresses of the host itself.
+	restore, single, loopback, wildcard := "iptables-restore", "32", "127.0.0.1", "0.0.0.0"
+	var nodad, route6 []string
+	sysctl6 := func(path, value string) {
+		os.WriteFile("/proc/sys/net/ipv6/"+path, []byte(value), 0o644)
+	}
+	if scenario.IPv6 {
+		restore, single, loopback, wildcard = "ip6tables-restore", "128", "::1", "::"
+		// An address is used at once, without the wait for duplicate address
+		// detection.
+		nodad, route6 = []string{"nodad"}, []string{"-6"}
+		for _, scope := range []string{"all", "default"} {
+			sysctl6("conf/"+scope+"/disable_ipv6", "0")
+			sysctl6("conf/"+scope+"/accept_dad", "0")
+			sysctl6("conf/"+scope+"/forwarding", onOff[scenario.Forward])
+		}
+	}
 
 	var peers []*kernelLink
 	defer func() {
@@ -386,11 +426,14 @@ func kernelScenarioRun(scenario kernelScenario) ([]string, error) {
 		}
 		peers = append(peers, peer)
 		far := fmt.Sprintf("p%d", index)
+		// The far end has a known hardware address: for IPv6 the neighbors
+		// are entered ahead (see below).
+		farMAC := fmt.Sprintf("02:00:00:00:%02x:02", index)
 		host, bits, _ := strings.Cut(network.HostAddr, "/")
 		steps := [][]string{
-			{"ip", "link", "add", network.Iface, "type", "veth", "peer", "name", far},
+			{"ip", "link", "add", network.Iface, "type", "veth", "peer", "name", far, "address", farMAC},
 			{"ip", "link", "set", far, "netns", strconv.Itoa(peer.command.Process.Pid)},
-			{"ip", "addr", "add", network.HostAddr, "dev", network.Iface},
+			append([]string{"ip", "addr", "add", network.HostAddr, "dev", network.Iface}, nodad...),
 			{"ip", "link", "set", network.Iface, "up"},
 		}
 		for _, step := range steps {
@@ -399,16 +442,29 @@ func kernelScenarioRun(scenario kernelScenario) ([]string, error) {
 			}
 		}
 		sysctl("conf/"+network.Iface+"/rp_filter", reversePath)
+		if scenario.IPv6 {
+			sysctl6("conf/"+network.Iface+"/forwarding", onOff[scenario.Forward])
+		}
 		inside := [][]string{{"ip", "link", "set", "lo", "up"}, {"ip", "link", "set", far, "up"}}
 		_, subnet, _ := net.ParseCIDR(network.HostAddr)
 		for _, addr := range append(append(append([]string{}, network.Peers...), network.Hosts...), network.Forged...) {
-			length := "32"
+			length := single
 			if subnet.Contains(net.ParseIP(addr)) {
 				length = bits
 			}
-			inside = append(inside, []string{"ip", "addr", "add", addr + "/" + length, "dev", far})
+			inside = append(inside, append([]string{"ip", "addr", "add", addr + "/" + length, "dev", far}, nodad...))
+			// IPv6 finds its neighbors with ICMPv6 packets, which pass the
+			// rules under test. Rules that drop them stop all traffic; the
+			// tool reports that as a finding of its own. Here the neighbors
+			// are entered ahead, so that the probes show what the rules do
+			// with the connections themselves.
+			if scenario.IPv6 {
+				if err := run("ip", "neigh", "replace", addr, "lladdr", farMAC, "dev", network.Iface, "nud", "permanent"); err != nil {
+					return nil, err
+				}
+			}
 		}
-		inside = append(inside, []string{"ip", "route", "add", "default", "via", host, "dev", far})
+		inside = append(inside, append(append([]string{"ip"}, route6...), "route", "add", "default", "via", host, "dev", far))
 		// The address of the host is resolved ahead. The reverse-path filter
 		// also refuses the ARP requests of a forged source, and a request that
 		// stays without an answer would hold back the other probes.
@@ -428,7 +484,7 @@ func kernelScenarioRun(scenario kernelScenario) ([]string, error) {
 				sourceOf[addr] = peer
 			}
 			if !subnet.Contains(net.ParseIP(addr)) {
-				if err := run("ip", "route", "add", addr+"/32", "via", network.Peers[0], "dev", network.Iface); err != nil {
+				if err := run("ip", "route", "add", addr+"/"+single, "via", network.Peers[0], "dev", network.Iface); err != nil {
 					return nil, err
 				}
 			}
@@ -458,13 +514,13 @@ func kernelScenarioRun(scenario kernelScenario) ([]string, error) {
 			return nil, err
 		}
 	}
-	if err := kernelRun([]string{"iptables-restore"}, scenario.Rules); err != nil {
+	if err := kernelRun([]string{restore}, scenario.Rules); err != nil {
 		return nil, err
 	}
-	if err := kernelListen("host", "0.0.0.0", scenario.HostPorts, true); err != nil {
+	if err := kernelListen("host", wildcard, scenario.HostPorts, true); err != nil {
 		return nil, err
 	}
-	own := []string{"127.0.0.1"}
+	own := []string{loopback}
 	for _, network := range append(append([]kernelNet{}, scenario.Clients...), scenario.Inner...) {
 		addr, _, _ := strings.Cut(network.HostAddr, "/")
 		own = append(own, addr)
@@ -513,8 +569,15 @@ func kernelScenarioRun(scenario kernelScenario) ([]string, error) {
 }
 
 // kernelSkip says why the kernel tests cannot run here, or "".
-func kernelSkip() string {
-	for _, tool := range []string{"ip", "iptables-restore"} {
+func kernelSkip(ipv6 bool) string {
+	tools := []string{"ip", "iptables-restore"}
+	if ipv6 {
+		tools = []string{"ip", "ip6tables-restore"}
+		if _, err := os.Stat("/proc/sys/net/ipv6/conf/all/forwarding"); err != nil {
+			return "this kernel runs without IPv6"
+		}
+	}
+	for _, tool := range tools {
 		if _, err := exec.LookPath(tool); err != nil {
 			found := false
 			for _, dir := range []string{"/usr/sbin", "/sbin"} {
@@ -548,7 +611,7 @@ func kernelObserve(t *testing.T, scenario kernelScenario) []string {
 	}
 	reply, err := host.ask(kernelRequest{Name: string(encoded)})
 	if err != nil {
-		if strings.Contains(err.Error(), "iptables-restore") {
+		if strings.Contains(err.Error(), "tables-restore") {
 			t.Fatalf("the rules do not load: %v", err)
 		}
 		t.Skipf("the namespaces cannot be set up: %v", err)
@@ -564,16 +627,21 @@ func kernelCompare(t *testing.T, scenario kernelScenario) int {
 	if testing.Short() {
 		t.Skip("runs external tools in network namespaces")
 	}
-	if reason := kernelSkip(); reason != "" {
+	if reason := kernelSkip(scenario.IPv6); reason != "" {
 		t.Skip(reason)
 	}
-	rs := mustParse(t, scenario.Rules, models.IPv4)
+	version, loopback := models.IPv4, "127.0.0.1/8"
+	if scenario.IPv6 {
+		version, loopback = models.IPv6, "::1/128"
+	}
+	rs := mustParse(t, scenario.Rules, version)
 	onOff := map[bool]string{false: "0", true: "1"}
 	host := &models.HostContext{
-		Interfaces: []models.HostInterface{{Name: "lo", Addrs: []string{"127.0.0.1/8"}, Up: true}},
+		Interfaces: []models.HostInterface{{Name: "lo", Addrs: []string{loopback}, Up: true}},
 		Sysctls: map[string]string{
 			"net.ipv4.ip_forward":              onOff[scenario.Forward],
 			"net.ipv4.conf.all.route_localnet": onOff[scenario.RouteLocalnet],
+			"net.ipv6.conf.all.forwarding":     onOff[scenario.Forward],
 		},
 	}
 	ifaceOf := map[string]string{}
@@ -589,7 +657,7 @@ func kernelCompare(t *testing.T, scenario kernelScenario) int {
 		}
 	}
 	// The routes that the scenario sets up, and the reverse-path filter.
-	host.RoutesKnown = true
+	host.RoutesKnown = !scenario.IPv6
 	reversePath := scenario.RPFilter
 	if reversePath == "" {
 		reversePath = "0"
@@ -597,6 +665,9 @@ func kernelCompare(t *testing.T, scenario kernelScenario) int {
 	host.Sysctls["net.ipv4.conf.all.rp_filter"] = reversePath
 	for _, network := range append(append([]kernelNet{}, scenario.Clients...), scenario.Inner...) {
 		host.Sysctls["net.ipv4.conf."+network.Iface+".rp_filter"] = reversePath
+		if scenario.IPv6 {
+			continue // the routes are read for IPv4 only
+		}
 		_, subnet, _ := net.ParseCIDR(network.HostAddr)
 		host.Routes = append(host.Routes, models.Route{Destination: subnet.String(), Devices: []string{network.Iface}})
 		for _, addr := range network.Peers {
@@ -653,8 +724,13 @@ func kernelCompare(t *testing.T, scenario kernelScenario) int {
 		return []string{"timeout", "rejected"}
 	}
 	certain := 0
+	seen := map[string]int{}
 	for i, probe := range scenario.Probes {
 		trace := traces[i]
+		// With -v the test shows what the kernel did, probe by probe.
+		kind, _, _ := strings.Cut(observed[i], " ")
+		seen[kind]++
+		t.Logf("%-58s kernel: %-24s trace: %s %s", probe.String(), observed[i], trace.Verdict, trace.Delivery)
 		if !trace.Certain {
 			continue
 		}
@@ -676,6 +752,11 @@ func kernelCompare(t *testing.T, scenario kernelScenario) int {
 			t.Errorf("%s (in %s)\n    trace:  %s by %s -> %s\n    kernel: %s", probe, ifaceOf[probe.Source],
 				trace.Verdict, trace.DecidedBy, strings.Join(want, " or "), observed[i])
 		}
+	}
+	if seen["open"]+seen["delivered"] == 0 && len(scenario.Probes) > 12 {
+		// No connection at all came through: the networks of the test do not
+		// work, and a comparison of refusals alone would prove nothing.
+		t.Errorf("no probe reached a listener: %v", seen)
 	}
 	return certain
 }

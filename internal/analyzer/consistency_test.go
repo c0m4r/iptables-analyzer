@@ -41,10 +41,52 @@ func consistencyRulesets(t *testing.T) map[string]string {
 	return rulesets
 }
 
+// consistencySources6 and consistencyRulesets6 are the same for IPv6.
+var consistencySources6 = []string{
+	"2001:db8:1::2", "2001:db8:9::9", "2001:db8:8::7", "2a00:1450::5", "2606:4700::1111",
+	"fd00:1::3", "fd00:dead:beef::9", "fe80::1", "2001:db8:1:2::5",
+}
+
+func consistencyRulesets6(t *testing.T) map[string]string {
+	return map[string]string{
+		"docker29 ipv6": readFixture(t, "docker29.ip6tables-save"),
+		"redirects ipv6": natRules([]string{
+			"-A PREROUTING -p tcp -m tcp --dport 80 -j REDIRECT --to-ports 8080",
+			"-A PREROUTING -p tcp -m tcp --dport 8443 -j DNAT --to-destination [2001:db8:8::2]:443",
+			"-A PREROUTING -p tcp -m tcp --dport 2323 -j DNAT --to-destination [::1]:22",
+			"-A PREROUTING -s 2001:db8:9::/48 -p tcp -m tcp --dport 9000 -j REDIRECT --to-ports 3128",
+			"-A PREROUTING -i eth1 -p udp -j REDIRECT --to-ports 53",
+		},
+			"-A INPUT -p ipv6-icmp -j ACCEPT",
+			"-A INPUT -p tcp -m tcp --dport 8080 -j ACCEPT",
+			"-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate DNAT -j ACCEPT",
+			"-A INPUT -p tcp -m tcp --dport 9000 -j ACCEPT",
+			"-A INPUT -p tcp -m conntrack --ctorigdstport 9000 -j ACCEPT",
+			"-A INPUT -p udp -m udp --dport 53 -j ACCEPT",
+			"-A INPUT -s fd00::/8 -p tcp -m tcp --dport 5000 -j ACCEPT",
+			"-A INPUT ! -s 2001:db8::/32 -p tcp -m tcp --dport 5001 -j ACCEPT",
+			"-A INPUT -p tcp -m multiport --dports 6000:6010,6020 -m iprange --src-range 2001:db8:1::1-2001:db8:1::ff -j ACCEPT",
+			"-A FORWARD -d 2001:db8:8::2/128 -p tcp -m tcp --dport 443 -j ACCEPT"),
+	}
+}
+
 func TestTraceAgreesWithTheEvaluation(t *testing.T) {
+	compared := consistencyCompare(t, models.IPv4, consistencyRulesets(t), consistencySources, "0.0.0.0")
+	if compared < 2000 {
+		t.Errorf("only %d packets were compared", compared)
+	}
+	compared6 := consistencyCompare(t, models.IPv6, consistencyRulesets6(t), consistencySources6, "::")
+	if compared6 < 200 {
+		t.Errorf("only %d IPv6 packets were compared", compared6)
+	}
+	t.Logf("%d IPv4 and %d IPv6 packets compared", compared, compared6)
+}
+
+func consistencyCompare(t *testing.T, version models.IPVersion, rulesets map[string]string, consistencySources []string, wildcard string) int {
+	t.Helper()
 	compared := 0
-	for name, rules := range consistencyRulesets(t) {
-		rs := mustParse(t, rules, models.IPv4)
+	for name, rules := range rulesets {
+		rs := mustParse(t, rules, version)
 		e := newInputEvaluator(rs, nil)
 		for _, protocol := range []models.Protocol{models.ProtoTCP, models.ProtoUDP} {
 			for _, class := range e.classes(protocol) {
@@ -56,7 +98,7 @@ func TestTraceAgreesWithTheEvaluation(t *testing.T) {
 					if iface == otherInterface {
 						iface = "zz9" // an interface that no rule names
 					}
-					query := e.newConnection(protocol, class.first, "0.0.0.0")
+					query := e.newConnection(protocol, class.first, wildcard)
 					query.InIface = candidate.name
 					type outcome struct {
 						accepted, possible bool
@@ -106,10 +148,7 @@ func TestTraceAgreesWithTheEvaluation(t *testing.T) {
 			}
 		}
 	}
-	if compared < 2000 {
-		t.Errorf("only %d packets were compared", compared)
-	}
-	t.Logf("%d packets compared", compared)
+	return compared
 }
 
 // kernelFilterRulesText is the ruleset of the kernel comparison, which uses

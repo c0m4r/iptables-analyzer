@@ -184,6 +184,10 @@ The file:
 - A symbolic link at `FILE` is not followed. A report that root writes must not go into
   a file that a different user of the host chose, for example in `/tmp`.
 - `FILE` cannot be one of the input files, and it must be a regular file.
+- A new file has the mode `0600`. The rules, the ipsets and the names of the processes of
+  other users are data that only root can read on the host, and the file must not show them
+  to all local users. When the tool runs through `sudo`, it gives the new file to the user
+  who started `sudo`. An existing file keeps its mode and its owner.
 - The tool makes the page in memory first. When a run fails, an older report stays as it was.
 
 The report shows the rules of the host and the listening processes. Keep it, and the
@@ -193,7 +197,7 @@ JSON report, where only the right persons can read them.
 
 `--snapshot FILE` writes the input of the analysis to a file. The rules for the file are
 those of the HTML report: opened before the sandbox, no symbolic link, not an input file,
-a regular file, written only when the run succeeds.
+a regular file, mode `0600` for a new file, written only when the run succeeds.
 
 A snapshot that the tool reads is input like a rule file, and gets no more trust:
 

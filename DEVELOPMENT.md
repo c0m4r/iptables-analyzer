@@ -268,6 +268,9 @@ To add a scenario, write a `kernelScenario` in `kernel_scenarios_linux_test.go`:
 the rules, the networks with their peers, and the probes. Take the fixture of a program
 (`testdata/*.iptables-save`) when you can, so that the fixture itself is tested.
 A probe from a forged source address is possible (`Forged`), for the reverse-path filter.
+Set `IPv6: true` for rules of ip6tables with IPv6 addresses. The harness then enters the
+neighbors ahead, so that rules which drop neighbor discovery do not stop the probes.
+Run a scenario with `-v` to see what the kernel did with each probe.
 
 `consistency_test.go` ties the analysis of all sources to the trace: for some thousand
 packets over the fixtures, the analysis and the trace must agree on what is accepted.

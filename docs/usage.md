@@ -133,7 +133,8 @@ shows the host name and that time.
   `-4`, `-6` and `--ipset-file` work with it.
 - `--snapshot` also works with files. The snapshot then holds what the files hold.
 - The file is JSON. It holds the rules, the host name, the addresses of the interfaces and
-  the names of the listening processes. Keep it where only the right persons can read it.
+  the names of the listening processes. A new file is readable only by its owner (mode `0600`).
+  With `sudo`, the owner is the user who started `sudo`.
 - The tool does not follow a symbolic link at `FILE`, and it does not overwrite an input file.
 
 ### One address family
@@ -185,7 +186,8 @@ and also the rules of each chain and the recommended baseline. In the page you c
 The page loads nothing from the network and works without JavaScript, except for the functions above.
 For its protections, see [security.md](security.md#6-the-html-report).
 
-The report shows the rules of the host. Keep the file where only the right persons can read it.
+The report shows the rules of the host. A new file is readable only by its owner (mode `0600`).
+With `sudo`, the owner is the user who started `sudo`. An existing file keeps its mode and its owner.
 The tool does not follow a symbolic link at `FILE`, and it does not overwrite an input file.
 When a run fails, an older report in `FILE` stays as it was.
 

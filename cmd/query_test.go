@@ -226,6 +226,17 @@ func TestSnapshotOfFiles(t *testing.T) {
 	}
 }
 
+// A snapshot of one address family says so when the other one is asked for.
+func TestSnapshotWithoutTheFamilyThatIsAskedFor(t *testing.T) {
+	snapshot := data("router.snapshot.json") // IPv4 rules only
+	if _, err := run(t, testDependencies(false), snapshot, "-6"); err == nil || !strings.Contains(err.Error(), "the snapshot holds no IPv6 rules") {
+		t.Errorf("-6 on a snapshot of IPv4 rules: %v", err)
+	}
+	if rep := runReport(t, testDependencies(false), snapshot, "-4"); family(rep, 4).Status != string(models.FamilyAnalyzed) {
+		t.Errorf("-4 on the same snapshot: %+v", rep.Families)
+	}
+}
+
 // --ipset-file names the contents of the sets of saved rules.
 func TestIPSetFileOption(t *testing.T) {
 	rules := writeTemp(t, "rules.v4", rulesWithSet)
