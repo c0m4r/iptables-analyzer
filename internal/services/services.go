@@ -98,8 +98,11 @@ func socketProcesses(line string) (names []string, pids []int) {
 	}
 	for _, match := range processRe.FindAllStringSubmatch(line[start:], -1) {
 		pid, _ := strconv.Atoi(match[2])
-		if !slices.Contains(names, match[1]) {
-			names = append(names, match[1])
+		// The row was escaped with its tabs kept, because tabs can separate
+		// columns. A tab inside a name is shown like other control characters.
+		name := strings.ReplaceAll(match[1], "\t", "^I")
+		if !slices.Contains(names, name) {
+			names = append(names, name)
 			pids = append(pids, pid)
 		}
 	}

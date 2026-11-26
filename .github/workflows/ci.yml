@@ -78,6 +78,7 @@ jobs:
           go test -run '^$' -fuzz '^FuzzParse$' -fuzztime 20s ./internal/parser
           go test -run '^$' -fuzz '^FuzzParseSSData$' -fuzztime 20s ./internal/services
           go test -run '^$' -fuzz '^FuzzAnalysis$' -fuzztime 40s ./cmd
+          go test -run '^$' -fuzz '^FuzzHTMLReport$' -fuzztime 30s ./internal/ui
           go test -run '^$' -fuzz '^FuzzShellQuote$' -fuzztime 10s ./internal/textsafe
           go test -run '^$' -fuzz '^FuzzEscape$' -fuzztime 10s ./internal/textsafe
       - name: Install govulncheck

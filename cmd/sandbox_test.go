@@ -4,15 +4,18 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/c0m4r/iptables-analyzer/internal/loader"
 	"github.com/c0m4r/iptables-analyzer/internal/models"
+	"github.com/c0m4r/iptables-analyzer/internal/report"
 	"github.com/c0m4r/iptables-analyzer/internal/sandbox"
 	"github.com/c0m4r/iptables-analyzer/internal/services"
 )
@@ -57,6 +60,11 @@ func recordingDependencies(t *testing.T, events *[]string, out *bytes.Buffer) co
 			return &models.HostContext{Interfaces: []models.HostInterface{{Name: "lo", Up: true}}}, nil
 		},
 		isRoot: func() bool { return true },
+		now:    func() time.Time { return testTime },
+		createFile: func(string) (io.WriteCloser, error) {
+			*events = append(*events, "page")
+			return &memoryFile{}, nil
+		},
 		sandbox: func(mode sandbox.Mode) (models.SandboxStatus, error) {
 			*events = append(*events, "sandbox:"+string(mode))
 			if out.Len() != 0 {
@@ -80,12 +88,29 @@ func TestSandboxFollowsLiveInputCollection(t *testing.T) {
 	if got := strings.Join(events, ","); got != "rules,host,services-live,sandbox:auto" {
 		t.Fatalf("unexpected order of input collection and sandboxing: %s", got)
 	}
-	var report models.AnalysisResult
-	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+	var rep report.Report
+	if err := json.Unmarshal(out.Bytes(), &rep); err != nil {
 		t.Fatal(err)
 	}
-	if report.Sandbox == nil || !report.Sandbox.Landlock || len(report.Services) != 1 {
-		t.Fatalf("report lost the sandbox status or the live services: %+v %+v", report.Sandbox, report.Services)
+	if rep.Sandbox == nil || !rep.Sandbox.Landlock || len(rep.Services) != 1 || rep.Mode != "live" {
+		t.Fatalf("report lost the sandbox status or the live services: %+v %+v", rep.Sandbox, rep.Services)
+	}
+}
+
+// The page for --html is opened while the filesystem can still be reached,
+// and written after the sandbox is in place.
+func TestSandboxFollowsTheOpeningOfTheHTMLReport(t *testing.T) {
+	var events []string
+	var out bytes.Buffer
+	command := newRootCommand(recordingDependencies(t, &events, &out))
+	command.SetOut(&out)
+	command.SetErr(&bytes.Buffer{})
+	command.SetArgs([]string{"-4", "--quiet", "--html", "report.html"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(events, ","); got != "rules,host,services-live,page,sandbox:auto" {
+		t.Fatalf("unexpected order of input collection and sandboxing: %s", got)
 	}
 }
 
@@ -95,7 +120,7 @@ func TestSandboxFollowsServicesFile(t *testing.T) {
 	command := newRootCommand(recordingDependencies(t, &events, &out))
 	command.SetOut(&out)
 	command.SetErr(&bytes.Buffer{})
-	command.SetArgs([]string{"-4", "--no-color", "--sandbox=strict", "-f", "rules.v4", "--services-file", "ss.txt"})
+	command.SetArgs([]string{"-4", "--no-color", "--verbose", "--sandbox=strict", "-f", "rules.v4", "--services-file", "ss.txt"})
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
@@ -152,8 +177,10 @@ func reportWithoutSandbox(t *testing.T, data []byte) (map[string]any, map[string
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatalf("invalid JSON report: %v", err)
 	}
-	status, _ := report["Sandbox"].(map[string]any)
-	delete(report, "Sandbox")
+	status, _ := report["sandbox"].(map[string]any)
+	delete(report, "sandbox")
+	// The time of the run is not a result of the analysis.
+	delete(report, "generated")
 	return report, status
 }
 
@@ -168,10 +195,26 @@ func TestRealSandboxDoesNotChangeTheReport(t *testing.T) {
 	}
 	want, _ := reportWithoutSandbox(t, unconfined)
 
-	// The text renderer must also work in the sandbox.
-	text, stderr, err := runCLI(t, append(args[1:], "--no-color", "--verbose")...)
-	if err != nil || !strings.Contains(string(text), "Recommended Baseline") {
+	// The text renderer must also work in the sandbox, and the page for
+	// --html must be written from inside it.
+	page := filepath.Join(t.TempDir(), "report.html")
+	text, stderr, err := runCLI(t, append(args[1:], "--no-color", "--verbose", "--rules", "--html", page)...)
+	if err != nil || !strings.Contains(string(text), "Grade F") || !strings.Contains(string(text), "Rules, IPv6") || !strings.Contains(string(text), "Sandbox") {
 		t.Fatalf("text report failed in the sandbox: %v\n%s", err, stderr)
+	}
+	if written, err := os.ReadFile(page); err != nil || !bytes.HasPrefix(written, []byte("<!doctype html>")) || !bytes.HasSuffix(written, []byte("</html>\n")) {
+		t.Fatalf("the HTML report was not written in the sandbox: %v, %d bytes", err, len(written))
+	}
+
+	// The exit status for a result below the threshold comes from the real
+	// command line.
+	_, stderr, err = runCLI(t, append(args[1:], "--quiet", "--fail-on", "high")...)
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 2 || !strings.Contains(stderr, "at or above high") {
+		t.Fatalf("--fail-on high: %v, stderr %q", err, stderr)
+	}
+	if _, stderr, err = runCLI(t, filepath.Join(t.TempDir(), "missing")); !errors.As(err, &exit) || exit.ExitCode() != 1 || !strings.HasPrefix(stderr, "Error: ") {
+		t.Fatalf("a missing file: %v, stderr %q", err, stderr)
 	}
 
 	for _, mode := range []string{"auto", "strict"} {
@@ -186,7 +229,7 @@ func TestRealSandboxDoesNotChangeTheReport(t *testing.T) {
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("--sandbox=%s changed the report", mode)
 		}
-		if mode == "strict" && status["Landlock"] != true {
+		if mode == "strict" && status["landlock"] != true {
 			t.Fatalf("strict mode succeeded without Landlock: %v", status)
 		}
 		t.Logf("--sandbox=%s: %v", mode, status)

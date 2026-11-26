@@ -1,0 +1,130 @@
+<body>
+<header class="top"><div class="wrap">
+<h1>{{.Tool.Name}}</h1>
+<div class="meta">v{{.Tool.Version}} · {{.Source}} · {{.When}}</div>
+<button class="btn js-only inline" id="theme" type="button">Light / dark</button>
+</div></header>
+<nav class="sections" aria-label="Sections"><div class="wrap">
+<a href="#summary">Summary</a>
+<a href="#findings">Findings <span class="n">{{len .Findings}}</span></a>
+<a href="#reachable">Reachable <span class="n">{{.ReachableCount}}</span></a>
+{{if .Rulesets}}<a href="#rules">Rules <span class="n">{{.RuleCount}}</span></a>{{end}}
+{{if .Baseline}}<a href="#baseline">Baseline</a>{{end}}
+</div></nav>
+<main class="wrap">
+
+<section id="summary" aria-label="Summary">
+<div class="card pad">
+<div class="verdict">
+<div class="grade g-{{.GradeClass}}"><div><b>{{.Grade}}</b><small>{{.Total}}/100</small></div></div>
+<div>
+<div class="counts">{{range .Chips}}<span class="chip c-{{.Class}}">{{.Text}}</span>{{end}}</div>
+{{range .Warnings}}<p class="cap">{{.}}</p>{{end}}
+<div class="cats">{{range .Categories}}<div class="cat"><span>{{.Label}}</span><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="{{.Kept}} of {{.Max}} points"><rect class="track" width="100" height="8"/><rect class="fill {{.Class}}" width="{{.Percent}}" height="8"/></svg><span class="num">{{.Kept}}/{{.Max}}</span></div>{{end}}</div>
+</div>
+</div>
+{{if .FixFirst}}<div class="first"><h3>Fix first</h3><ol>{{range .FixFirst}}<li><span class="fid">{{.ID}}</span> <a href="#{{.Anchor}}">{{.Title}}</a>{{if .Gain}} <span class="gain">{{.Gain}}</span>{{end}}</li>{{end}}</ol></div>{{end}}
+{{if .Notes}}<ul class="notes">{{range .Notes}}<li{{if .Incomplete}} class="incomplete"{{end}}><b>{{.Mark}}:</b> {{.Text}}</li>{{end}}</ul>{{end}}
+<dl class="facts">{{range .Facts}}<dt>{{.Name}}</dt><dd{{if .Warning}} class="warn"{{end}}>{{.Text}}</dd>{{end}}</dl>
+</div>
+</section>
+
+<section id="findings">
+<h2>Findings</h2>
+{{if .Findings}}<div class="toolbar js-only">
+{{range .Filters}}<button class="btn c-{{.Severity}}" type="button" data-filter="{{.Severity}}" aria-pressed="true">{{.Label}} <span class="n">{{.Count}}</span></button>
+{{end}}<input type="search" id="search" placeholder="Filter findings" aria-label="Filter findings">
+<button class="btn" type="button" data-toggle="details.finding" data-state="open">Expand all</button>
+<button class="btn" type="button" data-toggle="details.finding" data-state="closed">Collapse all</button>
+<span class="sub" id="shown" aria-live="polite"></span>
+</div>
+{{range .Findings}}<details class="card finding s-{{.Severity}}" id="{{.Anchor}}" data-sev="{{.Severity}}"{{if .Open}} open{{end}}>
+<summary><span class="sev c-{{.Severity}}">{{.Severity}}</span><span class="fid">{{.ID}}</span><span class="ftitle">{{.Title}}{{range .Tags}} <span class="tag">{{.}}</span>{{end}}</span><span class="points">{{if .Category}}<span class="part">{{.Category}}</span> {{end}}{{.Points}}</span></summary>
+<div class="fbody">
+{{range .Detail}}<p>{{.}}</p>
+{{end}}{{if .Rules}}<ul class="evidence">{{range .Rules}}<li>{{template "ref" .}}</li>{{end}}</ul>
+{{end}}{{if .MoreRules}}<details class="more"><summary>{{.MoreLabel}}</summary><ul class="evidence">{{range .MoreRules}}<li>{{template "ref" .}}</li>{{end}}</ul></details>
+{{end}}{{with .Fix}}<div class="fix"><h4>Fix</h4><div>{{.Summary}}</div>{{if .Steps}}<ol class="steps">{{range .Steps}}<li>{{.Text}}<div class="cmd"><pre id="{{.ID}}">{{.Command}}</pre><button class="btn js-only inline" type="button" data-copy="{{.ID}}">Copy</button></div></li>{{end}}</ol>{{end}}</div>
+{{end}}</div>
+</details>
+{{end}}{{else}}<div class="card none">Nothing to report.</div>
+{{end}}</section>
+
+<section id="reachable">
+<h2>Reachable from other hosts</h2>
+<h3 class="block">Ports that INPUT accepts</h3>
+{{if .OpenPorts}}<div class="card tablewrap"><table>
+<thead><tr><th class="sortable">Protocol</th><th class="sortable">Port</th>{{if .ShowFamily}}<th class="sortable">Family</th>{{end}}<th class="sortable">Open to</th><th class="sortable">Listener</th><th>Accepted by</th></tr></thead>
+<tbody>{{range .OpenPorts}}<tr>
+<td>{{.Protocol}}</td>
+<td data-sort="{{.Sort}}">{{.Ports}}{{if .Public}} <span class="tag">declared public</span>{{end}}</td>
+{{if $.ShowFamily}}<td>{{.Families}}</td>
+{{end}}<td data-sort="{{.ScopeRank}}"><span class="scope sc-{{.ScopeClass}}">{{.Scope}}</span>{{if .Qualifiers}}<div class="sub">{{.Qualifiers}}</div>{{end}}</td>
+<td>{{.Listeners}}</td>
+<td>{{range .Rules}}<a class="mono" href="#{{.Anchor}}">{{.Where}}</a> {{else}}<span class="sub">the policy of the chain</span>{{end}}</td>
+</tr>{{end}}</tbody>
+</table></div>
+{{else}}<div class="card none">{{.NoPorts}}</div>
+{{end}}{{if .Forwards}}<h3 class="block">Ports translated to other hosts</h3>
+<p class="sub">These ports are translated in nat/PREROUTING and pass filter/FORWARD, not filter/INPUT.</p>
+<div class="card tablewrap"><table>
+<thead><tr>{{if .ShowFamily}}<th class="sortable">Family</th>{{end}}<th class="sortable">Host port</th><th class="sortable">Destination</th><th class="sortable">Open to</th><th>Translated by</th></tr></thead>
+<tbody>{{range .Forwards}}<tr>
+{{if $.ShowFamily}}<td>{{.Family}}</td>
+{{end}}<td class="mono" data-sort="{{.Sort}}">{{.From}}</td>
+<td><span class="mono">{{.To}}</span>{{if .Bridge}} <span class="sub">{{.Bridge}}</span>{{end}}</td>
+<td data-sort="{{.ScopeRank}}"><span class="scope sc-{{.ScopeClass}}">{{.Scope}}</span>{{if .Qualifiers}}<div class="sub">{{.Qualifiers}}</div>{{end}}</td>
+<td><a class="mono" href="#{{.Rule.Anchor}}">{{.Rule.Where}}</a></td>
+</tr>{{end}}</tbody>
+</table></div>
+{{end}}<h3 class="block">Listening sockets</h3>
+{{if .Services}}<div class="card tablewrap"><table>
+<thead><tr><th class="sortable">Protocol</th><th class="sortable">Port</th><th class="sortable">Address</th><th class="sortable">Process</th><th class="sortable">Status</th></tr></thead>
+<tbody>{{range .Services}}<tr>
+<td>{{.Protocol}}</td>
+<td data-sort="{{.Port}}">{{.Port}}</td>
+<td class="mono">{{.Address}}</td>
+<td>{{.Process}}</td>
+<td data-sort="{{.StatusRank}}"><span class="scope sc-{{.StatusClass}}">{{.Status}}</span></td>
+</tr>{{end}}</tbody>
+</table></div>
+{{else}}<div class="card none">{{.NoServices}}</div>
+{{end}}</section>
+
+{{if .Rulesets}}<section id="rules">
+<h2>Rules</h2>
+<div class="toolbar js-only">
+<input type="search" id="rule-search" placeholder="Filter rules, for example: --dport 22" aria-label="Filter rules">
+<button class="btn" type="button" data-toggle="details.chain" data-state="open">Expand all</button>
+<button class="btn" type="button" data-toggle="details.chain" data-state="closed">Collapse all</button>
+<span class="sub" id="rules-shown" aria-live="polite"></span>
+</div>
+{{range .Rulesets}}{{$family := .Family}}{{range .Tables}}<h3 class="block">{{$family}} · <span class="mono">{{.Name}}</span> <span class="sub">{{.Count}}</span></h3>
+{{if .Empty}}<div class="card none">{{.Empty}}</div>
+{{else}}<div class="card">
+{{range .Chains}}<details class="chain" id="{{.Anchor}}"{{if .Open}} open{{end}}>
+<summary><b>{{.Name}}</b><span class="sub">{{if .Policy}}policy <span class="policy-{{.PolicyClass}}">{{.Policy}}</span> · {{end}}{{.Count}}{{if .Owner}} · {{.Owner}}{{end}}</span>{{if .Named}}<span class="badge">{{.Named}}</span>{{end}}</summary>
+{{if .Rules}}<ol class="rules">{{range .Rules}}<li id="{{.Anchor}}"><span class="n">{{.Num}}</span><code>{{.Head}}{{if .JumpChain}}<span class="t-jump">{{.JumpLead}}<a href="#{{.JumpChain}}">{{.JumpName}}</a>{{.JumpRest}}</span>{{else if .Tail}}<span class="t-{{.TailClass}}">{{.Tail}}</span>{{end}}</code><span>{{range .Findings}}<a class="badge" href="#{{.Anchor}}">{{.ID}}</a>{{end}}</span></li>
+{{end}}</ol>
+{{else}}<div class="none">No rules.</div>
+{{end}}</details>
+{{end}}</div>
+{{end}}{{end}}{{end}}</section>
+{{end}}
+
+{{with .Baseline}}<section id="baseline">
+<h2>Recommended baseline</h2>
+<p class="sub">A complete rule set to start from, made for this host. It is not what the report measures the loaded rules against. Read it before use: iptables-restore replaces the rules that are loaded. The same text comes from <code>iptables-analyzer --baseline</code>.</p>
+{{range .Files}}<div class="card file">
+<div class="filehead"><b>{{.Title}}</b><button class="btn js-only inline" type="button" data-copy="{{.ID}}">Copy</button></div>
+<pre class="file" id="{{.ID}}">{{.Text}}</pre>
+</div>
+{{end}}{{if .Notes}}<ul class="notes">{{range .Notes}}<li>{{.}}</li>{{end}}</ul>
+{{end}}</section>
+{{end}}
+
+<footer>
+Made by <a href="{{.Tool.URL}}" rel="noopener noreferrer">{{.Tool.Name}}</a> v{{.Tool.Version}} at {{.When}}. This page is one file and loads nothing from the network.
+</footer>
+</main>
+{{define "ref"}}{{if .Role}}<span class="role">{{.Role}}</span>{{end}}{{if .Anchor}}<a class="loc mono" href="#{{.Anchor}}">{{.Where}}</a>{{else}}<span class="loc mono">{{.Where}}</span>{{end}}<code class="spec">{{.Spec}}</code>{{if .Path}}<div class="path">reached by {{.Path}}</div>{{end}}{{end}}

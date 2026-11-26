@@ -1,0 +1,89 @@
+iptables-analyzer vdev · file analysis · 2026-11-25 12:00
+inputs: ../testdata/insecure.iptables-save
+IPv4: 5 rules in 3 chains · INPUT ACCEPT · FORWARD ACCEPT · OUTPUT ACCEPT
+IPv6: not supplied
+
+  Grade F  70/100    3 high · 1 medium · 1 info
+  Grade limited to F: IPv4 INPUT accepts every new connection.
+
+  Policy                ▰▰▱▱▱▱▱▱▱▱  5/25    Hygiene               ▰▰▰▰▰▰▰▱▱▱ 10/15
+  Exposure              ▰▰▰▰▰▰▰▰▱▱ 20/25    IPv6                  ▰▰▰▰▰▰▰▰▰▰ 10/10
+  Shadows and bypasses  ▰▰▰▰▰▰▰▰▰▰ 25/25    
+
+  note: No IPv6 rules were supplied: only IPv4 was analyzed, and IPv4 rules do not filter IPv6. Add
+  the output of ip6tables-save as another file.
+  note: No list of listening sockets was read, so every open port is judged as if a service uses it.
+  Add the output of "ss -tulnp" as another file to tell used ports from unused ones.
+
+  Fix first
+    1. F1   INPUT accepts new connections to any port                                   +15, grade B
+    2. F2   Unreachable rules in filter/INPUT                                                     +5
+    3. F3   22/tcp is open to any source                                                          +5
+
+  Findings
+
+  HIGH     F1   INPUT accepts new connections to any port                                        -15
+                Rule #2 in filter/INPUT (-j ACCEPT) accepts them from any source, whatever the
+                policy of the chain is. Every port that no rule names is open: a service that
+                listens on one, now or later, is reachable at once.
+                filter/INPUT #2:  -j ACCEPT
+                fix  This rule accepts every packet that reaches it, so the rules after it and the
+                     policy of the chain decide nothing. Add rules for the traffic that is needed,
+                     with a tested way back, then delete it.
+                     Delete the rule that accepts everything:
+                       iptables -D INPUT 2
+
+  HIGH     F2   Unreachable rules in filter/INPUT                                                 -5
+                Rules #3-#5 (3 rules) are never reached: rule #2 (-j ACCEPT) ends the chain for all
+                traffic before. 2 of them are DROP or REJECT and have no effect.
+                filter/INPUT #2:  -j ACCEPT
+                fix  Delete the rules that are never reached, or move those that must apply above
+                     the rule that ends the chain.
+
+  HIGH     F3   22/tcp is open to any source                                                      -5
+                IPv4: accepted by filter/INPUT rule #1.
+                filter/INPUT #1:  -p tcp --dport 22 -j ACCEPT
+                fix  If the clients are known, accept only their addresses. If SSH must stay open to
+                     any source, limit new connections for each source: the limit counts every
+                     source by itself, so one client cannot lock out the others, and it does not
+                     touch established sessions.
+                     Replace the rule with one for the known clients:
+                       iptables -R INPUT 1 -s <trusted-cidr> -p tcp --dport 22 -j ACCEPT
+                     Or drop the connections of a source that opens more than 10 a minute, in front
+                     of the rule:
+                       iptables -I INPUT 1 -p tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh4 -j DROP
+
+  MEDIUM   F4   FORWARD accepts traffic that no rule names                                        -5
+                No rule refuses it, and the policy of filter/FORWARD is ACCEPT. This matters when IP
+                forwarding is enabled (net.ipv4.ip_forward, net.ipv6.conf.all.forwarding): the host
+                then routes packets between its networks without a filter.
+                fix  Set the policy to DROP after the forwarding paths that are needed have rules.
+                     Deny forwarding by default (IPv4):
+                       iptables -P FORWARD DROP
+
+  INFO     F5   OUTPUT default policy is ACCEPT
+                All outbound traffic is allowed. This is the usual setup; an OUTPUT allowlist can
+                limit what a compromised service is able to reach.
+
+  Open to any source
+    tcp  22 · all ports that no rule names
+    udp  all ports that no rule names
+
+  Sandbox
+    Landlock is not available
+
+  Rules, IPv4
+
+    filter/INPUT (policy ACCEPT, 5 rules)
+       1 -p tcp --dport 22 -j ACCEPT [F3]
+       2 -j ACCEPT [F1 F2]
+       3 -p tcp --dport 80 -j DROP
+       4 -p tcp --dport 3306 -j DROP
+       5 -s 10.0.0.0/8 -p tcp --dport 5432 -j ACCEPT
+
+    filter/FORWARD (policy ACCEPT, 0 rules)
+
+    filter/OUTPUT (policy ACCEPT, 0 rules)
+
+  Not shown: recommended baseline (--baseline)
+  Interactive report: --html FILE · machine-readable: --json

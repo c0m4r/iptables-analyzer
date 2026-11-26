@@ -114,6 +114,23 @@ const (
 	SeverityCritical
 )
 
+// MarshalText writes a severity as its name, so that reports do not carry
+// numbers that only this program can read.
+func (s Severity) MarshalText() ([]byte, error) {
+	return []byte(s.String()), nil
+}
+
+// UnmarshalText reads a severity name.
+func (s *Severity) UnmarshalText(text []byte) error {
+	for _, candidate := range []Severity{SeverityInfo, SeverityLow, SeverityMedium, SeverityHigh, SeverityCritical} {
+		if candidate.String() == string(text) {
+			*s = candidate
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown severity %q", text)
+}
+
 func (s Severity) String() string {
 	switch s {
 	case SeverityInfo:
@@ -270,7 +287,8 @@ type ListeningService struct {
 	Status     ServiceStatus
 }
 
-// AnalysisResult aggregates all findings
+// AnalysisResult holds the facts of an analysis. Package report turns them
+// into the findings, the fixes and the score that are shown.
 type AnalysisResult struct {
 	IPv4Rules         *Ruleset
 	IPv6Rules         *Ruleset
@@ -290,9 +308,6 @@ type AnalysisResult struct {
 	OpenPorts         []OpenPort
 	UnusedRules       []UnusedRuleFinding
 	EffectiveIssues   []EffectivenessFinding
-	Recommendations   []Recommendation
-	Baseline          Baseline
-	Score             ScoreResult
 	Sandbox           *SandboxStatus `json:",omitempty"`
 }
 
@@ -404,6 +419,7 @@ type HostInterface struct {
 // the rulesets. It is only populated in live mode; nil means unknown.
 type HostContext struct {
 	Interfaces []HostInterface
+	Hostname   string `json:",omitempty"`
 }
 
 // Baseline is a recommended default firewall for both address families.
@@ -447,6 +463,11 @@ type ExposedServiceFinding struct {
 type UnusedRuleFinding struct {
 	Code      FindingCode
 	Certainty Certainty
+	IPVersion IPVersion
+	Protocol  Protocol
+	First     int // the open ports without a listener
+	Last      int
+	Scope     AccessScope
 	Rule      Rule
 	Reason    string
 }
@@ -465,23 +486,4 @@ type EffectivenessFinding struct {
 	// Unrestricted marks a default accept that holds for every interface,
 	// both transport protocols and every packet: the chain filters nothing.
 	Unrestricted bool `json:",omitempty"`
-}
-
-// Recommendation is a security improvement suggestion
-type Recommendation struct {
-	Title    string
-	Detail   string
-	Severity Severity
-	Category string // "policy", "docker", "exposure", "hygiene", "ipv6"
-}
-
-// ScoreResult is the security score
-type ScoreResult struct {
-	Total      int
-	Breakdown  map[string]int
-	Grade      string
-	Complete   bool
-	Unassessed []string
-	// Cap explains a grade that is lower than the points alone would give.
-	Cap string `json:",omitempty"`
 }

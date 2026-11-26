@@ -1739,11 +1739,6 @@ func segmentsMinus(segments []decisionSegment, sources addrSet) []decisionSegmen
 	return segmentsBeyond(segments, labelSets{"": sources})
 }
 
-func classifySet(sources addrSet) models.AccessScope {
-	scope, _ := classifyAcceptedSources(segments(sources, nil, false))
-	return scope
-}
-
 // scopeRank orders access scopes from unreachable to unrestricted.
 func scopeRank(scope models.AccessScope) int {
 	switch scope {

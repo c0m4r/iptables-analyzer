@@ -3,58 +3,64 @@
 # or source from ~/.bashrc
 
 _iptables_analyzer() {
-    local cur prev
-    _init_completion || return
+    local cur prev words cword
+    _init_completion -s || return
 
     case "$prev" in
-        -f|--file)
+        -f|--file|--file6|--services-file|--html)
             _filedir
             return
             ;;
-        --file6)
-            _filedir
+        --sandbox)
+            mapfile -t COMPREPLY < <(compgen -W "auto strict off" -- "$cur")
             return
             ;;
-        --services-file)
-            _filedir
+        --fail-on)
+            mapfile -t COMPREPLY < <(compgen -W "low medium high critical" -- "$cur")
+            return
+            ;;
+        --min-grade)
+            mapfile -t COMPREPLY < <(compgen -W "A B C D" -- "$cur")
+            return
+            ;;
+        --baseline)
+            # The value of --baseline must follow "=", so the next word is
+            # an option or a file.
+            ;;
+        --public)
+            mapfile -t COMPREPLY < <(compgen -W "tcp/80,tcp/443 tcp/ udp/" -- "$cur")
             return
             ;;
     esac
-
-    if [[ "$prev" == --sandbox ]]; then
-        mapfile -t COMPREPLY < <(compgen -W "auto strict off" -- "$cur")
-        return
-    fi
-
-    if [[ "$cur" == --sandbox=* ]]; then
-        mapfile -t COMPREPLY < <(compgen -W "--sandbox=auto --sandbox=strict --sandbox=off" -- "$cur")
-        return
-    fi
-
-    if [[ "$cur" == --baseline=* ]]; then
-        mapfile -t COMPREPLY < <(compgen -W "--baseline=4 --baseline=6 --baseline=all" -- "$cur")
-        return
-    fi
 
     if [[ "$cur" == -* ]]; then
         local opts="
             -f --file
             --file6
+            --services-file
             -4 --ipv4-only
             -6 --ipv6-only
-            --no-color
+            --public
+            --html
             --json
+            --rules
             -v --verbose
-            --services-file
+            -q --quiet
             -s --score-only
+            --fail-on
+            --min-grade
             --baseline --baseline=4 --baseline=6 --baseline=all
-            --sandbox --sandbox=auto --sandbox=strict --sandbox=off
+            --no-color
+            --sandbox
             -V --version
             -h --help
         "
         mapfile -t COMPREPLY < <(compgen -W "$opts" -- "$cur")
         return
     fi
+
+    # Saved iptables-save, ip6tables-save and ss output.
+    _filedir
 }
 
 complete -F _iptables_analyzer iptables-analyzer

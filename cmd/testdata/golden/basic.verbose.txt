@@ -1,0 +1,81 @@
+iptables-analyzer vdev · file analysis · 2026-11-25 12:00
+inputs: ../testdata/basic.iptables-save, ../testdata/services.txt
+IPv4: 7 rules in 3 chains · INPUT DROP · FORWARD DROP · OUTPUT ACCEPT
+IPv6: not supplied
+
+  Grade A  93/100    1 high · 2 low · 1 info
+
+  Policy                ▰▰▰▰▰▰▰▰▰▰ 25/25    Hygiene               ▰▰▰▰▰▰▰▰▰▰ 15/15
+  Exposure              ▰▰▰▰▰▰▰▱▱▱ 18/25    IPv6                  ▰▰▰▰▰▰▰▰▰▰ 10/10
+  Shadows and bypasses  ▰▰▰▰▰▰▰▰▰▰ 25/25    
+
+  note: No IPv6 rules were supplied: only IPv4 was analyzed, and IPv4 rules do not filter IPv6. Add
+  the output of ip6tables-save as another file.
+
+  Findings
+
+  HIGH     F1   sshd is open to any source on 22/tcp                                              -5
+                IPv4: accepted by filter/INPUT rule #3.
+                filter/INPUT #3:  -p tcp --dport 22 -j ACCEPT
+                fix  If the clients are known, accept only their addresses. If SSH must stay open to
+                     any source, limit new connections for each source: the limit counts every
+                     source by itself, so one client cannot lock out the others, and it does not
+                     touch established sessions.
+                     Replace the rule with one for the known clients:
+                       iptables -R INPUT 3 -s <trusted-cidr> -p tcp --dport 22 -j ACCEPT
+                     Or drop the connections of a source that opens more than 10 a minute, in front
+                     of the rule:
+                       iptables -I INPUT 3 -p tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh4 -j DROP
+
+  LOW      F2   nginx is open to any source on 80/tcp                                             -1
+                IPv4: accepted by filter/INPUT rule #4.
+                filter/INPUT #4:  -p tcp --dport 80 -j ACCEPT
+                fix  If the clients are known, accept only their addresses.
+                     Replace the rule with one for the known clients:
+                       iptables -R INPUT 4 -s <trusted-cidr> -p tcp --dport 80 -j ACCEPT
+
+  LOW      F3   nginx is open to any source on 443/tcp                                            -1
+                IPv4: accepted by filter/INPUT rule #5.
+                filter/INPUT #5:  -p tcp --dport 443 -j ACCEPT
+                fix  If the clients are known, accept only their addresses.
+                     Replace the rule with one for the known clients:
+                       iptables -R INPUT 5 -s <trusted-cidr> -p tcp --dport 443 -j ACCEPT
+
+  INFO     F4   OUTPUT default policy is ACCEPT
+                All outbound traffic is allowed. This is the usual setup; an OUTPUT allowlist can
+                limit what a compromised service is able to reach.
+
+  Open to any source
+    tcp  22 sshd · 80 nginx · 443 nginx
+
+  Listening sockets
+    tcp   22     0.0.0.0                  sshd               EXPOSED
+    tcp   631    127.0.0.1                cupsd              LOCALHOST
+    tcp   80     0.0.0.0                  nginx              EXPOSED
+    tcp   443    0.0.0.0                  nginx              EXPOSED
+    tcp   3306   0.0.0.0                  mysqld             FILTERED
+    tcp   22     ::                       sshd               NOT ANALYZED
+    tcp   631    ::1                      cupsd              LOCALHOST
+    udp   68     0.0.0.0                  dhclient           FILTERED
+    udp   53     127.0.0.53%lo            systemd-resolve    LOCALHOST
+
+  Sandbox
+    Landlock is not available
+
+  Rules, IPv4
+
+    filter/INPUT (policy DROP, 7 rules)
+       1 -i lo -j ACCEPT
+       2 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+       3 -p tcp --dport 22 -j ACCEPT [F1]
+       4 -p tcp --dport 80 -j ACCEPT [F2]
+       5 -p tcp --dport 443 -j ACCEPT [F3]
+       6 -p icmp -j ACCEPT
+       7 -j DROP
+
+    filter/FORWARD (policy DROP, 0 rules)
+
+    filter/OUTPUT (policy ACCEPT, 0 rules)
+
+  Not shown: recommended baseline (--baseline)
+  Interactive report: --html FILE · machine-readable: --json

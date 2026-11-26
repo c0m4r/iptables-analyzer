@@ -4,7 +4,7 @@ This document describes the analysis method, the code structure and the limits o
 
 ## Checks
 
-- **Rule analysis**: the tool parses iptables and ip6tables rules and shows them in tables.
+- **Rule analysis**: the tool parses iptables and ip6tables rules.
 - **Shadow detection**: the tool finds rules that an earlier deterministic rule covers.
   Stateful and probabilistic matches do not prove that a rule is shadowed.
 - **Docker firewall bypass detection**: the tool follows each published port through
@@ -59,9 +59,8 @@ This document describes the analysis method, the code structure and the limits o
 | `internal/analyzer/` | The analysis (see below) |
 | `internal/services/` | Parser for `ss` output |
 | `internal/baseline/` | The recommended IPv4/IPv6 baseline firewall |
-| `internal/scorer/` | The 100-point security score |
-| `internal/recommender/` | The recommendations |
-| `internal/ui/` | The terminal report (lipgloss) and JSON |
+| `internal/report/` | The report: the findings with their evidence, fixes and points, and the score |
+| `internal/ui/` | The report as text for a terminal (lipgloss), as JSON and as an HTML page |
 
 Files of `internal/analyzer/`:
 
@@ -78,10 +77,39 @@ Files of `internal/analyzer/`:
 ## Order of the steps
 
 1. Read all input: rule files or `iptables-save` output, the `ss` data and the interface list.
+   Open the file for `--html`.
 2. Start the sandbox (see [security.md](security.md)).
-3. Parse the input, then analyze it.
-4. Make the recommendations, the baseline and the score.
-5. Write the report.
+3. Find out what each file holds, parse the input, then analyze it.
+4. Make the baseline and build the report.
+5. Write the report in the forms that were asked for.
+
+## From the analysis to the report
+
+The analysis states facts: this chain accepts by default, this rule accepts this port
+from these sources, this rule never matches. Each fact has a stable code.
+
+The package `internal/report` makes one report from the facts. All output forms show
+that report and nothing else, so the terminal, the JSON form and the HTML page always agree.
+The report:
+
+- makes one finding from facts that say the same thing: a port that is open on IPv4 and
+  on IPv6, the services that are open only because INPUT accepts by default, many open
+  ports of one severity, the rules that one rule shadows,
+- gives each finding the rules that cause it. For a rule in a user-defined chain, it
+  finds the jumps that lead from the built-in chain to the rule,
+- writes the fix. A command is written only when it keeps the restrictions of the rule
+  that it changes. Rules in the chains of ufw get `ufw` commands,
+- gives each finding its severity and its deduction. For a port that is open to all
+  sources, both follow from the kind of service that usually listens there: remote
+  administration, databases, file services and clear-text protocols weigh most,
+  the ports of public services (mail, DNS, web) least,
+- adds up the score. A category cannot lose more than its maximum. Findings about one
+  port cost one time. Some findings limit the grade,
+- finds for each finding what its fix alone gains, and which grade follows.
+  This gives the list `Fix first`.
+
+For the deductions and the grade limits, see [usage.md](usage.md#score-and-grade).
+For the fields of the report, see [json.md](json.md).
 
 ## Algorithms
 
@@ -138,7 +166,8 @@ When more than one scope applies, the tool uses the widest scope.
 The scope follows from the addresses, not from the form of the rules:
 `-m iprange --src-range` gives the same scope as the equivalent `-s` rules.
 The report lists only `EXPOSED` services as findings, and only they decrease the score.
-The service table shows the other scopes. Docker published ports use the same scopes.
+The lists of open ports and of listening sockets show the other scopes.
+Docker published ports use the same scopes.
 
 ### Predicates that the tool cannot decide
 

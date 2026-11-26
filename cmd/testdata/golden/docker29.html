@@ -1,0 +1,591 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'sha256-(hash)'; script-src 'sha256-(hash)'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<title>Firewall report · 2026-11-25 12:00</title>
+<style>(style)</style>
+</head>
+<body>
+<header class="top"><div class="wrap">
+<h1>iptables-analyzer</h1>
+<div class="meta">vdev · file analysis · 2026-11-25 12:00</div>
+<button class="btn js-only inline" id="theme" type="button">Light / dark</button>
+</div></header>
+<nav class="sections" aria-label="Sections"><div class="wrap">
+<a href="#summary">Summary</a>
+<a href="#findings">Findings <span class="n">6</span></a>
+<a href="#reachable">Reachable <span class="n">14</span></a>
+<a href="#rules">Rules <span class="n">70</span></a>
+<a href="#baseline">Baseline</a>
+</div></nav>
+<main class="wrap">
+
+<section id="summary" aria-label="Summary">
+<div class="card pad">
+<div class="verdict">
+<div class="grade g-F"><div><b>F</b><small>56/100</small></div></div>
+<div>
+<div class="counts"><span class="chip c-HIGH">3 high</span><span class="chip c-MEDIUM">2 medium</span><span class="chip c-INFO">1 info</span></div>
+<p class="cap">Grade limited to F: IPv4 INPUT accepts every new connection.</p>
+<div class="cats"><div class="cat"><span>Policy</span><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="10 of 25 points"><rect class="track" width="100" height="8"/><rect class="fill poor" width="40" height="8"/></svg><span class="num">10/25</span></div><div class="cat"><span>Exposure</span><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="0 of 25 points"><rect class="track" width="100" height="8"/><rect class="fill poor" width="0" height="8"/></svg><span class="num">0/25</span></div><div class="cat"><span>Shadows and bypasses</span><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="21 of 25 points"><rect class="track" width="100" height="8"/><rect class="fill part" width="84" height="8"/></svg><span class="num">21/25</span></div><div class="cat"><span>Hygiene</span><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="15 of 15 points"><rect class="track" width="100" height="8"/><rect class="fill full" width="100" height="8"/></svg><span class="num">15/15</span></div><div class="cat"><span>IPv6</span><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="10 of 10 points"><rect class="track" width="100" height="8"/><rect class="fill full" width="100" height="8"/></svg><span class="num">10/10</span></div></div>
+</div>
+</div>
+<div class="first"><h3>Fix first</h3><ol><li><span class="fid">F1</span> <a href="#f-1">INPUT accepts new connections to any port</a> <span class="gain">&#43;15, grade C</span></li><li><span class="fid">F4</span> <a href="#f-4">6 Docker published ports are open to any source</a> <span class="gain">&#43;11</span></li><li><span class="fid">F3</span> <a href="#f-3">All ports of the containers on bridge br-982052ef0162 are reachable by direct routing</a> <span class="gain">&#43;3</span></li></ol></div>
+
+<dl class="facts"><dt>Input</dt><dd>../testdata/docker29.iptables-save, ../testdata/docker29.ip6tables-save, ../testdata/services.txt</dd><dt>IPv4</dt><dd>55 rules in 24 chains (docker) · INPUT ACCEPT · FORWARD DROP · OUTPUT ACCEPT</dd><dt>IPv6</dt><dd>15 rules in 24 chains (docker) · INPUT ACCEPT · FORWARD DROP · OUTPUT ACCEPT</dd><dt>Sandbox</dt><dd class="warn">Landlock is not available</dd></dl>
+</div>
+</section>
+
+<section id="findings">
+<h2>Findings</h2>
+<div class="toolbar js-only">
+<button class="btn c-HIGH" type="button" data-filter="HIGH" aria-pressed="true">High <span class="n">3</span></button>
+<button class="btn c-MEDIUM" type="button" data-filter="MEDIUM" aria-pressed="true">Medium <span class="n">2</span></button>
+<button class="btn c-INFO" type="button" data-filter="INFO" aria-pressed="true">Info <span class="n">1</span></button>
+<input type="search" id="search" placeholder="Filter findings" aria-label="Filter findings">
+<button class="btn" type="button" data-toggle="details.finding" data-state="open">Expand all</button>
+<button class="btn" type="button" data-toggle="details.finding" data-state="closed">Collapse all</button>
+<span class="sub" id="shown" aria-live="polite"></span>
+</div>
+<details class="card finding s-HIGH" id="f-1" data-sev="HIGH" open>
+<summary><span class="sev c-HIGH">HIGH</span><span class="fid">F1</span><span class="ftitle">INPUT accepts new connections to any port</span><span class="points"><span class="part">Policy</span> −15</span></summary>
+<div class="fbody">
+<p>No rule refuses them, and the policy of filter/INPUT is ACCEPT. Every port that no rule names is open: a service that listens on one, now or later, is reachable at once.</p>
+<div class="fix"><h4>Fix</h4><div>Add rules for the traffic that is needed and test them, with a way back, then set the policy to DROP. The recommended baseline (--baseline) is a complete rule set to start from.</div><ol class="steps"><li>Deny by default (IPv4)<div class="cmd"><pre id="c-1-1">iptables -P INPUT DROP</pre><button class="btn js-only inline" type="button" data-copy="c-1-1">Copy</button></div></li><li>Deny by default (IPv6)<div class="cmd"><pre id="c-1-2">ip6tables -P INPUT DROP</pre><button class="btn js-only inline" type="button" data-copy="c-1-2">Copy</button></div></li></ol></div>
+</div>
+</details>
+<details class="card finding s-HIGH" id="f-2" data-sev="HIGH" open>
+<summary><span class="sev c-HIGH">HIGH</span><span class="fid">F2</span><span class="ftitle">5 services are open to any source because INPUT accepts by default</span><span class="points"><span class="part">Exposure</span> −14</span></summary>
+<div class="fbody">
+<p>No rule names their ports: sshd on 22/tcp; nginx on 80/tcp (IPv4 only); nginx on 443/tcp (IPv4 only); mysqld on 3306/tcp (IPv4 only); dhclient on 68/udp (IPv4 only). Close the default first; then accept each port that must stay reachable, for its clients only.</p>
+</div>
+</details>
+<details class="card finding s-HIGH" id="f-3" data-sev="HIGH" open>
+<summary><span class="sev c-HIGH">HIGH</span><span class="fid">F3</span><span class="ftitle">All ports of the containers on bridge br-982052ef0162 are reachable by direct routing <span class="tag">IPv4</span> <span class="tag">possible</span></span><span class="points"><span class="part">Shadows and bypasses</span> −3</span></summary>
+<div class="fbody">
+<p>Every port of containers on bridge br-982052ef0162 (gateway mode nat-unprotected) is forwarded to hosts that route 172.29.0.2 via this host (for example on the same L2 segment), including ports that were never published; neither INPUT nor published-port rules apply.</p>
+<div class="fix"><h4>Fix</h4><div>Use the default gateway mode &#34;nat&#34; for this network, or drop new non-DNAT connections into the bridge in DOCKER-USER.</div><ol class="steps"><li>Drop packets for the containers that do not arrive from their bridge (published ports keep working)<div class="cmd"><pre id="c-3-1">iptables -t raw -I PREROUTING -d 172.29.0.0/24 ! -i br-982052ef0162 -j DROP</pre><button class="btn js-only inline" type="button" data-copy="c-3-1">Copy</button></div></li><li>Or refuse new connections into the bridge that no published port translated<div class="cmd"><pre id="c-3-2">iptables -I DOCKER-USER -o br-982052ef0162 ! -i br-982052ef0162 -m conntrack --ctstate NEW -m conntrack ! --ctstate DNAT -j DROP</pre><button class="btn js-only inline" type="button" data-copy="c-3-2">Copy</button></div></li></ol></div>
+</div>
+</details>
+<details class="card finding s-MEDIUM" id="f-4" data-sev="MEDIUM" open>
+<summary><span class="sev c-MEDIUM">MEDIUM</span><span class="fid">F4</span><span class="ftitle">6 Docker published ports are open to any source</span><span class="points"><span class="part">Exposure</span> −16</span></summary>
+<div class="fbody">
+<p>Docker translates these ports to containers, and filter/FORWARD accepts them from any source; the rules of filter/INPUT do not apply: IPv4 8080/tcp to 172.17.0.2:80; IPv4 8082/tcp to 172.17.0.4:80; IPv4 9053/udp to 172.17.0.5:53; IPv4 9000-9002/tcp to 172.17.0.6:9000-9002; IPv4 8091/tcp to 172.29.0.2:80; IPv4 8443/tcp to 172.30.0.2:443; IPv6 8443/tcp to [fd00:dead:beef::2]:443.</p>
+<ul class="evidence"><li><span class="role">translates</span><a class="loc mono" href="#r4-2-5-1">IPv4 nat/DOCKER #1</a><code class="spec">! -i docker0 -p tcp -m tcp --dport 8080 -j DNAT --to-destination 172.17.0.2:80</code><div class="path">reached by PREROUTING #1</div></li><li><span class="role">translates</span><a class="loc mono" href="#r4-2-5-3">IPv4 nat/DOCKER #3</a><code class="spec">-d 192.168.88.217/32 ! -i docker0 -p tcp -m tcp --dport 8082 -j DNAT --to-destination 172.17.0.4:80</code><div class="path">reached by PREROUTING #1</div></li><li><span class="role">translates</span><a class="loc mono" href="#r4-2-5-4">IPv4 nat/DOCKER #4</a><code class="spec">! -i docker0 -p udp -m udp --dport 9053 -j DNAT --to-destination 172.17.0.5:53</code><div class="path">reached by PREROUTING #1</div></li><li><span class="role">translates</span><a class="loc mono" href="#r4-2-5-5">IPv4 nat/DOCKER #5</a><code class="spec">! -i docker0 -p tcp -m tcp --dport 9000 -j DNAT --to-destination 172.17.0.6:9000</code><div class="path">reached by PREROUTING #1</div></li><li><span class="role">translates</span><a class="loc mono" href="#r4-2-5-9">IPv4 nat/DOCKER #9</a><code class="spec">! -i br-982052ef0162 -p tcp -m tcp --dport 8091 -j DNAT --to-destination 172.29.0.2:80</code><div class="path">reached by PREROUTING #1</div></li><li><span class="role">translates</span><a class="loc mono" href="#r4-2-5-8">IPv4 nat/DOCKER #8</a><code class="spec">! -i br-7a3442937ee6 -p tcp -m tcp --dport 8443 -j DNAT --to-destination 172.30.0.2:443</code><div class="path">reached by PREROUTING #1</div></li></ul>
+<details class="more"><summary>and 1 more rule</summary><ul class="evidence"><li><span class="role">translates</span><a class="loc mono" href="#r6-2-5-1">IPv6 nat/DOCKER #1</a><code class="spec">! -s fe80::/10 ! -i br-7a3442937ee6 -p tcp -m tcp --dport 8443 -j DNAT --to-destination [fd00:dead:beef::2]:443</code><div class="path">reached by PREROUTING #1</div></li></ul></details>
+<div class="fix"><h4>Fix</h4><div>Docker translates published ports in nat/PREROUTING, so they are forwarded and never reach filter/INPUT (this includes INPUT rules of ufw or firewalld). Restrict them in DOCKER-USER, which runs before Docker&#39;s own rules and which Docker never flushes. Packets are already translated there: match the published port with --ctorigdstport, not --dport. A service that only local clients need can be published on loopback instead (docker run -p 127.0.0.1:8080:&lt;container-port&gt;).</div><ol class="steps"><li>Allow the trusted sources of port 8080 first<div class="cmd"><pre id="c-4-1">iptables -I DOCKER-USER 1 -p tcp -m conntrack --ctorigdstport 8080 --ctdir ORIGINAL -s &lt;trusted-cidr&gt; -j RETURN</pre><button class="btn js-only inline" type="button" data-copy="c-4-1">Copy</button></div></li><li>Then drop the rest of that port<div class="cmd"><pre id="c-4-2">iptables -I DOCKER-USER 2 -p tcp -m conntrack --ctorigdstport 8080 --ctdir ORIGINAL -j DROP</pre><button class="btn js-only inline" type="button" data-copy="c-4-2">Copy</button></div></li></ol></div>
+</div>
+</details>
+<details class="card finding s-MEDIUM" id="f-5" data-sev="MEDIUM" open>
+<summary><span class="sev c-MEDIUM">MEDIUM</span><span class="fid">F5</span><span class="ftitle">Container port 172.31.0.2:80 is reachable by direct routing <span class="tag">IPv4</span> <span class="tag">possible</span></span><span class="points"><span class="part">Shadows and bypasses</span> −1</span></summary>
+<div class="fbody">
+<p>Container port 172.31.0.2:80/tcp on bridge br-84b7b034b576 (gateway mode routed) is forwarded without NAT to hosts that route 172.31.0.2 via this host (for example on the same L2 segment); host INPUT rules do not apply to it.</p>
+<div class="fix"><h4>Fix</h4><div>Restrict the container port in DOCKER-USER (match -d 172.31.0.2 --dport 80), or use gateway mode nat.</div><ol class="steps"><li>Drop the container port for all but the trusted sources<div class="cmd"><pre id="c-5-1">iptables -I DOCKER-USER -o br-84b7b034b576 -d 172.31.0.2 -p tcp --dport 80 ! -s &lt;trusted-cidr&gt; -j DROP</pre><button class="btn js-only inline" type="button" data-copy="c-5-1">Copy</button></div></li></ol></div>
+</div>
+</details>
+<details class="card finding s-INFO" id="f-6" data-sev="INFO">
+<summary><span class="sev c-INFO">INFO</span><span class="fid">F6</span><span class="ftitle">OUTPUT default policy is ACCEPT</span><span class="points"></span></summary>
+<div class="fbody">
+<p>All outbound traffic is allowed. This is the usual setup; an OUTPUT allowlist can limit what a compromised service is able to reach.</p>
+</div>
+</details>
+</section>
+
+<section id="reachable">
+<h2>Reachable from other hosts</h2>
+<h3 class="block">Ports that INPUT accepts</h3>
+<div class="card tablewrap"><table>
+<thead><tr><th class="sortable">Protocol</th><th class="sortable">Port</th><th class="sortable">Family</th><th class="sortable">Open to</th><th class="sortable">Listener</th><th>Accepted by</th></tr></thead>
+<tbody><tr>
+<td>tcp</td>
+<td data-sort="22">22</td>
+<td>IPv4 and IPv6</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td>sshd</td>
+<td><span class="sub">the policy of the chain</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="80">80</td>
+<td>IPv4</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td>nginx</td>
+<td><span class="sub">the policy of the chain</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="443">443</td>
+<td>IPv4</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td>nginx</td>
+<td><span class="sub">the policy of the chain</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="3306">3306</td>
+<td>IPv4</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td>mysqld</td>
+<td><span class="sub">the policy of the chain</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="65536">all that no rule names</td>
+<td>IPv4 and IPv6</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td></td>
+<td><span class="sub">the policy of the chain</span></td>
+</tr><tr>
+<td>udp</td>
+<td data-sort="68">68</td>
+<td>IPv4</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td>dhclient</td>
+<td><span class="sub">the policy of the chain</span></td>
+</tr><tr>
+<td>udp</td>
+<td data-sort="65536">all that no rule names</td>
+<td>IPv4 and IPv6</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td></td>
+<td><span class="sub">the policy of the chain</span></td>
+</tr></tbody>
+</table></div>
+<h3 class="block">Ports translated to other hosts</h3>
+<p class="sub">These ports are translated in nat/PREROUTING and pass filter/FORWARD, not filter/INPUT.</p>
+<div class="card tablewrap"><table>
+<thead><tr><th class="sortable">Family</th><th class="sortable">Host port</th><th class="sortable">Destination</th><th class="sortable">Open to</th><th>Translated by</th></tr></thead>
+<tbody><tr>
+<td>IPv4</td>
+<td class="mono" data-sort="8080">8080/tcp</td>
+<td><span class="mono">172.17.0.2:80</span> <span class="sub">docker0</span></td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td><a class="mono" href="#r4-2-5-1">IPv4 nat/DOCKER #1</a></td>
+</tr><tr>
+<td>IPv4</td>
+<td class="mono" data-sort="8082">192.168.88.217:8082/tcp</td>
+<td><span class="mono">172.17.0.4:80</span> <span class="sub">docker0</span></td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td><a class="mono" href="#r4-2-5-3">IPv4 nat/DOCKER #3</a></td>
+</tr><tr>
+<td>IPv4</td>
+<td class="mono" data-sort="9053">9053/udp</td>
+<td><span class="mono">172.17.0.5:53</span> <span class="sub">docker0</span></td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td><a class="mono" href="#r4-2-5-4">IPv4 nat/DOCKER #4</a></td>
+</tr><tr>
+<td>IPv4</td>
+<td class="mono" data-sort="9000">9000-9002/tcp</td>
+<td><span class="mono">172.17.0.6:9000-9002</span> <span class="sub">docker0</span></td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td><a class="mono" href="#r4-2-5-5">IPv4 nat/DOCKER #5</a></td>
+</tr><tr>
+<td>IPv4</td>
+<td class="mono" data-sort="8443">8443/tcp</td>
+<td><span class="mono">172.30.0.2:443</span> <span class="sub">br-7a3442937ee6</span></td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td><a class="mono" href="#r4-2-5-8">IPv4 nat/DOCKER #8</a></td>
+</tr><tr>
+<td>IPv4</td>
+<td class="mono" data-sort="8091">8091/tcp</td>
+<td><span class="mono">172.29.0.2:80</span> <span class="sub">br-982052ef0162</span></td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td><a class="mono" href="#r4-2-5-9">IPv4 nat/DOCKER #9</a></td>
+</tr><tr>
+<td>IPv6</td>
+<td class="mono" data-sort="8443">8443/tcp</td>
+<td><span class="mono">[fd00:dead:beef::2]:443</span> <span class="sub">br-7a3442937ee6</span></td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td><a class="mono" href="#r6-2-5-1">IPv6 nat/DOCKER #1</a></td>
+</tr></tbody>
+</table></div>
+<h3 class="block">Listening sockets</h3>
+<div class="card tablewrap"><table>
+<thead><tr><th class="sortable">Protocol</th><th class="sortable">Port</th><th class="sortable">Address</th><th class="sortable">Process</th><th class="sortable">Status</th></tr></thead>
+<tbody><tr>
+<td>tcp</td>
+<td data-sort="22">22</td>
+<td class="mono">0.0.0.0</td>
+<td>sshd</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">open to any source</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="631">631</td>
+<td class="mono">127.0.0.1</td>
+<td>cupsd</td>
+<td data-sort="8"><span class="scope sc-LOCALHOST">loopback only</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="80">80</td>
+<td class="mono">0.0.0.0</td>
+<td>nginx</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">open to any source</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="443">443</td>
+<td class="mono">0.0.0.0</td>
+<td>nginx</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">open to any source</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="3306">3306</td>
+<td class="mono">0.0.0.0</td>
+<td>mysqld</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">open to any source</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="22">22</td>
+<td class="mono">::</td>
+<td>sshd</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">open to any source</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="631">631</td>
+<td class="mono">::1</td>
+<td>cupsd</td>
+<td data-sort="8"><span class="scope sc-LOCALHOST">loopback only</span></td>
+</tr><tr>
+<td>udp</td>
+<td data-sort="68">68</td>
+<td class="mono">0.0.0.0</td>
+<td>dhclient</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">open to any source</span></td>
+</tr><tr>
+<td>udp</td>
+<td data-sort="53">53</td>
+<td class="mono">127.0.0.53%lo</td>
+<td>systemd-resolve</td>
+<td data-sort="8"><span class="scope sc-LOCALHOST">loopback only</span></td>
+</tr></tbody>
+</table></div>
+</section>
+
+<section id="rules">
+<h2>Rules</h2>
+<div class="toolbar js-only">
+<input type="search" id="rule-search" placeholder="Filter rules, for example: --dport 22" aria-label="Filter rules">
+<button class="btn" type="button" data-toggle="details.chain" data-state="open">Expand all</button>
+<button class="btn" type="button" data-toggle="details.chain" data-state="closed">Collapse all</button>
+<span class="sub" id="rules-shown" aria-live="polite"></span>
+</div>
+<h3 class="block">IPv4 · <span class="mono">filter</span> <span class="sub">9 chains, 34 rules</span></h3>
+<div class="card">
+<details class="chain" id="ch4-1-1">
+<summary><b>INPUT</b><span class="sub">policy <span class="policy-ACCEPT">ACCEPT</span> · 0 rules</span></summary>
+<div class="none">No rules.</div>
+</details>
+<details class="chain" id="ch4-1-2" open>
+<summary><b>FORWARD</b><span class="sub">policy <span class="policy-DROP">DROP</span> · 2 rules</span></summary>
+<ol class="rules"><li id="r4-1-2-1"><span class="n">1</span><code><span class="t-jump">-j <a href="#ch4-1-9">DOCKER-USER</a></span></code><span></span></li>
+<li id="r4-1-2-2"><span class="n">2</span><code><span class="t-jump">-j <a href="#ch4-1-7">DOCKER-FORWARD</a></span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-1-3">
+<summary><b>OUTPUT</b><span class="sub">policy <span class="policy-NONE">ACCEPT</span> · 0 rules</span></summary>
+<div class="none">No rules.</div>
+</details>
+<details class="chain" id="ch4-1-4" open>
+<summary><b>DOCKER</b><span class="sub">14 rules · docker</span></summary>
+<ol class="rules"><li id="r4-1-4-1"><span class="n">1</span><code>-d 172.31.0.2/32 ! -i br-84b7b034b576 -o br-84b7b034b576 -p tcp -m tcp --dport 80 <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-4-2"><span class="n">2</span><code>-d 172.30.0.2/32 ! -i br-7a3442937ee6 -o br-7a3442937ee6 -p tcp -m tcp --dport 443 <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-4-3"><span class="n">3</span><code>-d 172.17.0.6/32 ! -i docker0 -o docker0 -p tcp -m tcp --dport 9002 <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-4-4"><span class="n">4</span><code>-d 172.17.0.6/32 ! -i docker0 -o docker0 -p tcp -m tcp --dport 9001 <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-4-5"><span class="n">5</span><code>-d 172.17.0.6/32 ! -i docker0 -o docker0 -p tcp -m tcp --dport 9000 <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-4-6"><span class="n">6</span><code>-d 172.17.0.5/32 ! -i docker0 -o docker0 -p udp -m udp --dport 53 <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-4-7"><span class="n">7</span><code>-d 172.17.0.4/32 ! -i docker0 -o docker0 -p tcp -m tcp --dport 80 <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-4-8"><span class="n">8</span><code>-d 172.17.0.3/32 ! -i docker0 -o docker0 -p tcp -m tcp --dport 80 <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-4-9"><span class="n">9</span><code>-d 172.17.0.2/32 ! -i docker0 -o docker0 -p tcp -m tcp --dport 80 <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-4-10"><span class="n">10</span><code>! -i docker0 -o docker0 <span class="t-DROP">-j DROP</span></code><span></span></li>
+<li id="r4-1-4-11"><span class="n">11</span><code>! -i br-7a3442937ee6 -o br-7a3442937ee6 <span class="t-DROP">-j DROP</span></code><span></span></li>
+<li id="r4-1-4-12"><span class="n">12</span><code>-o br-84b7b034b576 -p icmp <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-4-13"><span class="n">13</span><code>! -i br-84b7b034b576 -o br-84b7b034b576 <span class="t-DROP">-j DROP</span></code><span></span></li>
+<li id="r4-1-4-14"><span class="n">14</span><code>! -i br-982052ef0162 -o br-982052ef0162 <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-1-5" open>
+<summary><b>DOCKER-BRIDGE</b><span class="sub">4 rules · docker</span></summary>
+<ol class="rules"><li id="r4-1-5-1"><span class="n">1</span><code>-o docker0 <span class="t-jump">-j <a href="#ch4-1-4">DOCKER</a></span></code><span></span></li>
+<li id="r4-1-5-2"><span class="n">2</span><code>-o br-7a3442937ee6 <span class="t-jump">-j <a href="#ch4-1-4">DOCKER</a></span></code><span></span></li>
+<li id="r4-1-5-3"><span class="n">3</span><code>-o br-84b7b034b576 <span class="t-jump">-j <a href="#ch4-1-4">DOCKER</a></span></code><span></span></li>
+<li id="r4-1-5-4"><span class="n">4</span><code>-o br-982052ef0162 <span class="t-jump">-j <a href="#ch4-1-4">DOCKER</a></span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-1-6" open>
+<summary><b>DOCKER-CT</b><span class="sub">4 rules · docker</span></summary>
+<ol class="rules"><li id="r4-1-6-1"><span class="n">1</span><code>-o docker0 -m conntrack --ctstate RELATED,ESTABLISHED <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-6-2"><span class="n">2</span><code>-o br-7a3442937ee6 -m conntrack --ctstate RELATED,ESTABLISHED <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-6-3"><span class="n">3</span><code>-o br-84b7b034b576 -m conntrack --ctstate RELATED,ESTABLISHED <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-6-4"><span class="n">4</span><code>-o br-982052ef0162 -m conntrack --ctstate RELATED,ESTABLISHED <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-1-7" open>
+<summary><b>DOCKER-FORWARD</b><span class="sub">8 rules · docker</span></summary>
+<ol class="rules"><li id="r4-1-7-1"><span class="n">1</span><code><span class="t-jump">-j <a href="#ch4-1-6">DOCKER-CT</a></span></code><span></span></li>
+<li id="r4-1-7-2"><span class="n">2</span><code><span class="t-jump">-j <a href="#ch4-1-8">DOCKER-INTERNAL</a></span></code><span></span></li>
+<li id="r4-1-7-3"><span class="n">3</span><code><span class="t-jump">-j <a href="#ch4-1-5">DOCKER-BRIDGE</a></span></code><span></span></li>
+<li id="r4-1-7-4"><span class="n">4</span><code>-i docker0 <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-7-5"><span class="n">5</span><code>-i br-7a3442937ee6 <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-7-6"><span class="n">6</span><code>-i br-84b7b034b576 <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-7-7"><span class="n">7</span><code>-i br-982052ef0162 <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-7-8"><span class="n">8</span><code>-i br-1843f3e4f373 -o br-1843f3e4f373 <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-1-8" open>
+<summary><b>DOCKER-INTERNAL</b><span class="sub">2 rules · docker</span></summary>
+<ol class="rules"><li id="r4-1-8-1"><span class="n">1</span><code>! -s 172.28.0.0/24 -o br-1843f3e4f373 <span class="t-DROP">-j DROP</span></code><span></span></li>
+<li id="r4-1-8-2"><span class="n">2</span><code>! -d 172.28.0.0/24 -i br-1843f3e4f373 <span class="t-DROP">-j DROP</span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-1-9">
+<summary><b>DOCKER-USER</b><span class="sub">0 rules · docker</span></summary>
+<div class="none">No rules.</div>
+</details>
+</div>
+<h3 class="block">IPv4 · <span class="mono">nat</span> <span class="sub">5 chains, 14 rules</span></h3>
+<div class="card">
+<details class="chain" id="ch4-2-1" open>
+<summary><b>PREROUTING</b><span class="sub">policy <span class="policy-NONE">ACCEPT</span> · 1 rule</span></summary>
+<ol class="rules"><li id="r4-2-1-1"><span class="n">1</span><code>-m addrtype --dst-type LOCAL <span class="t-jump">-j <a href="#ch4-2-5">DOCKER</a></span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-2">
+<summary><b>INPUT</b><span class="sub">policy <span class="policy-NONE">ACCEPT</span> · 0 rules</span></summary>
+<div class="none">No rules.</div>
+</details>
+<details class="chain" id="ch4-2-3" open>
+<summary><b>OUTPUT</b><span class="sub">policy <span class="policy-NONE">ACCEPT</span> · 1 rule</span></summary>
+<ol class="rules"><li id="r4-2-3-1"><span class="n">1</span><code>! -d 127.0.0.0/8 -m addrtype --dst-type LOCAL <span class="t-jump">-j <a href="#ch4-2-5">DOCKER</a></span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-4" open>
+<summary><b>POSTROUTING</b><span class="sub">policy <span class="policy-NONE">ACCEPT</span> · 3 rules</span></summary>
+<ol class="rules"><li id="r4-2-4-1"><span class="n">1</span><code>-s 172.29.0.0/24 ! -o br-982052ef0162 <span class="t-other">-j MASQUERADE</span></code><span></span></li>
+<li id="r4-2-4-2"><span class="n">2</span><code>-s 172.30.0.0/24 ! -o br-7a3442937ee6 <span class="t-other">-j MASQUERADE</span></code><span></span></li>
+<li id="r4-2-4-3"><span class="n">3</span><code>-s 172.17.0.0/16 ! -o docker0 <span class="t-other">-j MASQUERADE</span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-2-5" open>
+<summary><b>DOCKER</b><span class="sub">9 rules · docker</span><span class="badge">1 finding</span></summary>
+<ol class="rules"><li id="r4-2-5-1"><span class="n">1</span><code>! -i docker0 -p tcp -m tcp --dport 8080 <span class="t-other">-j DNAT --to-destination 172.17.0.2:80</span></code><span><a class="badge" href="#f-4">F4</a></span></li>
+<li id="r4-2-5-2"><span class="n">2</span><code>-d 127.0.0.1/32 ! -i docker0 -p tcp -m tcp --dport 8081 <span class="t-other">-j DNAT --to-destination 172.17.0.3:80</span></code><span></span></li>
+<li id="r4-2-5-3"><span class="n">3</span><code>-d 192.168.88.217/32 ! -i docker0 -p tcp -m tcp --dport 8082 <span class="t-other">-j DNAT --to-destination 172.17.0.4:80</span></code><span><a class="badge" href="#f-4">F4</a></span></li>
+<li id="r4-2-5-4"><span class="n">4</span><code>! -i docker0 -p udp -m udp --dport 9053 <span class="t-other">-j DNAT --to-destination 172.17.0.5:53</span></code><span><a class="badge" href="#f-4">F4</a></span></li>
+<li id="r4-2-5-5"><span class="n">5</span><code>! -i docker0 -p tcp -m tcp --dport 9000 <span class="t-other">-j DNAT --to-destination 172.17.0.6:9000</span></code><span><a class="badge" href="#f-4">F4</a></span></li>
+<li id="r4-2-5-6"><span class="n">6</span><code>! -i docker0 -p tcp -m tcp --dport 9001 <span class="t-other">-j DNAT --to-destination 172.17.0.6:9001</span></code><span></span></li>
+<li id="r4-2-5-7"><span class="n">7</span><code>! -i docker0 -p tcp -m tcp --dport 9002 <span class="t-other">-j DNAT --to-destination 172.17.0.6:9002</span></code><span></span></li>
+<li id="r4-2-5-8"><span class="n">8</span><code>! -i br-7a3442937ee6 -p tcp -m tcp --dport 8443 <span class="t-other">-j DNAT --to-destination 172.30.0.2:443</span></code><span><a class="badge" href="#f-4">F4</a></span></li>
+<li id="r4-2-5-9"><span class="n">9</span><code>! -i br-982052ef0162 -p tcp -m tcp --dport 8091 <span class="t-other">-j DNAT --to-destination 172.29.0.2:80</span></code><span><a class="badge" href="#f-4">F4</a></span></li>
+</ol>
+</details>
+</div>
+<h3 class="block">IPv4 · <span class="mono">mangle</span> <span class="sub">5 chains, 0 rules</span></h3>
+<div class="card none">No rules. Policies: PREROUTING ACCEPT, INPUT ACCEPT, FORWARD ACCEPT, OUTPUT ACCEPT, POSTROUTING ACCEPT.</div>
+<h3 class="block">IPv4 · <span class="mono">raw</span> <span class="sub">2 chains, 7 rules</span></h3>
+<div class="card">
+<details class="chain" id="ch4-4-1" open>
+<summary><b>PREROUTING</b><span class="sub">policy <span class="policy-NONE">ACCEPT</span> · 7 rules</span></summary>
+<ol class="rules"><li id="r4-4-1-1"><span class="n">1</span><code>-d 172.17.0.2/32 ! -i docker0 <span class="t-DROP">-j DROP</span></code><span></span></li>
+<li id="r4-4-1-2"><span class="n">2</span><code>-d 172.17.0.3/32 ! -i docker0 <span class="t-DROP">-j DROP</span></code><span></span></li>
+<li id="r4-4-1-3"><span class="n">3</span><code>-d 127.0.0.1/32 ! -i lo -p tcp -m tcp --dport 8081 <span class="t-DROP">-j DROP</span></code><span></span></li>
+<li id="r4-4-1-4"><span class="n">4</span><code>-d 172.17.0.4/32 ! -i docker0 <span class="t-DROP">-j DROP</span></code><span></span></li>
+<li id="r4-4-1-5"><span class="n">5</span><code>-d 172.17.0.5/32 ! -i docker0 <span class="t-DROP">-j DROP</span></code><span></span></li>
+<li id="r4-4-1-6"><span class="n">6</span><code>-d 172.17.0.6/32 ! -i docker0 <span class="t-DROP">-j DROP</span></code><span></span></li>
+<li id="r4-4-1-7"><span class="n">7</span><code>-d 172.30.0.2/32 ! -i br-7a3442937ee6 <span class="t-DROP">-j DROP</span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-4-2">
+<summary><b>OUTPUT</b><span class="sub">policy <span class="policy-NONE">ACCEPT</span> · 0 rules</span></summary>
+<div class="none">No rules.</div>
+</details>
+</div>
+<h3 class="block">IPv4 · <span class="mono">security</span> <span class="sub">3 chains, 0 rules</span></h3>
+<div class="card none">No rules. Policies: INPUT ACCEPT, FORWARD ACCEPT, OUTPUT ACCEPT.</div>
+<h3 class="block">IPv6 · <span class="mono">filter</span> <span class="sub">9 chains, 10 rules</span></h3>
+<div class="card">
+<details class="chain" id="ch6-1-1">
+<summary><b>INPUT</b><span class="sub">policy <span class="policy-ACCEPT">ACCEPT</span> · 0 rules</span></summary>
+<div class="none">No rules.</div>
+</details>
+<details class="chain" id="ch6-1-2" open>
+<summary><b>FORWARD</b><span class="sub">policy <span class="policy-DROP">DROP</span> · 2 rules</span></summary>
+<ol class="rules"><li id="r6-1-2-1"><span class="n">1</span><code><span class="t-jump">-j <a href="#ch6-1-9">DOCKER-USER</a></span></code><span></span></li>
+<li id="r6-1-2-2"><span class="n">2</span><code><span class="t-jump">-j <a href="#ch6-1-7">DOCKER-FORWARD</a></span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch6-1-3">
+<summary><b>OUTPUT</b><span class="sub">policy <span class="policy-NONE">ACCEPT</span> · 0 rules</span></summary>
+<div class="none">No rules.</div>
+</details>
+<details class="chain" id="ch6-1-4" open>
+<summary><b>DOCKER</b><span class="sub">2 rules · docker</span></summary>
+<ol class="rules"><li id="r6-1-4-1"><span class="n">1</span><code>-d fd00:dead:beef::2/128 ! -i br-7a3442937ee6 -o br-7a3442937ee6 -p tcp -m tcp --dport 443 <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r6-1-4-2"><span class="n">2</span><code>! -i br-7a3442937ee6 -o br-7a3442937ee6 <span class="t-DROP">-j DROP</span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch6-1-5" open>
+<summary><b>DOCKER-BRIDGE</b><span class="sub">1 rule · docker</span></summary>
+<ol class="rules"><li id="r6-1-5-1"><span class="n">1</span><code>-o br-7a3442937ee6 <span class="t-jump">-j <a href="#ch6-1-4">DOCKER</a></span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch6-1-6" open>
+<summary><b>DOCKER-CT</b><span class="sub">1 rule · docker</span></summary>
+<ol class="rules"><li id="r6-1-6-1"><span class="n">1</span><code>-o br-7a3442937ee6 -m conntrack --ctstate RELATED,ESTABLISHED <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch6-1-7" open>
+<summary><b>DOCKER-FORWARD</b><span class="sub">4 rules · docker</span></summary>
+<ol class="rules"><li id="r6-1-7-1"><span class="n">1</span><code><span class="t-jump">-j <a href="#ch6-1-6">DOCKER-CT</a></span></code><span></span></li>
+<li id="r6-1-7-2"><span class="n">2</span><code><span class="t-jump">-j <a href="#ch6-1-8">DOCKER-INTERNAL</a></span></code><span></span></li>
+<li id="r6-1-7-3"><span class="n">3</span><code><span class="t-jump">-j <a href="#ch6-1-5">DOCKER-BRIDGE</a></span></code><span></span></li>
+<li id="r6-1-7-4"><span class="n">4</span><code>-i br-7a3442937ee6 <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch6-1-8">
+<summary><b>DOCKER-INTERNAL</b><span class="sub">0 rules · docker</span></summary>
+<div class="none">No rules.</div>
+</details>
+<details class="chain" id="ch6-1-9">
+<summary><b>DOCKER-USER</b><span class="sub">0 rules · docker</span></summary>
+<div class="none">No rules.</div>
+</details>
+</div>
+<h3 class="block">IPv6 · <span class="mono">nat</span> <span class="sub">5 chains, 4 rules</span></h3>
+<div class="card">
+<details class="chain" id="ch6-2-1" open>
+<summary><b>PREROUTING</b><span class="sub">policy <span class="policy-NONE">ACCEPT</span> · 1 rule</span></summary>
+<ol class="rules"><li id="r6-2-1-1"><span class="n">1</span><code>-m addrtype --dst-type LOCAL <span class="t-jump">-j <a href="#ch6-2-5">DOCKER</a></span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch6-2-2">
+<summary><b>INPUT</b><span class="sub">policy <span class="policy-NONE">ACCEPT</span> · 0 rules</span></summary>
+<div class="none">No rules.</div>
+</details>
+<details class="chain" id="ch6-2-3" open>
+<summary><b>OUTPUT</b><span class="sub">policy <span class="policy-NONE">ACCEPT</span> · 1 rule</span></summary>
+<ol class="rules"><li id="r6-2-3-1"><span class="n">1</span><code>! -d ::1/128 -m addrtype --dst-type LOCAL <span class="t-jump">-j <a href="#ch6-2-5">DOCKER</a></span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch6-2-4" open>
+<summary><b>POSTROUTING</b><span class="sub">policy <span class="policy-NONE">ACCEPT</span> · 1 rule</span></summary>
+<ol class="rules"><li id="r6-2-4-1"><span class="n">1</span><code>-s fd00:dead:beef::/64 ! -o br-7a3442937ee6 <span class="t-other">-j MASQUERADE</span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch6-2-5" open>
+<summary><b>DOCKER</b><span class="sub">1 rule · docker</span><span class="badge">1 finding</span></summary>
+<ol class="rules"><li id="r6-2-5-1"><span class="n">1</span><code>! -s fe80::/10 ! -i br-7a3442937ee6 -p tcp -m tcp --dport 8443 <span class="t-other">-j DNAT --to-destination [fd00:dead:beef::2]:443</span></code><span><a class="badge" href="#f-4">F4</a></span></li>
+</ol>
+</details>
+</div>
+<h3 class="block">IPv6 · <span class="mono">mangle</span> <span class="sub">5 chains, 0 rules</span></h3>
+<div class="card none">No rules. Policies: PREROUTING ACCEPT, INPUT ACCEPT, FORWARD ACCEPT, OUTPUT ACCEPT, POSTROUTING ACCEPT.</div>
+<h3 class="block">IPv6 · <span class="mono">raw</span> <span class="sub">2 chains, 1 rule</span></h3>
+<div class="card">
+<details class="chain" id="ch6-4-1" open>
+<summary><b>PREROUTING</b><span class="sub">policy <span class="policy-NONE">ACCEPT</span> · 1 rule</span></summary>
+<ol class="rules"><li id="r6-4-1-1"><span class="n">1</span><code>-d fd00:dead:beef::2/128 ! -i br-7a3442937ee6 <span class="t-DROP">-j DROP</span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch6-4-2">
+<summary><b>OUTPUT</b><span class="sub">policy <span class="policy-NONE">ACCEPT</span> · 0 rules</span></summary>
+<div class="none">No rules.</div>
+</details>
+</div>
+<h3 class="block">IPv6 · <span class="mono">security</span> <span class="sub">3 chains, 0 rules</span></h3>
+<div class="card none">No rules. Policies: INPUT ACCEPT, FORWARD ACCEPT, OUTPUT ACCEPT.</div>
+</section>
+
+
+<section id="baseline">
+<h2>Recommended baseline</h2>
+<p class="sub">A complete rule set to start from, made for this host. It is not what the report measures the loaded rules against. Read it before use: iptables-restore replaces the rules that are loaded. The same text comes from <code>iptables-analyzer --baseline</code>.</p>
+<div class="card file">
+<div class="filehead"><b>IPv4, for iptables-restore</b><button class="btn js-only inline" type="button" data-copy="baseline-4">Copy</button></div>
+<pre class="file" id="baseline-4"># Recommended IPv4 baseline generated by iptables-analyzer (iptables-restore format).
+# Default deny inbound and forwarded traffic; outbound traffic is allowed.
+# Apply with &#34;iptables-restore --noflush&#34;: it replaces INPUT and DOCKER-USER and keeps every
+# other chain, including Docker&#39;s, intact.
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+:DOCKER-USER - [0:0]
+-F INPUT
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A INPUT -m conntrack --ctstate INVALID -j DROP
+-A INPUT -s 127.0.0.0/8 ! -i lo -j DROP
+-A INPUT -p icmp -m icmp --icmp-type 8 -m limit --limit 10/sec --limit-burst 20 -j ACCEPT
+# Remote administration: new SSH connections are limited per source address.
+-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh4-22 -j DROP
+-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+# Other listening services found on this host. Uncomment only what must be
+# reachable, preferably with -s &lt;trusted-cidr&gt;:
+# -A INPUT -p tcp -m tcp --dport 80 -m conntrack --ctstate NEW -j ACCEPT   # nginx
+# -A INPUT -p tcp -m tcp --dport 443 -m conntrack --ctstate NEW -j ACCEPT   # nginx
+# -A INPUT -p tcp -m tcp --dport 3306 -m conntrack --ctstate NEW -j ACCEPT   # mysqld
+# -A INPUT -p udp -m udp --dport 68 -j ACCEPT   # dhclient
+# Docker: published ports never reach INPUT. Restrict them here; packets are
+# already DNATed, so match the published port with conntrack, not --dport.
+# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8080 --ctdir ORIGINAL -s &lt;trusted-cidr&gt; -j RETURN   # published -&gt; 172.17.0.2:80
+# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8080 --ctdir ORIGINAL -j DROP
+# -A DOCKER-USER -p tcp -m conntrack --ctorigdst 192.168.88.217 --ctorigdstport 8082 --ctdir ORIGINAL -s &lt;trusted-cidr&gt; -j RETURN   # published -&gt; 172.17.0.4:80
+# -A DOCKER-USER -p tcp -m conntrack --ctorigdst 192.168.88.217 --ctorigdstport 8082 --ctdir ORIGINAL -j DROP
+# -A DOCKER-USER -p udp -m conntrack --ctorigdstport 9053 --ctdir ORIGINAL -s &lt;trusted-cidr&gt; -j RETURN   # published -&gt; 172.17.0.5:53
+# -A DOCKER-USER -p udp -m conntrack --ctorigdstport 9053 --ctdir ORIGINAL -j DROP
+# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 9000:9002 --ctdir ORIGINAL -s &lt;trusted-cidr&gt; -j RETURN   # published -&gt; 172.17.0.6:9000-9002
+# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 9000:9002 --ctdir ORIGINAL -j DROP
+# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8443 --ctdir ORIGINAL -s &lt;trusted-cidr&gt; -j RETURN   # published -&gt; 172.30.0.2:443
+# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8443 --ctdir ORIGINAL -j DROP
+# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8091 --ctdir ORIGINAL -s &lt;trusted-cidr&gt; -j RETURN   # published -&gt; 172.29.0.2:80
+# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8091 --ctdir ORIGINAL -j DROP
+-A DOCKER-USER -j RETURN
+COMMIT
+</pre>
+</div>
+<div class="card file">
+<div class="filehead"><b>IPv6, for ip6tables-restore</b><button class="btn js-only inline" type="button" data-copy="baseline-6">Copy</button></div>
+<pre class="file" id="baseline-6"># Recommended IPv6 baseline generated by iptables-analyzer (ip6tables-restore format).
+# Default deny inbound and forwarded traffic; outbound traffic is allowed.
+# Apply with &#34;ip6tables-restore --noflush&#34;: it replaces INPUT and DOCKER-USER and keeps every
+# other chain, including Docker&#39;s, intact.
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+:DOCKER-USER - [0:0]
+-F INPUT
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+# Neighbor discovery is untracked by conntrack and must be allowed explicitly;
+# a hop limit of 255 proves the sender is on-link.
+-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 134 -m hl --hl-eq 255 -m comment --comment &#34;router advertisement (SLAAC)&#34; -j ACCEPT
+-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 135 -m hl --hl-eq 255 -m comment --comment &#34;neighbor solicitation&#34; -j ACCEPT
+-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 136 -m hl --hl-eq 255 -m comment --comment &#34;neighbor advertisement&#34; -j ACCEPT
+-A INPUT -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 130 -m comment --comment &#34;multicast listener query&#34; -j ACCEPT
+-A INPUT -s fe80::/10 -d fe80::/10 -p udp -m udp --sport 547 --dport 546 -m comment --comment &#34;DHCPv6 client&#34; -j ACCEPT
+-A INPUT -m conntrack --ctstate INVALID -j DROP
+-A INPUT -s ::1/128 ! -i lo -j DROP
+-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 128 -m limit --limit 10/sec --limit-burst 20 -j ACCEPT
+# Remote administration: new SSH connections are limited per source address.
+-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh6-22 -j DROP
+-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+# Docker: published ports never reach INPUT. Restrict them here; packets are
+# already DNATed, so match the published port with conntrack, not --dport.
+# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8443 --ctdir ORIGINAL -s &lt;trusted-cidr&gt; -j RETURN   # published -&gt; [fd00:dead:beef::2]:443
+# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8443 --ctdir ORIGINAL -j DROP
+-A DOCKER-USER -j RETURN
+COMMIT
+</pre>
+</div>
+<ul class="notes"><li>SSH stays reachable on TCP port 22 (detected from the listening sshd).</li><li>Both families are always generated: IPv6 gets addresses automatically (SLAAC), so an unused stack must be closed too.</li><li>Keep a second SSH session open and apply with an automatic rollback, for example:</li><li>  printf &#39;#!/bin/sh\nexec iptables-restore --noflush /root/baseline.v4\n&#39; &gt; /root/apply.v4 &amp;&amp; chmod &#43;x /root/apply.v4 &amp;&amp; iptables-apply -t 60 -c /root/apply.v4</li><li>  printf &#39;#!/bin/sh\nexec ip6tables-restore --noflush /root/baseline.v6\n&#39; &gt; /root/apply.v6 &amp;&amp; chmod &#43;x /root/apply.v6 &amp;&amp; ip6tables-apply -t 60 -c /root/apply.v6</li><li>Persist the result with your distribution&#39;s mechanism (e.g. iptables-save &gt; /etc/iptables/rules.v4 with iptables-persistent).</li><li>Docker hosts: always use --noflush. A full restore deletes Docker&#39;s chains and disconnects all containers until dockerd restarts.</li></ul>
+</section>
+
+
+<footer>
+Made by <a href="https://github.com/c0m4r/iptables-analyzer" rel="noopener noreferrer">iptables-analyzer</a> vdev at 2026-11-25 12:00. This page is one file and loads nothing from the network.
+</footer>
+</main>
+
+<script>(script)</script>
+</body>
+</html>

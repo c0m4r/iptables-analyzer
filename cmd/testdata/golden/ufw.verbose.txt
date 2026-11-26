@@ -1,0 +1,224 @@
+iptables-analyzer vdev · file analysis · 2026-11-25 12:00
+inputs: ../testdata/ufw.iptables-save, ../testdata/ufw-services.txt
+IPv4: 71 rules in 35 chains (ufw) · INPUT DROP · FORWARD DROP · OUTPUT ACCEPT
+IPv6: not supplied
+
+  Grade A  95/100    1 medium · 3 low · 1 info
+
+  Policy                ▰▰▰▰▰▰▰▰▰▰ 25/25    Hygiene               ▰▰▰▰▰▰▰▰▰▰ 15/15
+  Exposure              ▰▰▰▰▰▰▰▰▱▱ 20/25    IPv6                  ▰▰▰▰▰▰▰▰▰▰ 10/10
+  Shadows and bypasses  ▰▰▰▰▰▰▰▰▰▰ 25/25    
+
+  note: No IPv6 rules were supplied: only IPv4 was analyzed, and IPv4 rules do not filter IPv6. Add
+  the output of ip6tables-save as another file.
+
+  Findings
+
+  MEDIUM   F1   sshd is open to any source on 22/tcp                                              -2
+                IPv4: accepted by filter/ufw-user-limit-accept rule #1. Limited by: rate limit.
+                filter/ufw-user-limit-accept #1:  -j ACCEPT
+                  reached by INPUT #2 → ufw-before-input #13 → ufw-user-input #3
+                fix  ufw manages this rule, and a change made with iptables is lost at its next
+                     reload. If the clients are known, allow only them and delete the open rule.
+                     Allow the known clients:
+                       ufw allow from <trusted-cidr> to any port 22 proto tcp
+                     Delete the rule for any source:
+                       ufw delete limit 22/tcp
+
+  LOW      F2   systemd-network is open to any source on 68/udp                                   -1
+                IPv4: accepted by filter/ufw-before-input rule #9, for packets that arrive on eth0.
+                Limited by: source port 67. A rule of this form admits replies (DHCP, DNS): only a
+                sender that uses that source port passes.
+                filter/ufw-before-input #9:  -p udp -m udp --sport 67 --dport 68 -j ACCEPT
+                  reached by INPUT #2
+
+  LOW      F3   nginx is open to any source on 80/tcp                                             -1
+                IPv4: accepted by filter/ufw-user-input rule #4.
+                filter/ufw-user-input #4:  -p tcp -m tcp --dport 80 -j ACCEPT
+                  reached by INPUT #2 → ufw-before-input #13
+                fix  ufw manages this rule, and a change made with iptables is lost at its next
+                     reload. If the clients are known, allow only them and delete the open rule.
+                     Allow the known clients:
+                       ufw allow from <trusted-cidr> to any port 80 proto tcp
+                     Delete the rule for any source:
+                       ufw delete allow 80/tcp
+
+  LOW      F4   nginx is open to any source on 443/tcp                                            -1
+                IPv4: accepted by filter/ufw-user-input rule #5.
+                filter/ufw-user-input #5:  -p tcp -m tcp --dport 443 -j ACCEPT
+                  reached by INPUT #2 → ufw-before-input #13
+                fix  ufw manages this rule, and a change made with iptables is lost at its next
+                     reload. If the clients are known, allow only them and delete the open rule.
+                     Allow the known clients:
+                       ufw allow from <trusted-cidr> to any port 443 proto tcp
+                     Delete the rule for any source:
+                       ufw delete allow 443/tcp
+
+  INFO     F5   OUTPUT default policy is ACCEPT
+                All outbound traffic is allowed. This is the usual setup; an OUTPUT allowlist can
+                limit what a compromised service is able to reach.
+
+  Open to any source
+    tcp  22 sshd (rate limit) · 80 nginx · 443 nginx
+    udp  68 systemd-network (source port 67)
+
+  Open to restricted sources
+    tcp  5432 postgres (private networks)
+
+  Listening sockets
+    udp   53     127.0.0.53%lo            systemd-resolve    LOCALHOST
+    udp   68     10.0.0.5%eth0            systemd-network    EXPOSED
+    tcp   22     0.0.0.0                  sshd               EXPOSED
+    tcp   80     0.0.0.0                  nginx              EXPOSED
+    tcp   443    0.0.0.0                  nginx              EXPOSED
+    tcp   5432   0.0.0.0                  postgres           LOCALNET
+    tcp   6379   127.0.0.1                redis-server       LOCALHOST
+
+  Sandbox
+    Landlock is not available
+
+  Rules, IPv4
+
+    filter/INPUT (policy DROP, 6 rules)
+       1 -j ufw-before-logging-input
+       2 -j ufw-before-input
+       3 -j ufw-after-input
+       4 -j ufw-after-logging-input
+       5 -j ufw-reject-input
+       6 -j ufw-track-input
+
+    filter/FORWARD (policy DROP, 6 rules)
+       1 -j ufw-before-logging-forward
+       2 -j ufw-before-forward
+       3 -j ufw-after-forward
+       4 -j ufw-after-logging-forward
+       5 -j ufw-reject-forward
+       6 -j ufw-track-forward
+
+    filter/OUTPUT (policy ACCEPT, 6 rules)
+       1 -j ufw-before-logging-output
+       2 -j ufw-before-output
+       3 -j ufw-after-output
+       4 -j ufw-after-logging-output
+       5 -j ufw-reject-output
+       6 -j ufw-track-output
+
+    filter/ufw-after-forward (0 rules, ufw)
+
+    filter/ufw-after-input (7 rules, ufw)
+       1 -p udp -m udp --dport 137 -j ufw-skip-to-policy-input
+       2 -p udp -m udp --dport 138 -j ufw-skip-to-policy-input
+       3 -p tcp -m tcp --dport 139 -j ufw-skip-to-policy-input
+       4 -p tcp -m tcp --dport 445 -j ufw-skip-to-policy-input
+       5 -p udp -m udp --dport 67 -j ufw-skip-to-policy-input
+       6 -p udp -m udp --dport 68 -j ufw-skip-to-policy-input
+       7 -m addrtype --dst-type BROADCAST -j ufw-skip-to-policy-input
+
+    filter/ufw-after-logging-forward (1 rule, ufw)
+       1 -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix "[UFW BLOCK] "
+
+    filter/ufw-after-logging-input (1 rule, ufw)
+       1 -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix "[UFW BLOCK] "
+
+    filter/ufw-after-logging-output (0 rules, ufw)
+
+    filter/ufw-after-output (0 rules, ufw)
+
+    filter/ufw-before-forward (6 rules, ufw)
+       1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+       2 -p icmp -m icmp --icmp-type 3 -j ACCEPT
+       3 -p icmp -m icmp --icmp-type 11 -j ACCEPT
+       4 -p icmp -m icmp --icmp-type 12 -j ACCEPT
+       5 -p icmp -m icmp --icmp-type 8 -j ACCEPT
+       6 -j ufw-user-forward
+
+    filter/ufw-before-input (13 rules, ufw)
+       1 -i lo -j ACCEPT
+       2 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+       3 -m conntrack --ctstate INVALID -j ufw-logging-deny
+       4 -m conntrack --ctstate INVALID -j DROP
+       5 -p icmp -m icmp --icmp-type 3 -j ACCEPT
+       6 -p icmp -m icmp --icmp-type 11 -j ACCEPT
+       7 -p icmp -m icmp --icmp-type 12 -j ACCEPT
+       8 -p icmp -m icmp --icmp-type 8 -j ACCEPT
+       9 -p udp -m udp --sport 67 --dport 68 -j ACCEPT [F2]
+      10 -j ufw-not-local
+      11 -d 224.0.0.251/32 -p udp -m udp --dport 5353 -j ACCEPT
+      12 -d 239.255.255.250/32 -p udp -m udp --dport 1900 -j ACCEPT
+      13 -j ufw-user-input
+
+    filter/ufw-before-logging-forward (0 rules, ufw)
+
+    filter/ufw-before-logging-input (0 rules, ufw)
+
+    filter/ufw-before-logging-output (0 rules, ufw)
+
+    filter/ufw-before-output (3 rules, ufw)
+       1 -o lo -j ACCEPT
+       2 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+       3 -j ufw-user-output
+
+    filter/ufw-logging-allow (1 rule, ufw)
+       1 -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix "[UFW ALLOW] "
+
+    filter/ufw-logging-deny (2 rules, ufw)
+       1 -m conntrack --ctstate INVALID -m limit --limit 3/min --limit-burst 10 -j RETURN
+       2 -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix "[UFW BLOCK] "
+
+    filter/ufw-not-local (5 rules, ufw)
+       1 -m addrtype --dst-type LOCAL -j RETURN
+       2 -m addrtype --dst-type MULTICAST -j RETURN
+       3 -m addrtype --dst-type BROADCAST -j RETURN
+       4 -m limit --limit 3/min --limit-burst 10 -j ufw-logging-deny
+       5 -j DROP
+
+    filter/ufw-reject-forward (0 rules, ufw)
+
+    filter/ufw-reject-input (0 rules, ufw)
+
+    filter/ufw-reject-output (0 rules, ufw)
+
+    filter/ufw-skip-to-policy-forward (1 rule, ufw)
+       1 -j DROP
+
+    filter/ufw-skip-to-policy-input (1 rule, ufw)
+       1 -j DROP
+
+    filter/ufw-skip-to-policy-output (1 rule, ufw)
+       1 -j ACCEPT
+
+    filter/ufw-track-forward (0 rules, ufw)
+
+    filter/ufw-track-input (0 rules, ufw)
+
+    filter/ufw-track-output (2 rules, ufw)
+       1 -p tcp -m conntrack --ctstate NEW -j ACCEPT
+       2 -p udp -m conntrack --ctstate NEW -j ACCEPT
+
+    filter/ufw-user-forward (0 rules, ufw)
+
+    filter/ufw-user-input (6 rules, ufw)
+       1 -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m recent --set --name DEFAULT --mask 255.255.255.255 --rsource
+       2 -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m recent --update --seconds 30 --hitcount 6 --name DEFAULT --mask 255.255.255.255 --rsource -j ufw-user-limit
+       3 -p tcp -m tcp --dport 22 -j ufw-user-limit-accept
+       4 -p tcp -m tcp --dport 80 -j ACCEPT [F3]
+       5 -p tcp -m tcp --dport 443 -j ACCEPT [F4]
+       6 -s 10.0.0.0/8 -p tcp -m tcp --dport 5432 -j ACCEPT
+
+    filter/ufw-user-limit (2 rules, ufw)
+       1 -m limit --limit 3/min -j LOG --log-prefix "[UFW LIMIT BLOCK] "
+       2 -j REJECT --reject-with icmp-port-unreachable
+
+    filter/ufw-user-limit-accept (1 rule, ufw)
+       1 -j ACCEPT [F1]
+
+    filter/ufw-user-logging-forward (0 rules, ufw)
+
+    filter/ufw-user-logging-input (0 rules, ufw)
+
+    filter/ufw-user-logging-output (0 rules, ufw)
+
+    filter/ufw-user-output (0 rules, ufw)
+
+  Not shown: recommended baseline (--baseline)
+  Interactive report: --html FILE · machine-readable: --json

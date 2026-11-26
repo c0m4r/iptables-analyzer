@@ -1,0 +1,314 @@
+{
+  "schema_version": 2,
+  "tool": {
+    "name": "iptables-analyzer",
+    "version": "dev",
+    "url": "https://github.com/c0m4r/iptables-analyzer"
+  },
+  "generated": "2026-11-25T12:00:00Z",
+  "mode": "file",
+  "inputs": [
+    "../testdata/insecure.iptables-save"
+  ],
+  "families": [
+    {
+      "version": 4,
+      "status": "ANALYZED",
+      "tables": 1,
+      "chains": 3,
+      "rules": 5,
+      "policies": {
+        "FORWARD": "ACCEPT",
+        "INPUT": "ACCEPT",
+        "OUTPUT": "ACCEPT"
+      }
+    },
+    {
+      "version": 6,
+      "status": "NOT_SUPPLIED",
+      "tables": 0,
+      "chains": 0,
+      "rules": 0
+    }
+  ],
+  "score": {
+    "total": 70,
+    "grade": "F",
+    "complete": true,
+    "cap": "grade limited to F: IPv4 INPUT accepts every new connection",
+    "categories": [
+      {
+        "key": "policy",
+        "label": "Policy",
+        "max": 25,
+        "lost": 20
+      },
+      {
+        "key": "exposure",
+        "label": "Exposure",
+        "max": 25,
+        "lost": 5
+      },
+      {
+        "key": "paths",
+        "label": "Shadows and bypasses",
+        "max": 25,
+        "lost": 0
+      },
+      {
+        "key": "hygiene",
+        "label": "Hygiene",
+        "max": 15,
+        "lost": 5
+      },
+      {
+        "key": "ipv6",
+        "label": "IPv6",
+        "max": 10,
+        "lost": 0
+      }
+    ]
+  },
+  "counts": {
+    "critical": 0,
+    "high": 3,
+    "medium": 1,
+    "low": 0,
+    "info": 1
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "code": "policy_accept",
+      "severity": "HIGH",
+      "certainty": "DEFINITE",
+      "category": "policy",
+      "families": [
+        4
+      ],
+      "title": "INPUT accepts new connections to any port",
+      "detail": "Rule #2 in filter/INPUT (-j ACCEPT) accepts them from any source, whatever the policy of the chain is. Every port that no rule names is open: a service that listens on one, now or later, is reachable at once.",
+      "rules": [
+        {
+          "family": 4,
+          "table": "filter",
+          "chain": "INPUT",
+          "num": 2,
+          "spec": "-j ACCEPT",
+          "role": "causes"
+        }
+      ],
+      "fix": {
+        "summary": "This rule accepts every packet that reaches it, so the rules after it and the policy of the chain decide nothing. Add rules for the traffic that is needed, with a tested way back, then delete it.",
+        "steps": [
+          {
+            "text": "Delete the rule that accepts everything",
+            "command": "iptables -D INPUT 2"
+          }
+        ]
+      },
+      "points": 15,
+      "gain": 15,
+      "grade_after": "B"
+    },
+    {
+      "id": "F2",
+      "code": "dead_rule",
+      "severity": "HIGH",
+      "certainty": "DEFINITE",
+      "category": "hygiene",
+      "families": [
+        4
+      ],
+      "title": "Unreachable rules in filter/INPUT",
+      "detail": "Rules #3-#5 (3 rules) are never reached: rule #2 (-j ACCEPT) ends the chain for all traffic before. 2 of them are DROP or REJECT and have no effect.",
+      "rules": [
+        {
+          "family": 4,
+          "table": "filter",
+          "chain": "INPUT",
+          "num": 2,
+          "spec": "-j ACCEPT",
+          "role": "causes"
+        }
+      ],
+      "fix": {
+        "summary": "Delete the rules that are never reached, or move those that must apply above the rule that ends the chain."
+      },
+      "points": 5,
+      "gain": 5
+    },
+    {
+      "id": "F3",
+      "code": "open_port",
+      "severity": "HIGH",
+      "certainty": "DEFINITE",
+      "category": "exposure",
+      "families": [
+        4
+      ],
+      "title": "22/tcp is open to any source",
+      "detail": "IPv4: accepted by filter/INPUT rule #1.",
+      "ports": [
+        "22/tcp"
+      ],
+      "rules": [
+        {
+          "family": 4,
+          "table": "filter",
+          "chain": "INPUT",
+          "num": 1,
+          "spec": "-p tcp --dport 22 -j ACCEPT",
+          "role": "accepts"
+        }
+      ],
+      "fix": {
+        "summary": "If the clients are known, accept only their addresses. If SSH must stay open to any source, limit new connections for each source: the limit counts every source by itself, so one client cannot lock out the others, and it does not touch established sessions.",
+        "steps": [
+          {
+            "text": "Replace the rule with one for the known clients",
+            "command": "iptables -R INPUT 1 -s \u003ctrusted-cidr\u003e -p tcp --dport 22 -j ACCEPT"
+          },
+          {
+            "text": "Or drop the connections of a source that opens more than 10 a minute, in front of the rule",
+            "command": "iptables -I INPUT 1 -p tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh4 -j DROP"
+          }
+        ]
+      },
+      "points": 5,
+      "gain": 5
+    },
+    {
+      "id": "F4",
+      "code": "policy_accept",
+      "severity": "MEDIUM",
+      "certainty": "DEFINITE",
+      "category": "policy",
+      "families": [
+        4
+      ],
+      "title": "FORWARD accepts traffic that no rule names",
+      "detail": "No rule refuses it, and the policy of filter/FORWARD is ACCEPT. This matters when IP forwarding is enabled (net.ipv4.ip_forward, net.ipv6.conf.all.forwarding): the host then routes packets between its networks without a filter.",
+      "fix": {
+        "summary": "Set the policy to DROP after the forwarding paths that are needed have rules.",
+        "steps": [
+          {
+            "text": "Deny forwarding by default (IPv4)",
+            "command": "iptables -P FORWARD DROP"
+          }
+        ]
+      },
+      "points": 5,
+      "gain": 5
+    },
+    {
+      "id": "F5",
+      "code": "policy_accept",
+      "severity": "INFO",
+      "certainty": "DEFINITE",
+      "category": "policy",
+      "families": [
+        4
+      ],
+      "title": "OUTPUT default policy is ACCEPT",
+      "detail": "All outbound traffic is allowed. This is the usual setup; an OUTPUT allowlist can limit what a compromised service is able to reach.",
+      "points": 0,
+      "gain": 0
+    }
+  ],
+  "open_ports": [
+    {
+      "families": [
+        4
+      ],
+      "protocol": "tcp",
+      "first": 22,
+      "last": 22,
+      "scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "rules": [
+        {
+          "family": 4,
+          "table": "filter",
+          "chain": "INPUT",
+          "num": 1,
+          "spec": "-p tcp --dport 22 -j ACCEPT",
+          "role": "accepts"
+        }
+      ]
+    },
+    {
+      "families": [
+        4
+      ],
+      "protocol": "tcp",
+      "first": 0,
+      "last": 0,
+      "scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "rules": [
+        {
+          "family": 4,
+          "table": "filter",
+          "chain": "INPUT",
+          "num": 2,
+          "spec": "-j ACCEPT",
+          "role": "accepts"
+        }
+      ],
+      "default": true
+    },
+    {
+      "families": [
+        4
+      ],
+      "protocol": "udp",
+      "first": 0,
+      "last": 0,
+      "scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "rules": [
+        {
+          "family": 4,
+          "table": "filter",
+          "chain": "INPUT",
+          "num": 2,
+          "spec": "-j ACCEPT",
+          "role": "accepts"
+        }
+      ],
+      "default": true
+    }
+  ],
+  "forwarded_ports": [],
+  "services_known": false,
+  "services": [],
+  "notes": [
+    {
+      "kind": "scope",
+      "text": "No IPv6 rules were supplied: only IPv4 was analyzed, and IPv4 rules do not filter IPv6. Add the output of ip6tables-save as another file."
+    },
+    {
+      "kind": "scope",
+      "area": "services",
+      "text": "No list of listening sockets was read, so every open port is judged as if a service uses it. Add the output of \"ss -tulnp\" as another file to tell used ports from unused ones."
+    }
+  ],
+  "sandbox": {
+    "mode": "auto",
+    "landlock": false,
+    "privileges_dropped": false
+  },
+  "baseline": {
+    "ipv4": "# Recommended IPv4 baseline generated by iptables-analyzer (iptables-restore format).\n# Default deny inbound and forwarded traffic; outbound traffic is allowed.\n# Apply with \"iptables-restore --noflush\": it replaces INPUT and keeps every\n# other chain, including Docker's, intact.\n*filter\n:INPUT DROP [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\n-F INPUT\n-A INPUT -i lo -j ACCEPT\n-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n-A INPUT -m conntrack --ctstate INVALID -j DROP\n-A INPUT -s 127.0.0.0/8 ! -i lo -j DROP\n-A INPUT -p icmp -m icmp --icmp-type 8 -m limit --limit 10/sec --limit-burst 20 -j ACCEPT\n# Remote administration: new SSH connections are limited per source address.\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh4-22 -j DROP\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT\nCOMMIT\n",
+    "ipv6": "# Recommended IPv6 baseline generated by iptables-analyzer (ip6tables-restore format).\n# Default deny inbound and forwarded traffic; outbound traffic is allowed.\n# Apply with \"ip6tables-restore --noflush\": it replaces INPUT and keeps every\n# other chain, including Docker's, intact.\n*filter\n:INPUT DROP [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\n-F INPUT\n-A INPUT -i lo -j ACCEPT\n-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n# Neighbor discovery is untracked by conntrack and must be allowed explicitly;\n# a hop limit of 255 proves the sender is on-link.\n-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 134 -m hl --hl-eq 255 -m comment --comment \"router advertisement (SLAAC)\" -j ACCEPT\n-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 135 -m hl --hl-eq 255 -m comment --comment \"neighbor solicitation\" -j ACCEPT\n-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 136 -m hl --hl-eq 255 -m comment --comment \"neighbor advertisement\" -j ACCEPT\n-A INPUT -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 130 -m comment --comment \"multicast listener query\" -j ACCEPT\n-A INPUT -s fe80::/10 -d fe80::/10 -p udp -m udp --sport 547 --dport 546 -m comment --comment \"DHCPv6 client\" -j ACCEPT\n-A INPUT -m conntrack --ctstate INVALID -j DROP\n-A INPUT -s ::1/128 ! -i lo -j DROP\n-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 128 -m limit --limit 10/sec --limit-burst 20 -j ACCEPT\n# Remote administration: new SSH connections are limited per source address.\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh6-22 -j DROP\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT\nCOMMIT\n",
+    "notes": [
+      "SSH is assumed on TCP port 22; change the port before applying if sshd listens elsewhere.",
+      "Both families are always generated: IPv6 gets addresses automatically (SLAAC), so an unused stack must be closed too.",
+      "Keep a second SSH session open and apply with an automatic rollback, for example:",
+      "  printf '#!/bin/sh\\nexec iptables-restore --noflush /root/baseline.v4\\n' \u003e /root/apply.v4 \u0026\u0026 chmod +x /root/apply.v4 \u0026\u0026 iptables-apply -t 60 -c /root/apply.v4",
+      "  printf '#!/bin/sh\\nexec ip6tables-restore --noflush /root/baseline.v6\\n' \u003e /root/apply.v6 \u0026\u0026 chmod +x /root/apply.v6 \u0026\u0026 ip6tables-apply -t 60 -c /root/apply.v6",
+      "Persist the result with your distribution's mechanism (e.g. iptables-save \u003e /etc/iptables/rules.v4 with iptables-persistent)."
+    ]
+  }
+}

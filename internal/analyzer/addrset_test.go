@@ -4,6 +4,8 @@ import (
 	"math/rand"
 	"net/netip"
 	"testing"
+
+	"github.com/c0m4r/iptables-analyzer/internal/models"
 )
 
 // The set operations are compared with plain membership tables over a small
@@ -237,4 +239,9 @@ func TestSourceScopeFollowsAddressesNotRuleShapes(t *testing.T) {
 			t.Errorf("%v: scope %q, want %q", tt.prefixes, got, tt.want)
 		}
 	}
+}
+
+func classifySet(sources addrSet) models.AccessScope {
+	scope, _ := classifyAcceptedSources(segments(sources, nil, false))
+	return scope
 }

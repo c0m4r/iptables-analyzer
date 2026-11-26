@@ -1,0 +1,50 @@
+iptables-analyzer vdev · live system · 2026-11-25 12:00
+IPv4: no rules are loaded, all traffic is accepted
+IPv6: no rules are loaded, all traffic is accepted
+
+  Grade F  60/100    3 high
+  Grade limited to F: no IPv4 rules are loaded.
+
+  Policy                ▱▱▱▱▱▱▱▱▱▱  0/25    Hygiene               ▰▰▰▰▰▰▰▰▰▰ 15/15
+  Exposure              ▰▰▰▰▰▰▰▰▱▱ 20/25    IPv6                  ▱▱▱▱▱▱▱▱▱▱  0/10
+  Shadows and bypasses  ▰▰▰▰▰▰▰▰▰▰ 25/25    
+
+  Fix first
+    1. F1   No IPv4 firewall rules are loaded                                           +25, grade D
+    2. F2   No IPv6 firewall rules are loaded                                                    +10
+
+  Findings
+
+  HIGH     F1   No IPv4 firewall rules are loaded                                                -25
+                iptables-save shows no tables for IPv4, so nothing is filtered: every port of the
+                host is open, and the host forwards packets without a filter when routing is on.
+                fix  Load a rule set for IPv4. The recommended baseline is a complete one; its notes
+                     say how to apply it with a way back.
+                     Write the baseline for IPv4 to a file:
+                       iptables-analyzer --baseline=4 > baseline.v4
+
+  HIGH     F2   No IPv6 firewall rules are loaded                                                -10
+                ip6tables-save shows no tables, and IPv4 rules do not filter IPv6. Hosts usually get
+                IPv6 addresses automatically; every service that listens on IPv6 is then open.
+                fix  Load a rule set for IPv6. The recommended baseline is a complete one; its notes
+                     say how to apply it with a way back.
+                     Write the baseline for IPv6 to a file:
+                       iptables-analyzer --baseline=6 > baseline.v6
+
+  HIGH     F3   sshd is open to any source on 22/tcp                                              -5
+                No rule names the port: INPUT accepts it from any source by default. Close the
+                default first; then accept each port that must stay reachable, for its clients only.
+
+  Open to any source
+    tcp  22 sshd · all ports that no rule names
+    udp  all ports that no rule names
+
+  Listening sockets
+    tcp   22     0.0.0.0                  sshd               EXPOSED
+    tcp   22     ::                       sshd               EXPOSED
+
+  Sandbox
+    Landlock is not available
+
+  Not shown: recommended baseline (--baseline)
+  Interactive report: --html FILE · machine-readable: --json

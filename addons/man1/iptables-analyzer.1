@@ -1,53 +1,79 @@
-.TH IPTABLES\-ANALYZER 1 "2026-11-09" "0.7.1" "iptables-analyzer manual"
+.TH IPTABLES\-ANALYZER 1 "2026-11-25" "0.7.1" "iptables-analyzer manual"
 .SH NAME
 iptables\-analyzer \- analyze iptables/ip6tables firewall rules for security issues
 .SH SYNOPSIS
 .B iptables\-analyzer
-[\fIOPTIONS\fR]
+[\fIOPTIONS\fR] [\fIFILE\fR...]
 .SH DESCRIPTION
 .B iptables\-analyzer
-inspects iptables and ip6tables rules to identify security weaknesses, including
-shadowed or ineffective rules, Docker NAT bypasses that make INPUT rules useless,
-DOCKER\-USER and FORWARD rules that never match published traffic, containers
-reachable by direct routing, services exposed to the network, blocked IPv6
-neighbor discovery, and missing best practices. It provides a security score,
-actionable recommendations, and a recommended baseline firewall that is always
-generated for both IPv4 and IPv6. The grade is marked INCOMPLETE
-when listening-service evidence or a firewall translation could not be assessed.
+examines iptables and ip6tables rules and reports security problems: chains
+that accept by default, ports that are open to all sources, services that the
+firewall does not protect, rules that never match, Docker published ports that
+bypass the INPUT rules, DOCKER\-USER and FORWARD rules that never match
+published traffic, containers that other hosts reach by direct routing, and
+rules that stop IPv6 connectivity.
 .PP
-When run as root without any file arguments, it reads rules directly from the
-live system. Otherwise, provide saved rule files with \fB\-f\fR and \fB\-\-file6\fR.
+The report starts with a score from 0 to 100 and a grade from A to F. Then it
+lists the findings, the most severe first. Each finding names the rules that
+cause it and says how to fix it. The tool does not change the firewall.
+.PP
+Run as root without a \fIFILE\fR, the tool reads the rules and the listening
+sockets of the system. With files, it examines saved output of
+.BR iptables\-save (8),
+.BR ip6tables\-save (8)
+and
+.BR ss (8).
+The tool finds out what each file holds: the save tools name themselves in the
+first line of their output, and without that line the addresses in the rules
+show the address family.
 .SH OPTIONS
+.SS Input
 .TP
 .BR \-f ", " \-\-file " \fIFILE\fR"
-Path to iptables-save output file (IPv4 rules).
+Read the IPv4 rules (iptables\-save output) from \fIFILE\fR. Use it when the
+tool cannot tell what a file holds.
 .TP
 .BR \-\-file6 " \fIFILE\fR"
-Path to ip6tables-save output file (IPv6 rules).
-.TP
-.BR \-4 ", " \-\-ipv4\-only
-Analyze only IPv4 rules.
-.TP
-.BR \-6 ", " \-\-ipv6\-only
-Analyze only IPv6 rules.
-.TP
-.BR \-\-no\-color
-Disable colored output.
-.TP
-.BR \-\-json
-Output results as JSON.
-.TP
-.BR \-v ", " \-\-verbose
-Show all rules including empty chains and the original raw rule text.
+Read the IPv6 rules (ip6tables\-save output) from \fIFILE\fR.
 .TP
 .BR \-\-services\-file " \fIFILE\fR"
-Path to saved
-.BR ss (8)
-output file (alternative to live service detection).
-An explicitly requested file that is missing or malformed is a fatal error.
+Read the listening sockets (output of \fBss \-tulnp\fR) from \fIFILE\fR.
+Without the listening sockets, each open port is judged as if a service uses it.
+.TP
+.BR \-4 ", " \-\-ipv4\-only
+Analyze only IPv4.
+.TP
+.BR \-6 ", " \-\-ipv6\-only
+Analyze only IPv6.
+.TP
+.BR \-\-public " \fILIST\fR"
+Ports that are open to all sources on purpose, for example
+\fBtcp/80,tcp/443\fR. The findings for these ports are notes without a
+deduction. An entry is \fBtcp/80\fR, \fB80/tcp\fR, \fBudp/53\fR, a range such
+as \fBtcp/8000\-8100\fR, or a number (TCP).
+.SS Output
+.TP
+.BR \-\-html " \fIFILE\fR"
+Also write an interactive report to \fIFILE\fR. The file is one HTML page that
+loads nothing from the network. It also holds the rules and the recommended
+baseline. A symbolic link at \fIFILE\fR is not followed.
+.TP
+.BR \-\-json
+Write the report as JSON. See \fBdocs/json.md\fR for the fields.
+.TP
+.BR \-\-rules
+Also show the rules of each chain, with the findings that name them.
+With \fB\-\-json\fR, add the rules to the report.
+.TP
+.BR \-v ", " \-\-verbose
+Also show the findings of severity INFO, the listening sockets and the
+sandbox status.
+.TP
+.BR \-q ", " \-\-quiet
+Print one line: the score, the grade and the number of findings.
 .TP
 .BR \-s ", " \-\-score\-only
-Only print the security score. The output includes assessment completeness.
+Print only the score and the grade, for example \fB87 B\fR.
 .TP
 .BR \-\-baseline "[=\fIFAMILY\fR]"
 Print only the recommended baseline firewall in iptables\-restore format and
@@ -57,6 +83,19 @@ must be attached with \fB=\fR. Without rule files and without root the baseline
 is generic; otherwise it keeps the detected SSH port, lists other listeners as
 commented rules and, on Docker hosts, adds DOCKER\-USER rules for published ports.
 Apply it with \fBiptables\-restore \-\-noflush\fR, which keeps Docker's chains.
+.TP
+.BR \-\-no\-color
+Disable colored output. The \fBNO_COLOR\fR variable has the same effect.
+.SS Result
+.TP
+.BR \-\-fail\-on " \fISEVERITY\fR"
+Exit with status 2 when a finding has this severity or a higher one.
+\fISEVERITY\fR is \fBlow\fR, \fBmedium\fR, \fBhigh\fR or \fBcritical\fR.
+.TP
+.BR \-\-min\-grade " \fIGRADE\fR"
+Exit with status 2 when the grade is worse than \fIGRADE\fR (\fBA\fR to
+\fBD\fR), or when the grade is INCOMPLETE.
+.SS Other
 .TP
 .BR \-\-sandbox " \fIMODE\fR"
 Confine the process after it has read its input; see
@@ -69,8 +108,27 @@ Print version and exit.
 .TP
 .BR \-h ", " \-\-help
 Show help message and exit.
+.SH EXIT STATUS
+.TP
+.B 0
+The analysis is complete.
+.TP
+.B 1
+An error: the input could not be read, or an option is not correct.
+.TP
+.B 2
+The analysis is complete, and the result is below what \fB\-\-fail\-on\fR or
+\fB\-\-min\-grade\fR asks for. The report is written first.
+.SH ENVIRONMENT
+.TP
+.B NO_COLOR
+Do not use colors.
+.TP
+.B COLUMNS
+The width of the text report, when it is not that of the terminal. The report
+uses 60 to 120 columns, and 100 columns without a terminal.
 .SH EXAMPLES
-Run live analysis as root (auto-detects rules and listening services):
+Examine the rules and the listening sockets of this host:
 .PP
 .RS 4
 .EX
@@ -78,27 +136,30 @@ sudo iptables\-analyzer
 .EE
 .RE
 .PP
-Analyze saved rule files:
+Save the input on one host and examine it on another:
 .PP
 .RS 4
 .EX
-iptables\-analyzer \-f rules.v4 \-\-file6 rules.v6
+sudo iptables\-save > rules.v4
+sudo ip6tables\-save > rules.v6
+sudo ss \-tulnp > ss.txt
+iptables\-analyzer rules.v4 rules.v6 ss.txt
 .EE
 .RE
 .PP
-Analyze saved rules with saved service data:
+Write an interactive report, and tell the tool that the web ports are public:
 .PP
 .RS 4
 .EX
-iptables\-analyzer \-f rules.v4 \-\-services\-file services.txt
+sudo iptables\-analyzer \-\-public tcp/80,tcp/443 \-\-html report.html
 .EE
 .RE
 .PP
-Output only the security score:
+Stop a script when the rules have a high or critical finding:
 .PP
 .RS 4
 .EX
-sudo iptables\-analyzer \-s
+iptables\-analyzer rules.v4 rules.v6 \-\-quiet \-\-fail\-on high || exit 1
 .EE
 .RE
 .PP
@@ -108,23 +169,6 @@ Write the recommended baselines to files:
 .EX
 sudo iptables\-analyzer \-\-baseline=4 > baseline.v4
 sudo iptables\-analyzer \-\-baseline=6 > baseline.v6
-.EE
-.RE
-.PP
-Save rules for offline analysis:
-.PP
-.RS 4
-.EX
-sudo iptables\-save > rules.v4
-sudo ip6tables\-save > rules.v6
-.EE
-.RE
-.PP
-Save listening services for offline analysis:
-.PP
-.RS 4
-.EX
-ss \-tulnp > services.txt
 .EE
 .RE
 .SH SECURITY
@@ -148,20 +192,29 @@ after reading its input, drops root privileges to uid and gid 65534, sets
 no_new_privs, and enforces a Landlock domain that denies all file access,
 execution, TCP and UDP, abstract UNIX sockets and signals (as far as the
 kernel's Landlock ABI supports them). Parsing, analysis and output run in this
-sandbox. Landlock needs Linux 5.13 or later with landlock in the lsm= boot
-parameter; binaries built with cgo need Linux 7.0 (Landlock ABI 8);
+sandbox; the file for \fB\-\-html\fR is opened before it. Landlock needs
+Linux 5.13 or later with landlock in the lsm= boot parameter; binaries built
+with cgo need Linux 7.0 (Landlock ABI 8);
 .IP \(bu 2
 shows control characters, bidirectional overrides and invalid UTF\-8 in
 input text as visible placeholders (\fB^[\fR, \fB<U+202E>\fR,
 \fB<0xFF>\fR);
 .IP \(bu 2
-quotes every value from the ruleset in recommended commands, so that copying
-a command into a shell cannot run a command hidden in a rule comment.
+quotes every value from the ruleset in the commands of a fix, so that copying
+a command into a shell cannot run a command hidden in a rule comment;
+.IP \(bu 2
+writes text from the input into the HTML report only as text, and gives the
+page a content security policy that allows no network access and no script
+but its own.
+.PP
+The reports show the rules of the host. Keep them where only the right persons
+can read them.
 .SH SEE ALSO
 .BR iptables (8),
 .BR ip6tables (8),
 .BR iptables\-save (8),
 .BR ip6tables\-save (8),
+.BR iptables\-apply (8),
 .BR ss (8)
 .SH AUTHORS
 iptables\-analyzer was written by c0m4r.

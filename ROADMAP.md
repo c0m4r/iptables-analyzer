@@ -12,8 +12,12 @@ Phase 2 changes the data model and the report. Phase 3 widens the analysis.
 | Phase | State |
 | --- | --- |
 | 1. Correct results | Done (2026-11-25), not released. See `CHANGELOG.md`, section Unreleased |
-| 2. Report | Next |
-| 3. Wider analysis | Planned |
+| 2. Report | Done (2026-11-25), not released |
+| 3. Wider analysis | Next |
+
+Before the release: set `VERSION` (decision 3 names 0.8), give the section Unreleased
+of `CHANGELOG.md` its version and date, and set the same in the manual page.
+The picture in `README.md` showed the old report; the README now has a text example.
 
 Phase 1 differs from the plan below in these points:
 
@@ -25,14 +29,34 @@ Phase 1 differs from the plan below in these points:
 - 1.6: `missing_final_drop` and `late_conntrack` are removed. FORWARD that accepts by default is
   MEDIUM (-5) while nothing shows that the host routes packets.
 - 1.7: a REDIRECT gives an assessment note and the grade INCOMPLETE until 3.1 follows it.
-- 1.8: on ufw hosts the baseline only warns. Fixes in ufw's own commands are item 3.2;
-  until then the exposure recommendations still name iptables commands for ufw chains (audit D2).
-  Identical recommendations are not grouped yet: item 2.1 joins them with their findings.
+- 1.8: on ufw hosts the baseline only warns. Phase 2 added the fixes in ufw's own commands
+  (audit D2) and joined identical advice with its findings.
 - 1.9: the ceiling is F when INPUT accepts all new connections, and D when it accepts by
   default for one protocol or interface only.
 
-Open decision from Phase 1: the grade stays INCOMPLETE without a services file.
-Decision 4 below changes that in item 2.5.
+Phase 2 applies the decisions below as recommended. It differs from the plan in these points:
+
+- 2.1: the analyzer keeps its typed facts. The new package `internal/report` makes the one
+  list of findings from them, with the evidence, the fix and the points of each finding.
+  The renderers and the score read only that list. A finding has `families` (a list),
+  `rules` and `ports` as evidence, and also `gain` and `grade_after`. The categories are
+  `policy`, `exposure`, `paths`, `hygiene` and `ipv6`.
+- 2.2: "Fix first" puts the findings first whose fix alone gives a better grade. The number
+  is the real gain of the score, after the limits of the categories.
+  Services that are open only because INPUT accepts by default are one finding.
+- 2.3: the page is written by `html/template` on the server side, not from an embedded
+  data block. Text from the input stands only in text nodes; no attribute value comes from
+  it. A test replaces every string of a report by markup and compares the structure of the
+  page; a fuzz target reads the page strictly. The filters are the severity and a text
+  search (the search also finds a category or an address family). The baseline has a copy
+  button, not a download.
+- 2.4: the thresholds are two options, `--fail-on SEVERITY` and `--min-grade GRADE`.
+- 2.5: an open port without a listener stays INFO (`unused_rule`), without points.
+  The ports of public services (25, 53, 80, 443, 465, 587, 993, 995) are a class of their
+  own: LOW, 1 point.
+- 3.2 is done in part: fixes for rules in ufw chains are `ufw` commands, and the report
+  names the programs whose chains the rules contain. For the other programs the fix says
+  where to make the change.
 
 ## Decisions
 
@@ -279,10 +303,12 @@ forwards and redirects come out of the same code.
 
 ### 3.2 Chain owners [D2]
 
-Recognize ufw, firewalld, Docker, libvirt, fail2ban, kube-proxy, Calico,
-Tailscale, CSF and shorewall by chain names. Use the owner for the report
-header, for the wording of findings, and for fixes in the owner's own
-commands (`ufw allow from ... to any port 22`).
+Done in Phase 2: ufw, firewalld, Docker, libvirt, fail2ban, kube-proxy, Calico,
+CNI, Tailscale, sshguard and CrowdSec are recognized by chain names. The owner is in
+the report header, and fixes for ufw chains are `ufw` commands.
+
+Open: CSF and shorewall; fixes in the commands of firewalld (`firewall-cmd`) and of
+the other programs; the wording of findings for each owner.
 
 ### 3.3 Host facts [A4]
 

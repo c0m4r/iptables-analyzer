@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'sha256-(hash)'; script-src 'sha256-(hash)'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<title>Firewall report · 2026-11-25 12:00</title>
+<style>(style)</style>
+</head>
+<body>
+<header class="top"><div class="wrap">
+<h1>iptables-analyzer</h1>
+<div class="meta">vdev · file analysis · 2026-11-25 12:00</div>
+<button class="btn js-only inline" id="theme" type="button">Light / dark</button>
+</div></header>
+<nav class="sections" aria-label="Sections"><div class="wrap">
+<a href="#summary">Summary</a>
+<a href="#findings">Findings <span class="n">4</span></a>
+<a href="#reachable">Reachable <span class="n">3</span></a>
+<a href="#rules">Rules <span class="n">7</span></a>
+<a href="#baseline">Baseline</a>
+</div></nav>
+<main class="wrap">
+
+<section id="summary" aria-label="Summary">
+<div class="card pad">
+<div class="verdict">
+<div class="grade g-A"><div><b>A</b><small>93/100</small></div></div>
+<div>
+<div class="counts"><span class="chip c-HIGH">1 high</span><span class="chip c-LOW">2 low</span><span class="chip c-INFO">1 info</span></div>
+
+<div class="cats"><div class="cat"><span>Policy</span><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="25 of 25 points"><rect class="track" width="100" height="8"/><rect class="fill full" width="100" height="8"/></svg><span class="num">25/25</span></div><div class="cat"><span>Exposure</span><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="18 of 25 points"><rect class="track" width="100" height="8"/><rect class="fill part" width="72" height="8"/></svg><span class="num">18/25</span></div><div class="cat"><span>Shadows and bypasses</span><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="25 of 25 points"><rect class="track" width="100" height="8"/><rect class="fill full" width="100" height="8"/></svg><span class="num">25/25</span></div><div class="cat"><span>Hygiene</span><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="15 of 15 points"><rect class="track" width="100" height="8"/><rect class="fill full" width="100" height="8"/></svg><span class="num">15/15</span></div><div class="cat"><span>IPv6</span><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="10 of 10 points"><rect class="track" width="100" height="8"/><rect class="fill full" width="100" height="8"/></svg><span class="num">10/10</span></div></div>
+</div>
+</div>
+
+<ul class="notes"><li><b>Note:</b> No IPv6 rules were supplied: only IPv4 was analyzed, and IPv4 rules do not filter IPv6. Add the output of ip6tables-save as another file.</li></ul>
+<dl class="facts"><dt>Input</dt><dd>../testdata/basic.iptables-save, ../testdata/services.txt</dd><dt>IPv4</dt><dd>7 rules in 3 chains · INPUT DROP · FORWARD DROP · OUTPUT ACCEPT</dd><dt>IPv6</dt><dd>not supplied</dd><dt>Sandbox</dt><dd class="warn">Landlock is not available</dd></dl>
+</div>
+</section>
+
+<section id="findings">
+<h2>Findings</h2>
+<div class="toolbar js-only">
+<button class="btn c-HIGH" type="button" data-filter="HIGH" aria-pressed="true">High <span class="n">1</span></button>
+<button class="btn c-LOW" type="button" data-filter="LOW" aria-pressed="true">Low <span class="n">2</span></button>
+<button class="btn c-INFO" type="button" data-filter="INFO" aria-pressed="true">Info <span class="n">1</span></button>
+<input type="search" id="search" placeholder="Filter findings" aria-label="Filter findings">
+<button class="btn" type="button" data-toggle="details.finding" data-state="open">Expand all</button>
+<button class="btn" type="button" data-toggle="details.finding" data-state="closed">Collapse all</button>
+<span class="sub" id="shown" aria-live="polite"></span>
+</div>
+<details class="card finding s-HIGH" id="f-1" data-sev="HIGH" open>
+<summary><span class="sev c-HIGH">HIGH</span><span class="fid">F1</span><span class="ftitle">sshd is open to any source on 22/tcp</span><span class="points"><span class="part">Exposure</span> −5</span></summary>
+<div class="fbody">
+<p>IPv4: accepted by filter/INPUT rule #3.</p>
+<ul class="evidence"><li><span class="role">accepts</span><a class="loc mono" href="#r4-1-1-3">filter/INPUT #3</a><code class="spec">-p tcp --dport 22 -j ACCEPT</code></li></ul>
+<div class="fix"><h4>Fix</h4><div>If the clients are known, accept only their addresses. If SSH must stay open to any source, limit new connections for each source: the limit counts every source by itself, so one client cannot lock out the others, and it does not touch established sessions.</div><ol class="steps"><li>Replace the rule with one for the known clients<div class="cmd"><pre id="c-1-1">iptables -R INPUT 3 -s &lt;trusted-cidr&gt; -p tcp --dport 22 -j ACCEPT</pre><button class="btn js-only inline" type="button" data-copy="c-1-1">Copy</button></div></li><li>Or drop the connections of a source that opens more than 10 a minute, in front of the rule<div class="cmd"><pre id="c-1-2">iptables -I INPUT 3 -p tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh4 -j DROP</pre><button class="btn js-only inline" type="button" data-copy="c-1-2">Copy</button></div></li></ol></div>
+</div>
+</details>
+<details class="card finding s-LOW" id="f-2" data-sev="LOW">
+<summary><span class="sev c-LOW">LOW</span><span class="fid">F2</span><span class="ftitle">nginx is open to any source on 80/tcp</span><span class="points"><span class="part">Exposure</span> −1</span></summary>
+<div class="fbody">
+<p>IPv4: accepted by filter/INPUT rule #4.</p>
+<ul class="evidence"><li><span class="role">accepts</span><a class="loc mono" href="#r4-1-1-4">filter/INPUT #4</a><code class="spec">-p tcp --dport 80 -j ACCEPT</code></li></ul>
+<div class="fix"><h4>Fix</h4><div>If the clients are known, accept only their addresses.</div><ol class="steps"><li>Replace the rule with one for the known clients<div class="cmd"><pre id="c-2-1">iptables -R INPUT 4 -s &lt;trusted-cidr&gt; -p tcp --dport 80 -j ACCEPT</pre><button class="btn js-only inline" type="button" data-copy="c-2-1">Copy</button></div></li></ol></div>
+</div>
+</details>
+<details class="card finding s-LOW" id="f-3" data-sev="LOW">
+<summary><span class="sev c-LOW">LOW</span><span class="fid">F3</span><span class="ftitle">nginx is open to any source on 443/tcp</span><span class="points"><span class="part">Exposure</span> −1</span></summary>
+<div class="fbody">
+<p>IPv4: accepted by filter/INPUT rule #5.</p>
+<ul class="evidence"><li><span class="role">accepts</span><a class="loc mono" href="#r4-1-1-5">filter/INPUT #5</a><code class="spec">-p tcp --dport 443 -j ACCEPT</code></li></ul>
+<div class="fix"><h4>Fix</h4><div>If the clients are known, accept only their addresses.</div><ol class="steps"><li>Replace the rule with one for the known clients<div class="cmd"><pre id="c-3-1">iptables -R INPUT 5 -s &lt;trusted-cidr&gt; -p tcp --dport 443 -j ACCEPT</pre><button class="btn js-only inline" type="button" data-copy="c-3-1">Copy</button></div></li></ol></div>
+</div>
+</details>
+<details class="card finding s-INFO" id="f-4" data-sev="INFO">
+<summary><span class="sev c-INFO">INFO</span><span class="fid">F4</span><span class="ftitle">OUTPUT default policy is ACCEPT</span><span class="points"></span></summary>
+<div class="fbody">
+<p>All outbound traffic is allowed. This is the usual setup; an OUTPUT allowlist can limit what a compromised service is able to reach.</p>
+</div>
+</details>
+</section>
+
+<section id="reachable">
+<h2>Reachable from other hosts</h2>
+<h3 class="block">Ports that INPUT accepts</h3>
+<div class="card tablewrap"><table>
+<thead><tr><th class="sortable">Protocol</th><th class="sortable">Port</th><th class="sortable">Open to</th><th class="sortable">Listener</th><th>Accepted by</th></tr></thead>
+<tbody><tr>
+<td>tcp</td>
+<td data-sort="22">22</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td>sshd</td>
+<td><a class="mono" href="#r4-1-1-3">filter/INPUT #3</a> </td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="80">80</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td>nginx</td>
+<td><a class="mono" href="#r4-1-1-4">filter/INPUT #4</a> </td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="443">443</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">any source</span></td>
+<td>nginx</td>
+<td><a class="mono" href="#r4-1-1-5">filter/INPUT #5</a> </td>
+</tr></tbody>
+</table></div>
+<h3 class="block">Listening sockets</h3>
+<div class="card tablewrap"><table>
+<thead><tr><th class="sortable">Protocol</th><th class="sortable">Port</th><th class="sortable">Address</th><th class="sortable">Process</th><th class="sortable">Status</th></tr></thead>
+<tbody><tr>
+<td>tcp</td>
+<td data-sort="22">22</td>
+<td class="mono">0.0.0.0</td>
+<td>sshd</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">open to any source</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="631">631</td>
+<td class="mono">127.0.0.1</td>
+<td>cupsd</td>
+<td data-sort="8"><span class="scope sc-LOCALHOST">loopback only</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="80">80</td>
+<td class="mono">0.0.0.0</td>
+<td>nginx</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">open to any source</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="443">443</td>
+<td class="mono">0.0.0.0</td>
+<td>nginx</td>
+<td data-sort="0"><span class="scope sc-EXPOSED">open to any source</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="3306">3306</td>
+<td class="mono">0.0.0.0</td>
+<td>mysqld</td>
+<td data-sort="7"><span class="scope sc-FILTERED">filtered</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="22">22</td>
+<td class="mono">::</td>
+<td>sshd</td>
+<td data-sort="9"><span class="scope sc-NONE">not analyzed</span></td>
+</tr><tr>
+<td>tcp</td>
+<td data-sort="631">631</td>
+<td class="mono">::1</td>
+<td>cupsd</td>
+<td data-sort="8"><span class="scope sc-LOCALHOST">loopback only</span></td>
+</tr><tr>
+<td>udp</td>
+<td data-sort="68">68</td>
+<td class="mono">0.0.0.0</td>
+<td>dhclient</td>
+<td data-sort="7"><span class="scope sc-FILTERED">filtered</span></td>
+</tr><tr>
+<td>udp</td>
+<td data-sort="53">53</td>
+<td class="mono">127.0.0.53%lo</td>
+<td>systemd-resolve</td>
+<td data-sort="8"><span class="scope sc-LOCALHOST">loopback only</span></td>
+</tr></tbody>
+</table></div>
+</section>
+
+<section id="rules">
+<h2>Rules</h2>
+<div class="toolbar js-only">
+<input type="search" id="rule-search" placeholder="Filter rules, for example: --dport 22" aria-label="Filter rules">
+<button class="btn" type="button" data-toggle="details.chain" data-state="open">Expand all</button>
+<button class="btn" type="button" data-toggle="details.chain" data-state="closed">Collapse all</button>
+<span class="sub" id="rules-shown" aria-live="polite"></span>
+</div>
+<h3 class="block">IPv4 · <span class="mono">filter</span> <span class="sub">3 chains, 7 rules</span></h3>
+<div class="card">
+<details class="chain" id="ch4-1-1" open>
+<summary><b>INPUT</b><span class="sub">policy <span class="policy-DROP">DROP</span> · 7 rules</span><span class="badge">3 findings</span></summary>
+<ol class="rules"><li id="r4-1-1-1"><span class="n">1</span><code>-i lo <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-1-2"><span class="n">2</span><code>-m conntrack --ctstate ESTABLISHED,RELATED <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-1-3"><span class="n">3</span><code>-p tcp --dport 22 <span class="t-ACCEPT">-j ACCEPT</span></code><span><a class="badge" href="#f-1">F1</a></span></li>
+<li id="r4-1-1-4"><span class="n">4</span><code>-p tcp --dport 80 <span class="t-ACCEPT">-j ACCEPT</span></code><span><a class="badge" href="#f-2">F2</a></span></li>
+<li id="r4-1-1-5"><span class="n">5</span><code>-p tcp --dport 443 <span class="t-ACCEPT">-j ACCEPT</span></code><span><a class="badge" href="#f-3">F3</a></span></li>
+<li id="r4-1-1-6"><span class="n">6</span><code>-p icmp <span class="t-ACCEPT">-j ACCEPT</span></code><span></span></li>
+<li id="r4-1-1-7"><span class="n">7</span><code><span class="t-DROP">-j DROP</span></code><span></span></li>
+</ol>
+</details>
+<details class="chain" id="ch4-1-2">
+<summary><b>FORWARD</b><span class="sub">policy <span class="policy-DROP">DROP</span> · 0 rules</span></summary>
+<div class="none">No rules.</div>
+</details>
+<details class="chain" id="ch4-1-3">
+<summary><b>OUTPUT</b><span class="sub">policy <span class="policy-NONE">ACCEPT</span> · 0 rules</span></summary>
+<div class="none">No rules.</div>
+</details>
+</div>
+</section>
+
+
+<section id="baseline">
+<h2>Recommended baseline</h2>
+<p class="sub">A complete rule set to start from, made for this host. It is not what the report measures the loaded rules against. Read it before use: iptables-restore replaces the rules that are loaded. The same text comes from <code>iptables-analyzer --baseline</code>.</p>
+<div class="card file">
+<div class="filehead"><b>IPv4, for iptables-restore</b><button class="btn js-only inline" type="button" data-copy="baseline-4">Copy</button></div>
+<pre class="file" id="baseline-4"># Recommended IPv4 baseline generated by iptables-analyzer (iptables-restore format).
+# Default deny inbound and forwarded traffic; outbound traffic is allowed.
+# Apply with &#34;iptables-restore --noflush&#34;: it replaces INPUT and keeps every
+# other chain, including Docker&#39;s, intact.
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+-F INPUT
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A INPUT -m conntrack --ctstate INVALID -j DROP
+-A INPUT -s 127.0.0.0/8 ! -i lo -j DROP
+-A INPUT -p icmp -m icmp --icmp-type 8 -m limit --limit 10/sec --limit-burst 20 -j ACCEPT
+# Remote administration: new SSH connections are limited per source address.
+-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh4-22 -j DROP
+-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+# Other listening services found on this host. Uncomment only what must be
+# reachable, preferably with -s &lt;trusted-cidr&gt;:
+# -A INPUT -p tcp -m tcp --dport 80 -m conntrack --ctstate NEW -j ACCEPT   # nginx
+# -A INPUT -p tcp -m tcp --dport 443 -m conntrack --ctstate NEW -j ACCEPT   # nginx
+# -A INPUT -p tcp -m tcp --dport 3306 -m conntrack --ctstate NEW -j ACCEPT   # mysqld
+# -A INPUT -p udp -m udp --dport 68 -j ACCEPT   # dhclient
+COMMIT
+</pre>
+</div>
+<div class="card file">
+<div class="filehead"><b>IPv6, for ip6tables-restore</b><button class="btn js-only inline" type="button" data-copy="baseline-6">Copy</button></div>
+<pre class="file" id="baseline-6"># Recommended IPv6 baseline generated by iptables-analyzer (ip6tables-restore format).
+# Default deny inbound and forwarded traffic; outbound traffic is allowed.
+# Apply with &#34;ip6tables-restore --noflush&#34;: it replaces INPUT and keeps every
+# other chain, including Docker&#39;s, intact.
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+-F INPUT
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+# Neighbor discovery is untracked by conntrack and must be allowed explicitly;
+# a hop limit of 255 proves the sender is on-link.
+-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 134 -m hl --hl-eq 255 -m comment --comment &#34;router advertisement (SLAAC)&#34; -j ACCEPT
+-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 135 -m hl --hl-eq 255 -m comment --comment &#34;neighbor solicitation&#34; -j ACCEPT
+-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 136 -m hl --hl-eq 255 -m comment --comment &#34;neighbor advertisement&#34; -j ACCEPT
+-A INPUT -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 130 -m comment --comment &#34;multicast listener query&#34; -j ACCEPT
+-A INPUT -s fe80::/10 -d fe80::/10 -p udp -m udp --sport 547 --dport 546 -m comment --comment &#34;DHCPv6 client&#34; -j ACCEPT
+-A INPUT -m conntrack --ctstate INVALID -j DROP
+-A INPUT -s ::1/128 ! -i lo -j DROP
+-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 128 -m limit --limit 10/sec --limit-burst 20 -j ACCEPT
+# Remote administration: new SSH connections are limited per source address.
+-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh6-22 -j DROP
+-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+COMMIT
+</pre>
+</div>
+<ul class="notes"><li>SSH stays reachable on TCP port 22 (detected from the listening sshd).</li><li>Both families are always generated: IPv6 gets addresses automatically (SLAAC), so an unused stack must be closed too.</li><li>Keep a second SSH session open and apply with an automatic rollback, for example:</li><li>  printf &#39;#!/bin/sh\nexec iptables-restore --noflush /root/baseline.v4\n&#39; &gt; /root/apply.v4 &amp;&amp; chmod &#43;x /root/apply.v4 &amp;&amp; iptables-apply -t 60 -c /root/apply.v4</li><li>  printf &#39;#!/bin/sh\nexec ip6tables-restore --noflush /root/baseline.v6\n&#39; &gt; /root/apply.v6 &amp;&amp; chmod &#43;x /root/apply.v6 &amp;&amp; ip6tables-apply -t 60 -c /root/apply.v6</li><li>Persist the result with your distribution&#39;s mechanism (e.g. iptables-save &gt; /etc/iptables/rules.v4 with iptables-persistent).</li></ul>
+</section>
+
+
+<footer>
+Made by <a href="https://github.com/c0m4r/iptables-analyzer" rel="noopener noreferrer">iptables-analyzer</a> vdev at 2026-11-25 12:00. This page is one file and loads nothing from the network.
+</footer>
+</main>
+
+<script>(script)</script>
+</body>
+</html>

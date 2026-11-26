@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,16 +13,18 @@ import (
 	"github.com/c0m4r/iptables-analyzer/internal/models"
 )
 
-// FuzzAnalysis runs the whole command (parsing, analysis, recommendations,
-// baseline, scoring and rendering) on arbitrary rules and ss output. It must
-// not panic, and a --no-color report must not contain any character that a
-// terminal interprets: input text can only reach it escaped.
+// FuzzAnalysis runs the whole command (parsing, analysis, the report with its
+// fixes and its score, the baseline, and the text and HTML forms) on
+// arbitrary rules and ss output. It must not panic, and a --no-color report
+// must not contain any character that a terminal interprets: input text can
+// only reach it escaped. The markup of the HTML form has its own fuzz target
+// in internal/ui.
 func FuzzAnalysis(f *testing.F) {
 	ss, err := os.ReadFile(filepath.Join("..", "testdata", "services.txt"))
 	if err != nil {
 		f.Fatal(err)
 	}
-	for _, name := range []string{"basic.iptables-save", "docker.iptables-save", "docker29.iptables-save", "insecure.iptables-save"} {
+	for _, name := range []string{"basic.iptables-save", "docker.iptables-save", "docker29.iptables-save", "insecure.iptables-save", "ufw.iptables-save"} {
 		rules, err := os.ReadFile(filepath.Join("..", "testdata", name))
 		if err != nil {
 			f.Fatal(err)
@@ -36,17 +39,22 @@ func FuzzAnalysis(f *testing.F) {
 			return loader.Sources{IPv4: &loader.Source{Version: models.IPv4, Data: rules}}, nil
 		}
 		deps.readServices = func(string) (string, error) { return ssData, nil }
+		page := &memoryFile{}
+		deps.createFile = func(string) (io.WriteCloser, error) { return page, nil }
 		var out bytes.Buffer
 		command := newRootCommand(deps)
 		command.SetOut(&out)
 		command.SetErr(&bytes.Buffer{})
-		command.SetArgs([]string{"-4", "--no-color", "--verbose", "-f", "rules", "--services-file", "ss"})
+		command.SetArgs([]string{"-4", "--no-color", "--verbose", "--rules", "--html", "page", "-f", "rules", "--services-file", "ss"})
 		if err := command.Execute(); err != nil {
 			return // malformed input is rejected, which is fine
 		}
 		report := out.String()
-		if !utf8.ValidString(report) {
+		if !utf8.ValidString(report) || !utf8.Valid(page.Bytes()) {
 			t.Fatal("report is not valid UTF-8")
+		}
+		if !bytes.HasSuffix(page.Bytes(), []byte("</html>\n")) {
+			t.Fatal("the HTML report is not complete")
 		}
 		for _, r := range report {
 			if r != '\n' && r != '\t' && (unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029') {

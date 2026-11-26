@@ -1,0 +1,746 @@
+{
+  "schema_version": 2,
+  "tool": {
+    "name": "iptables-analyzer",
+    "version": "dev",
+    "url": "https://github.com/c0m4r/iptables-analyzer"
+  },
+  "generated": "2026-11-25T12:00:00Z",
+  "mode": "file",
+  "inputs": [
+    "../testdata/docker29.iptables-save",
+    "../testdata/docker29.ip6tables-save",
+    "../testdata/services.txt"
+  ],
+  "families": [
+    {
+      "version": 4,
+      "status": "ANALYZED",
+      "tables": 5,
+      "chains": 24,
+      "rules": 55,
+      "policies": {
+        "FORWARD": "DROP",
+        "INPUT": "ACCEPT",
+        "OUTPUT": "ACCEPT"
+      },
+      "managers": [
+        "docker"
+      ]
+    },
+    {
+      "version": 6,
+      "status": "ANALYZED",
+      "tables": 5,
+      "chains": 24,
+      "rules": 15,
+      "policies": {
+        "FORWARD": "DROP",
+        "INPUT": "ACCEPT",
+        "OUTPUT": "ACCEPT"
+      },
+      "managers": [
+        "docker"
+      ]
+    }
+  ],
+  "score": {
+    "total": 56,
+    "grade": "F",
+    "complete": true,
+    "cap": "grade limited to F: IPv4 INPUT accepts every new connection",
+    "categories": [
+      {
+        "key": "policy",
+        "label": "Policy",
+        "max": 25,
+        "lost": 15
+      },
+      {
+        "key": "exposure",
+        "label": "Exposure",
+        "max": 25,
+        "lost": 25
+      },
+      {
+        "key": "paths",
+        "label": "Shadows and bypasses",
+        "max": 25,
+        "lost": 4
+      },
+      {
+        "key": "hygiene",
+        "label": "Hygiene",
+        "max": 15,
+        "lost": 0
+      },
+      {
+        "key": "ipv6",
+        "label": "IPv6",
+        "max": 10,
+        "lost": 0
+      }
+    ]
+  },
+  "counts": {
+    "critical": 0,
+    "high": 3,
+    "medium": 2,
+    "low": 0,
+    "info": 1
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "code": "policy_accept",
+      "severity": "HIGH",
+      "certainty": "DEFINITE",
+      "category": "policy",
+      "families": [
+        4,
+        6
+      ],
+      "title": "INPUT accepts new connections to any port",
+      "detail": "No rule refuses them, and the policy of filter/INPUT is ACCEPT. Every port that no rule names is open: a service that listens on one, now or later, is reachable at once.",
+      "fix": {
+        "summary": "Add rules for the traffic that is needed and test them, with a way back, then set the policy to DROP. The recommended baseline (--baseline) is a complete rule set to start from.",
+        "steps": [
+          {
+            "text": "Deny by default (IPv4)",
+            "command": "iptables -P INPUT DROP"
+          },
+          {
+            "text": "Deny by default (IPv6)",
+            "command": "ip6tables -P INPUT DROP"
+          }
+        ]
+      },
+      "points": 15,
+      "gain": 15,
+      "grade_after": "C"
+    },
+    {
+      "id": "F2",
+      "code": "exposed_service",
+      "severity": "HIGH",
+      "certainty": "DEFINITE",
+      "category": "exposure",
+      "families": [
+        4,
+        6
+      ],
+      "title": "5 services are open to any source because INPUT accepts by default",
+      "detail": "No rule names their ports: sshd on 22/tcp; nginx on 80/tcp (IPv4 only); nginx on 443/tcp (IPv4 only); mysqld on 3306/tcp (IPv4 only); dhclient on 68/udp (IPv4 only). Close the default first; then accept each port that must stay reachable, for its clients only.",
+      "ports": [
+        "22/tcp",
+        "80/tcp",
+        "443/tcp",
+        "3306/tcp",
+        "68/udp"
+      ],
+      "points": 14,
+      "gain": 9
+    },
+    {
+      "id": "F3",
+      "code": "docker_direct_route",
+      "severity": "HIGH",
+      "certainty": "POSSIBLE",
+      "category": "paths",
+      "families": [
+        4
+      ],
+      "title": "All ports of the containers on bridge br-982052ef0162 are reachable by direct routing",
+      "detail": "Every port of containers on bridge br-982052ef0162 (gateway mode nat-unprotected) is forwarded to hosts that route 172.29.0.2 via this host (for example on the same L2 segment), including ports that were never published; neither INPUT nor published-port rules apply.",
+      "fix": {
+        "summary": "Use the default gateway mode \"nat\" for this network, or drop new non-DNAT connections into the bridge in DOCKER-USER.",
+        "steps": [
+          {
+            "text": "Drop packets for the containers that do not arrive from their bridge (published ports keep working)",
+            "command": "iptables -t raw -I PREROUTING -d 172.29.0.0/24 ! -i br-982052ef0162 -j DROP"
+          },
+          {
+            "text": "Or refuse new connections into the bridge that no published port translated",
+            "command": "iptables -I DOCKER-USER -o br-982052ef0162 ! -i br-982052ef0162 -m conntrack --ctstate NEW -m conntrack ! --ctstate DNAT -j DROP"
+          }
+        ]
+      },
+      "points": 3,
+      "gain": 3
+    },
+    {
+      "id": "F4",
+      "code": "docker_published_port",
+      "severity": "MEDIUM",
+      "certainty": "DEFINITE",
+      "category": "exposure",
+      "families": [
+        4,
+        6
+      ],
+      "title": "6 Docker published ports are open to any source",
+      "detail": "Docker translates these ports to containers, and filter/FORWARD accepts them from any source; the rules of filter/INPUT do not apply: IPv4 8080/tcp to 172.17.0.2:80; IPv4 8082/tcp to 172.17.0.4:80; IPv4 9053/udp to 172.17.0.5:53; IPv4 9000-9002/tcp to 172.17.0.6:9000-9002; IPv4 8091/tcp to 172.29.0.2:80; IPv4 8443/tcp to 172.30.0.2:443; IPv6 8443/tcp to [fd00:dead:beef::2]:443.",
+      "ports": [
+        "8080/tcp",
+        "8082/tcp",
+        "9053/udp",
+        "9000-9002/tcp",
+        "8091/tcp",
+        "8443/tcp"
+      ],
+      "rules": [
+        {
+          "family": 4,
+          "table": "nat",
+          "chain": "DOCKER",
+          "num": 1,
+          "spec": "! -i docker0 -p tcp -m tcp --dport 8080 -j DNAT --to-destination 172.17.0.2:80",
+          "role": "translates",
+          "path": [
+            "PREROUTING #1",
+            "DOCKER #1"
+          ]
+        },
+        {
+          "family": 4,
+          "table": "nat",
+          "chain": "DOCKER",
+          "num": 3,
+          "spec": "-d 192.168.88.217/32 ! -i docker0 -p tcp -m tcp --dport 8082 -j DNAT --to-destination 172.17.0.4:80",
+          "role": "translates",
+          "path": [
+            "PREROUTING #1",
+            "DOCKER #3"
+          ]
+        },
+        {
+          "family": 4,
+          "table": "nat",
+          "chain": "DOCKER",
+          "num": 4,
+          "spec": "! -i docker0 -p udp -m udp --dport 9053 -j DNAT --to-destination 172.17.0.5:53",
+          "role": "translates",
+          "path": [
+            "PREROUTING #1",
+            "DOCKER #4"
+          ]
+        },
+        {
+          "family": 4,
+          "table": "nat",
+          "chain": "DOCKER",
+          "num": 5,
+          "spec": "! -i docker0 -p tcp -m tcp --dport 9000 -j DNAT --to-destination 172.17.0.6:9000",
+          "role": "translates",
+          "path": [
+            "PREROUTING #1",
+            "DOCKER #5"
+          ]
+        },
+        {
+          "family": 4,
+          "table": "nat",
+          "chain": "DOCKER",
+          "num": 9,
+          "spec": "! -i br-982052ef0162 -p tcp -m tcp --dport 8091 -j DNAT --to-destination 172.29.0.2:80",
+          "role": "translates",
+          "path": [
+            "PREROUTING #1",
+            "DOCKER #9"
+          ]
+        },
+        {
+          "family": 4,
+          "table": "nat",
+          "chain": "DOCKER",
+          "num": 8,
+          "spec": "! -i br-7a3442937ee6 -p tcp -m tcp --dport 8443 -j DNAT --to-destination 172.30.0.2:443",
+          "role": "translates",
+          "path": [
+            "PREROUTING #1",
+            "DOCKER #8"
+          ]
+        },
+        {
+          "family": 6,
+          "table": "nat",
+          "chain": "DOCKER",
+          "num": 1,
+          "spec": "! -s fe80::/10 ! -i br-7a3442937ee6 -p tcp -m tcp --dport 8443 -j DNAT --to-destination [fd00:dead:beef::2]:443",
+          "role": "translates",
+          "path": [
+            "PREROUTING #1",
+            "DOCKER #1"
+          ]
+        }
+      ],
+      "fix": {
+        "summary": "Docker translates published ports in nat/PREROUTING, so they are forwarded and never reach filter/INPUT (this includes INPUT rules of ufw or firewalld). Restrict them in DOCKER-USER, which runs before Docker's own rules and which Docker never flushes. Packets are already translated there: match the published port with --ctorigdstport, not --dport. A service that only local clients need can be published on loopback instead (docker run -p 127.0.0.1:8080:\u003ccontainer-port\u003e).",
+        "steps": [
+          {
+            "text": "Allow the trusted sources of port 8080 first",
+            "command": "iptables -I DOCKER-USER 1 -p tcp -m conntrack --ctorigdstport 8080 --ctdir ORIGINAL -s \u003ctrusted-cidr\u003e -j RETURN"
+          },
+          {
+            "text": "Then drop the rest of that port",
+            "command": "iptables -I DOCKER-USER 2 -p tcp -m conntrack --ctorigdstport 8080 --ctdir ORIGINAL -j DROP"
+          }
+        ]
+      },
+      "points": 16,
+      "gain": 11
+    },
+    {
+      "id": "F5",
+      "code": "docker_direct_route",
+      "severity": "MEDIUM",
+      "certainty": "POSSIBLE",
+      "category": "paths",
+      "families": [
+        4
+      ],
+      "title": "Container port 172.31.0.2:80 is reachable by direct routing",
+      "detail": "Container port 172.31.0.2:80/tcp on bridge br-84b7b034b576 (gateway mode routed) is forwarded without NAT to hosts that route 172.31.0.2 via this host (for example on the same L2 segment); host INPUT rules do not apply to it.",
+      "fix": {
+        "summary": "Restrict the container port in DOCKER-USER (match -d 172.31.0.2 --dport 80), or use gateway mode nat.",
+        "steps": [
+          {
+            "text": "Drop the container port for all but the trusted sources",
+            "command": "iptables -I DOCKER-USER -o br-84b7b034b576 -d 172.31.0.2 -p tcp --dport 80 ! -s \u003ctrusted-cidr\u003e -j DROP"
+          }
+        ]
+      },
+      "points": 1,
+      "gain": 1
+    },
+    {
+      "id": "F6",
+      "code": "policy_accept",
+      "severity": "INFO",
+      "certainty": "DEFINITE",
+      "category": "policy",
+      "families": [
+        4,
+        6
+      ],
+      "title": "OUTPUT default policy is ACCEPT",
+      "detail": "All outbound traffic is allowed. This is the usual setup; an OUTPUT allowlist can limit what a compromised service is able to reach.",
+      "points": 0,
+      "gain": 0
+    }
+  ],
+  "open_ports": [
+    {
+      "families": [
+        4,
+        6
+      ],
+      "protocol": "tcp",
+      "first": 22,
+      "last": 22,
+      "scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "listeners": [
+        "sshd"
+      ]
+    },
+    {
+      "families": [
+        4
+      ],
+      "protocol": "tcp",
+      "first": 80,
+      "last": 80,
+      "scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "listeners": [
+        "nginx"
+      ]
+    },
+    {
+      "families": [
+        4
+      ],
+      "protocol": "tcp",
+      "first": 443,
+      "last": 443,
+      "scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "listeners": [
+        "nginx"
+      ]
+    },
+    {
+      "families": [
+        4
+      ],
+      "protocol": "tcp",
+      "first": 3306,
+      "last": 3306,
+      "scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "listeners": [
+        "mysqld"
+      ]
+    },
+    {
+      "families": [
+        4,
+        6
+      ],
+      "protocol": "tcp",
+      "first": 0,
+      "last": 0,
+      "scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "default": true
+    },
+    {
+      "families": [
+        4
+      ],
+      "protocol": "udp",
+      "first": 68,
+      "last": 68,
+      "scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "listeners": [
+        "dhclient"
+      ]
+    },
+    {
+      "families": [
+        4,
+        6
+      ],
+      "protocol": "udp",
+      "first": 0,
+      "last": 0,
+      "scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "default": true
+    }
+  ],
+  "forwarded_ports": [
+    {
+      "family": 4,
+      "protocol": "tcp",
+      "host_port": 8080,
+      "host_port_end": 8080,
+      "dest_addr": "172.17.0.2",
+      "dest_port": 80,
+      "dest_port_end": 80,
+      "bridge": "docker0",
+      "docker": true,
+      "forward_scope": "EXPOSED",
+      "input_scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "rule": {
+        "family": 4,
+        "table": "nat",
+        "chain": "DOCKER",
+        "num": 1,
+        "spec": "! -i docker0 -p tcp -m tcp --dport 8080 -j DNAT --to-destination 172.17.0.2:80",
+        "role": "translates",
+        "path": [
+          "PREROUTING #1",
+          "DOCKER #1"
+        ]
+      }
+    },
+    {
+      "family": 4,
+      "protocol": "tcp",
+      "host_addr": "192.168.88.217",
+      "host_port": 8082,
+      "host_port_end": 8082,
+      "dest_addr": "172.17.0.4",
+      "dest_port": 80,
+      "dest_port_end": 80,
+      "bridge": "docker0",
+      "docker": true,
+      "forward_scope": "EXPOSED",
+      "input_scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "rule": {
+        "family": 4,
+        "table": "nat",
+        "chain": "DOCKER",
+        "num": 3,
+        "spec": "-d 192.168.88.217/32 ! -i docker0 -p tcp -m tcp --dport 8082 -j DNAT --to-destination 172.17.0.4:80",
+        "role": "translates",
+        "path": [
+          "PREROUTING #1",
+          "DOCKER #3"
+        ]
+      }
+    },
+    {
+      "family": 4,
+      "protocol": "udp",
+      "host_port": 9053,
+      "host_port_end": 9053,
+      "dest_addr": "172.17.0.5",
+      "dest_port": 53,
+      "dest_port_end": 53,
+      "bridge": "docker0",
+      "docker": true,
+      "forward_scope": "EXPOSED",
+      "input_scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "rule": {
+        "family": 4,
+        "table": "nat",
+        "chain": "DOCKER",
+        "num": 4,
+        "spec": "! -i docker0 -p udp -m udp --dport 9053 -j DNAT --to-destination 172.17.0.5:53",
+        "role": "translates",
+        "path": [
+          "PREROUTING #1",
+          "DOCKER #4"
+        ]
+      }
+    },
+    {
+      "family": 4,
+      "protocol": "tcp",
+      "host_port": 9000,
+      "host_port_end": 9002,
+      "dest_addr": "172.17.0.6",
+      "dest_port": 9000,
+      "dest_port_end": 9002,
+      "bridge": "docker0",
+      "docker": true,
+      "forward_scope": "EXPOSED",
+      "input_scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "rule": {
+        "family": 4,
+        "table": "nat",
+        "chain": "DOCKER",
+        "num": 5,
+        "spec": "! -i docker0 -p tcp -m tcp --dport 9000 -j DNAT --to-destination 172.17.0.6:9000",
+        "role": "translates",
+        "path": [
+          "PREROUTING #1",
+          "DOCKER #5"
+        ]
+      }
+    },
+    {
+      "family": 4,
+      "protocol": "tcp",
+      "host_port": 8443,
+      "host_port_end": 8443,
+      "dest_addr": "172.30.0.2",
+      "dest_port": 443,
+      "dest_port_end": 443,
+      "bridge": "br-7a3442937ee6",
+      "docker": true,
+      "forward_scope": "EXPOSED",
+      "input_scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "rule": {
+        "family": 4,
+        "table": "nat",
+        "chain": "DOCKER",
+        "num": 8,
+        "spec": "! -i br-7a3442937ee6 -p tcp -m tcp --dport 8443 -j DNAT --to-destination 172.30.0.2:443",
+        "role": "translates",
+        "path": [
+          "PREROUTING #1",
+          "DOCKER #8"
+        ]
+      }
+    },
+    {
+      "family": 4,
+      "protocol": "tcp",
+      "host_port": 8091,
+      "host_port_end": 8091,
+      "dest_addr": "172.29.0.2",
+      "dest_port": 80,
+      "dest_port_end": 80,
+      "bridge": "br-982052ef0162",
+      "docker": true,
+      "forward_scope": "EXPOSED",
+      "input_scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "rule": {
+        "family": 4,
+        "table": "nat",
+        "chain": "DOCKER",
+        "num": 9,
+        "spec": "! -i br-982052ef0162 -p tcp -m tcp --dport 8091 -j DNAT --to-destination 172.29.0.2:80",
+        "role": "translates",
+        "path": [
+          "PREROUTING #1",
+          "DOCKER #9"
+        ]
+      }
+    },
+    {
+      "family": 6,
+      "protocol": "tcp",
+      "host_port": 8443,
+      "host_port_end": 8443,
+      "dest_addr": "fd00:dead:beef::2",
+      "dest_port": 443,
+      "dest_port_end": 443,
+      "bridge": "br-7a3442937ee6",
+      "docker": true,
+      "forward_scope": "EXPOSED",
+      "input_scope": "EXPOSED",
+      "certainty": "DEFINITE",
+      "rule": {
+        "family": 6,
+        "table": "nat",
+        "chain": "DOCKER",
+        "num": 1,
+        "spec": "! -s fe80::/10 ! -i br-7a3442937ee6 -p tcp -m tcp --dport 8443 -j DNAT --to-destination [fd00:dead:beef::2]:443",
+        "role": "translates",
+        "path": [
+          "PREROUTING #1",
+          "DOCKER #1"
+        ]
+      }
+    }
+  ],
+  "services_known": true,
+  "services": [
+    {
+      "protocol": "tcp",
+      "address": "0.0.0.0",
+      "port": 22,
+      "process": "sshd",
+      "pid": 1234,
+      "processes": [
+        "sshd"
+      ],
+      "socket_family": "ipv4",
+      "status": "REACHABLE",
+      "scope": "EXPOSED"
+    },
+    {
+      "protocol": "tcp",
+      "address": "127.0.0.1",
+      "port": 631,
+      "process": "cupsd",
+      "pid": 567,
+      "processes": [
+        "cupsd"
+      ],
+      "socket_family": "ipv4",
+      "status": "LOCALHOST"
+    },
+    {
+      "protocol": "tcp",
+      "address": "0.0.0.0",
+      "port": 80,
+      "process": "nginx",
+      "pid": 890,
+      "processes": [
+        "nginx"
+      ],
+      "socket_family": "ipv4",
+      "status": "REACHABLE",
+      "scope": "EXPOSED"
+    },
+    {
+      "protocol": "tcp",
+      "address": "0.0.0.0",
+      "port": 443,
+      "process": "nginx",
+      "pid": 890,
+      "processes": [
+        "nginx"
+      ],
+      "socket_family": "ipv4",
+      "status": "REACHABLE",
+      "scope": "EXPOSED"
+    },
+    {
+      "protocol": "tcp",
+      "address": "0.0.0.0",
+      "port": 3306,
+      "process": "mysqld",
+      "pid": 1100,
+      "processes": [
+        "mysqld"
+      ],
+      "socket_family": "ipv4",
+      "status": "REACHABLE",
+      "scope": "EXPOSED"
+    },
+    {
+      "protocol": "tcp",
+      "address": "::",
+      "port": 22,
+      "process": "sshd",
+      "pid": 1234,
+      "processes": [
+        "sshd"
+      ],
+      "socket_family": "ipv6",
+      "status": "REACHABLE",
+      "scope": "EXPOSED"
+    },
+    {
+      "protocol": "tcp",
+      "address": "::1",
+      "port": 631,
+      "process": "cupsd",
+      "pid": 567,
+      "processes": [
+        "cupsd"
+      ],
+      "socket_family": "ipv6",
+      "status": "LOCALHOST"
+    },
+    {
+      "protocol": "udp",
+      "address": "0.0.0.0",
+      "port": 68,
+      "process": "dhclient",
+      "pid": 450,
+      "processes": [
+        "dhclient"
+      ],
+      "socket_family": "ipv4",
+      "status": "REACHABLE",
+      "scope": "EXPOSED"
+    },
+    {
+      "protocol": "udp",
+      "address": "127.0.0.53",
+      "device": "lo",
+      "port": 53,
+      "process": "systemd-resolve",
+      "pid": 400,
+      "processes": [
+        "systemd-resolve"
+      ],
+      "socket_family": "ipv4",
+      "status": "LOCALHOST"
+    }
+  ],
+  "notes": [],
+  "sandbox": {
+    "mode": "auto",
+    "landlock": false,
+    "privileges_dropped": false
+  },
+  "baseline": {
+    "ipv4": "# Recommended IPv4 baseline generated by iptables-analyzer (iptables-restore format).\n# Default deny inbound and forwarded traffic; outbound traffic is allowed.\n# Apply with \"iptables-restore --noflush\": it replaces INPUT and DOCKER-USER and keeps every\n# other chain, including Docker's, intact.\n*filter\n:INPUT DROP [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\n:DOCKER-USER - [0:0]\n-F INPUT\n-A INPUT -i lo -j ACCEPT\n-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n-A INPUT -m conntrack --ctstate INVALID -j DROP\n-A INPUT -s 127.0.0.0/8 ! -i lo -j DROP\n-A INPUT -p icmp -m icmp --icmp-type 8 -m limit --limit 10/sec --limit-burst 20 -j ACCEPT\n# Remote administration: new SSH connections are limited per source address.\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh4-22 -j DROP\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT\n# Other listening services found on this host. Uncomment only what must be\n# reachable, preferably with -s \u003ctrusted-cidr\u003e:\n# -A INPUT -p tcp -m tcp --dport 80 -m conntrack --ctstate NEW -j ACCEPT   # nginx\n# -A INPUT -p tcp -m tcp --dport 443 -m conntrack --ctstate NEW -j ACCEPT   # nginx\n# -A INPUT -p tcp -m tcp --dport 3306 -m conntrack --ctstate NEW -j ACCEPT   # mysqld\n# -A INPUT -p udp -m udp --dport 68 -j ACCEPT   # dhclient\n# Docker: published ports never reach INPUT. Restrict them here; packets are\n# already DNATed, so match the published port with conntrack, not --dport.\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8080 --ctdir ORIGINAL -s \u003ctrusted-cidr\u003e -j RETURN   # published -\u003e 172.17.0.2:80\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8080 --ctdir ORIGINAL -j DROP\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdst 192.168.88.217 --ctorigdstport 8082 --ctdir ORIGINAL -s \u003ctrusted-cidr\u003e -j RETURN   # published -\u003e 172.17.0.4:80\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdst 192.168.88.217 --ctorigdstport 8082 --ctdir ORIGINAL -j DROP\n# -A DOCKER-USER -p udp -m conntrack --ctorigdstport 9053 --ctdir ORIGINAL -s \u003ctrusted-cidr\u003e -j RETURN   # published -\u003e 172.17.0.5:53\n# -A DOCKER-USER -p udp -m conntrack --ctorigdstport 9053 --ctdir ORIGINAL -j DROP\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 9000:9002 --ctdir ORIGINAL -s \u003ctrusted-cidr\u003e -j RETURN   # published -\u003e 172.17.0.6:9000-9002\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 9000:9002 --ctdir ORIGINAL -j DROP\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8443 --ctdir ORIGINAL -s \u003ctrusted-cidr\u003e -j RETURN   # published -\u003e 172.30.0.2:443\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8443 --ctdir ORIGINAL -j DROP\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8091 --ctdir ORIGINAL -s \u003ctrusted-cidr\u003e -j RETURN   # published -\u003e 172.29.0.2:80\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8091 --ctdir ORIGINAL -j DROP\n-A DOCKER-USER -j RETURN\nCOMMIT\n",
+    "ipv6": "# Recommended IPv6 baseline generated by iptables-analyzer (ip6tables-restore format).\n# Default deny inbound and forwarded traffic; outbound traffic is allowed.\n# Apply with \"ip6tables-restore --noflush\": it replaces INPUT and DOCKER-USER and keeps every\n# other chain, including Docker's, intact.\n*filter\n:INPUT DROP [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\n:DOCKER-USER - [0:0]\n-F INPUT\n-A INPUT -i lo -j ACCEPT\n-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n# Neighbor discovery is untracked by conntrack and must be allowed explicitly;\n# a hop limit of 255 proves the sender is on-link.\n-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 134 -m hl --hl-eq 255 -m comment --comment \"router advertisement (SLAAC)\" -j ACCEPT\n-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 135 -m hl --hl-eq 255 -m comment --comment \"neighbor solicitation\" -j ACCEPT\n-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 136 -m hl --hl-eq 255 -m comment --comment \"neighbor advertisement\" -j ACCEPT\n-A INPUT -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 130 -m comment --comment \"multicast listener query\" -j ACCEPT\n-A INPUT -s fe80::/10 -d fe80::/10 -p udp -m udp --sport 547 --dport 546 -m comment --comment \"DHCPv6 client\" -j ACCEPT\n-A INPUT -m conntrack --ctstate INVALID -j DROP\n-A INPUT -s ::1/128 ! -i lo -j DROP\n-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 128 -m limit --limit 10/sec --limit-burst 20 -j ACCEPT\n# Remote administration: new SSH connections are limited per source address.\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m hashlimit --hashlimit-above 10/min --hashlimit-burst 20 --hashlimit-mode srcip --hashlimit-name ssh6-22 -j DROP\n-A INPUT -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT\n# Docker: published ports never reach INPUT. Restrict them here; packets are\n# already DNATed, so match the published port with conntrack, not --dport.\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8443 --ctdir ORIGINAL -s \u003ctrusted-cidr\u003e -j RETURN   # published -\u003e [fd00:dead:beef::2]:443\n# -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 8443 --ctdir ORIGINAL -j DROP\n-A DOCKER-USER -j RETURN\nCOMMIT\n",
+    "notes": [
+      "SSH stays reachable on TCP port 22 (detected from the listening sshd).",
+      "Both families are always generated: IPv6 gets addresses automatically (SLAAC), so an unused stack must be closed too.",
+      "Keep a second SSH session open and apply with an automatic rollback, for example:",
+      "  printf '#!/bin/sh\\nexec iptables-restore --noflush /root/baseline.v4\\n' \u003e /root/apply.v4 \u0026\u0026 chmod +x /root/apply.v4 \u0026\u0026 iptables-apply -t 60 -c /root/apply.v4",
+      "  printf '#!/bin/sh\\nexec ip6tables-restore --noflush /root/baseline.v6\\n' \u003e /root/apply.v6 \u0026\u0026 chmod +x /root/apply.v6 \u0026\u0026 ip6tables-apply -t 60 -c /root/apply.v6",
+      "Persist the result with your distribution's mechanism (e.g. iptables-save \u003e /etc/iptables/rules.v4 with iptables-persistent).",
+      "Docker hosts: always use --noflush. A full restore deletes Docker's chains and disconnects all containers until dockerd restarts."
+    ]
+  }
+}

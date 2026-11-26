@@ -8,9 +8,38 @@
 
 A command-line tool that examines iptables and ip6tables rules and finds security problems.
 
-<img width="721" height="457" alt="obraz" src="https://github.com/user-attachments/assets/d6ac5cf7-134a-43e5-be2d-29c50c4484a7" />
-
 </div>
+
+```text
+$ iptables-analyzer rules.v4 ss.txt
+
+iptables-analyzer v0.8.0 · file analysis · 2026-11-25 12:00
+inputs: rules.v4, ss.txt
+IPv4: 7 rules in 3 chains · INPUT DROP · FORWARD DROP · OUTPUT ACCEPT
+IPv6: not supplied
+
+  Grade A  93/100    1 high · 2 low · 1 info
+
+  Policy                ▰▰▰▰▰▰▰▰▰▰ 25/25    Hygiene               ▰▰▰▰▰▰▰▰▰▰ 15/15
+  Exposure              ▰▰▰▰▰▰▰▱▱▱ 18/25    IPv6                  ▰▰▰▰▰▰▰▰▰▰ 10/10
+  Shadows and bypasses  ▰▰▰▰▰▰▰▰▰▰ 25/25
+
+  Findings
+
+  HIGH     F1   sshd is open to any source on 22/tcp                                    -5
+                IPv4: accepted by filter/INPUT rule #3.
+                filter/INPUT #3:  -p tcp --dport 22 -j ACCEPT
+                fix  If the clients are known, accept only their addresses. ...
+                     Replace the rule with one for the known clients:
+                       iptables -R INPUT 3 -s <trusted-cidr> -p tcp --dport 22 -j ACCEPT
+  ...
+
+  Open to any source
+    tcp  22 sshd · 80 nginx · 443 nginx
+
+  Not shown: 7 rules (--rules) · 1 info finding, 9 listening sockets (-v) · recommended baseline (--baseline)
+  Interactive report: --html FILE · machine-readable: --json
+```
 
 ## What the tool does
 
@@ -26,8 +55,10 @@ The tool reads iptables and ip6tables rules and finds these problems:
 - Containers that other hosts can reach by direct routing.
 - Dropped replies, dropped loopback traffic, and blocked IPv6 neighbor discovery.
 
-The tool gives a security score from 0 to 100 and a grade from A to F.
-It also gives recommendations and a recommended baseline firewall for IPv4 and IPv6.
+The report starts with a security score from 0 to 100 and a grade from A to F.
+Each finding names the rules that cause it and says how to fix it, with commands.
+The tool writes the report for the terminal, as an interactive HTML page, or as JSON.
+It can also write a recommended baseline firewall for IPv4 and IPv6.
 
 The tool does not change the firewall.
 
@@ -86,44 +117,67 @@ sudo iptables-analyzer
 
 ### Examine saved rules
 
-1. Save the rules:
+1. Save the rules and the list of listening sockets on the host that you want to examine:
 
    ```bash
    sudo iptables-save > rules.v4
    sudo ip6tables-save > rules.v6
+   sudo ss -tulnp > ss.txt
    ```
 
-2. Save the list of listening services:
+2. Examine the files on any host:
 
    ```bash
-   sudo ss -tulnp > services.txt
+   iptables-analyzer rules.v4 rules.v6 ss.txt
    ```
 
-3. Examine the files:
+The tool finds out what each file holds. All files are optional, but it needs the rules
+of one address family:
 
-   ```bash
-   iptables-analyzer -f rules.v4 --file6 rules.v6 --services-file services.txt
-   ```
+- Without the IPv6 rules, the tool examines only IPv4, and the report says so.
+- Without the `ss` output, the tool judges each open port as if a service uses it.
+- An empty rules file means that no rules are loaded: all traffic is accepted.
 
-Without a services file, the tool cannot examine the service exposure.
-The grade is then `INCOMPLETE`. The report still shows the ports that the rules open.
+### Get an interactive report
 
-Without `--file6`, the tool examines only IPv4, and the report says so.
-An empty rules file means that no rules are loaded: all traffic is accepted.
+```bash
+sudo iptables-analyzer --html report.html
+```
+
+The file is one HTML page that loads nothing from the network.
+You can filter the findings, go from a finding to its rules, and copy the commands of a fix.
+The page also holds the rules and the recommended baseline.
+
+### Use the result in a script
+
+```bash
+# Exit status 2 when a finding is high or critical
+iptables-analyzer rules.v4 rules.v6 --quiet --fail-on high
+
+# Exit status 2 when the grade is worse than B
+sudo iptables-analyzer --quiet --min-grade B
+```
 
 ### Options
 
 | Option | Function |
 | --- | --- |
+| `FILE...` | Read saved `iptables-save`, `ip6tables-save` and `ss` output |
 | `-f`, `--file FILE` | Read the IPv4 rules from FILE |
 | `--file6 FILE` | Read the IPv6 rules from FILE |
-| `--services-file FILE` | Read the listening services from FILE (`ss` output) |
+| `--services-file FILE` | Read the listening sockets from FILE (`ss` output) |
 | `-4`, `-6` | Examine only IPv4 or only IPv6 |
-| `--json` | Write the result as JSON |
-| `-s`, `--score-only` | Show only the score |
-| `-v`, `--verbose` | Show all rules and the raw rule text |
-| `--no-color` | Do not use colors |
+| `--public LIST` | Ports that are open to all sources on purpose, for example `tcp/80,tcp/443`: no deduction |
+| `--html FILE` | Also write an interactive HTML report to FILE |
+| `--json` | Write the report as JSON |
+| `--rules` | Also show the rules of each chain |
+| `-v`, `--verbose` | Also show notes, the listening sockets and the sandbox status |
+| `-q`, `--quiet` | Show one line: the score, the grade and the number of findings |
+| `-s`, `--score-only` | Show only the score and the grade |
+| `--fail-on SEVERITY` | Exit with status 2 when a finding has this severity or a higher one |
+| `--min-grade GRADE` | Exit with status 2 when the grade is worse than GRADE |
 | `--baseline[=4\|6\|all]` | Write only the recommended baseline, in iptables-restore format |
+| `--no-color` | Do not use colors |
 | `--sandbox=auto\|strict\|off` | Set the sandbox mode (default: `auto`) |
 
 ## Security
@@ -136,7 +190,9 @@ The tool has these protections:
 - It starts only root-owned system tools from trusted directories, with a minimal environment.
 - It shows control characters from the input as visible text.
   Terminal escape sequences in the input have no effect.
-- It puts quotes around all values from the rules in the recommended commands.
+- It puts quotes around all values from the rules in the commands of a fix.
+- It writes text from the input into the HTML report only as text. The page has a content
+  security policy that permits no network access and no script but its own.
 
 Landlock is available in Linux 5.13 and later.
 To stop when the full sandbox is not available, use `--sandbox=strict`.
@@ -144,6 +200,7 @@ To stop when the full sandbox is not available, use `--sandbox=strict`.
 ## Documentation
 
 - [docs/usage.md](docs/usage.md): all modes, the report, the baseline and examples.
+- [docs/json.md](docs/json.md): the fields of the JSON report.
 - [docs/how-it-works.md](docs/how-it-works.md): the analysis method and its limits.
 - [docs/security.md](docs/security.md): the sandbox and the other protections.
 - [docs/supply-chain.md](docs/supply-chain.md): the dependency cooldown, the CI checks and the release verification.
@@ -153,6 +210,6 @@ To stop when the full sandbox is not available, use `--sandbox=strict`.
 
 ## Caution
 
-The recommendations can change the access to the system.
+The commands of a fix and the baseline change the access to the system.
 Test all changes before you use them on a production system.
 An incorrect firewall change can lock you out of the system.

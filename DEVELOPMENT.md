@@ -9,15 +9,16 @@ make check        # Run vet, fmt check, tests
 make test         # Run all unit tests
 make test-race    # Run all tests with race detector (needs cgo)
 make test-sandbox # Run the Landlock enforcement tests (skipped without Landlock)
-make fuzz         # Fuzz the parsers and the whole pipeline (FUZZTIME=30s)
+make fuzz         # Fuzz the parsers, the whole pipeline and the HTML report (FUZZTIME=30s)
+make update-golden # Rewrite the golden files of the report formats
 make check-deps   # go mod verify, go mod tidy -diff, dependency cooldown
 
 # View help
 ./iptables-analyzer --help
 
 # Test with fixtures
-./iptables-analyzer -f testdata/docker.iptables-save
-./iptables-analyzer -f testdata/insecure.iptables-save
+./iptables-analyzer testdata/docker.iptables-save
+./iptables-analyzer testdata/ufw.iptables-save testdata/ufw-services.txt --html /tmp/report.html
 ```
 
 ## Project Structure
@@ -44,7 +45,9 @@ iptables-analyzer/
 │   └── man1/
 │       └── iptables-analyzer.1     # Manpage
 ├── cmd/
-│   └── root.go              # CLI setup with cobra
+│   ├── root.go              # CLI setup with cobra, order of the steps, exit status
+│   ├── golden_test.go       # The reports of the fixtures against testdata/golden
+│   └── testdata/golden/     # Expected text, JSON and HTML reports
 ├── internal/
 │   ├── models/
 │   │   └── models.go        # All shared data structures
@@ -76,14 +79,20 @@ iptables-analyzer/
 │   │   └── baseline.go      # Recommended IPv4/IPv6 baseline firewall
 │   ├── services/
 │   │   └── services.go      # ss output parsing
-│   ├── scorer/
-│   │   └── scorer.go        # Security scoring algorithm
-│   ├── recommender/
-│   │   └── recommender.go   # Recommendation generation
+│   ├── report/
+│   │   ├── model.go         # The report: the documented JSON form (docs/json.md)
+│   │   ├── build.go         # From the facts of the analysis to findings
+│   │   ├── fixes.go         # What to do about a finding, with quoted commands
+│   │   ├── score.go         # Points, category limits, grade limits, gain of a fix
+│   │   ├── ports.go         # --public, port risk and points
+│   │   └── tables.go        # Open ports, translated ports, sockets, rules
 │   └── ui/
-│       ├── ui.go            # Main rendering orchestrator (lipgloss layout)
-│       ├── tables.go        # Table formatting (lipgloss/table)
-│       └── colors.go        # 256-color palette and style definitions
+│       ├── text.go          # The terminal report (lipgloss)
+│       ├── html.go          # The HTML report: view model, content security policy
+│       ├── assets/          # report.html (template), report.css, report.js
+│       ├── common.go        # What both renderers say in the same words
+│       ├── markup_test.go   # Strict reader of the page, for the injection tests
+│       └── colors.go        # Color palette and style definitions
 └── testdata/
     ├── basic.iptables-save      # IPv4 baseline (B with bundled service evidence)
     ├── docker.iptables-save     # Legacy Docker layout with bypasses (score: F)
@@ -137,8 +146,52 @@ make fuzz FUZZTIME=2m
 ```
 
 `FuzzAnalysis` runs the whole command on random rules and `ss` output and fails if the
-`--no-color` report contains a control character. Failing inputs are written to
-`testdata/fuzz/` of the package; commit them as regression tests after the fix.
+`--no-color` report contains a control character. `FuzzHTMLReport` renders the HTML
+report for random input and fails when the page holds markup that the template does
+not write. Failing inputs are written to `testdata/fuzz/` of the package; commit them
+as regression tests after the fix.
+
+### Golden files
+
+`cmd/testdata/golden/` holds the report of each fixture as text (default and
+`--verbose --rules`), JSON and HTML. `TestGoldenReports` compares them with what the
+command writes. A change of the analysis or of a renderer shows as a diff of what the
+user reads:
+
+```bash
+make update-golden
+git diff cmd/testdata/golden/     # read it: this is the change that users see
+```
+
+The HTML files hold the markup without the style sheet and the script, so an edit of
+`report.css` does not change them.
+
+### The HTML report
+
+Text from the rules must reach the page only as text. Three tests keep it so:
+
+- `TestHTMLStructureDoesNotDependOnTheText` replaces every string of a report by a
+  string full of markup. The tags, the attributes and their values must be the same
+  as for a harmless string.
+- `checkMarkup` (in `markup_test.go`) reads a page strictly: only the elements and
+  attributes of the template, links only to anchors of the page, one style and one
+  script element with the embedded content.
+- `FuzzHTMLReport` runs `checkMarkup` on pages for random input.
+
+When you change `internal/ui/assets/report.html`:
+
+- Do not write a `style` attribute or an event handler: the content security policy
+  of the page refuses both. Use a class, and attach handlers in `report.js`.
+- Do not build a class name, an `id` or a link from the input. Take class names from
+  a fixed list in `html.go`, and anchors from counters.
+- Add a new element or attribute to the lists in `markup_test.go`.
+
+To look at the page, open it in a browser, or take a picture without one:
+
+```bash
+./iptables-analyzer testdata/docker29.iptables-save --html /tmp/report.html
+chromium --headless --screenshot=/tmp/report.png --window-size=1280,2400 file:///tmp/report.html
+```
 
 ### Timing
 
@@ -166,10 +219,10 @@ make test-coverage # Generates coverage.html
 3. Use existing fixtures in `testdata/` when possible
 
 ### Test fixtures
-- `basic.iptables-save`: IPv4 baseline. Expected with `--ipv4-only`: 100-point subtotal and `INCOMPLETE` without services; B with `testdata/services.txt`
+- `basic.iptables-save`: IPv4 baseline. Expected with `testdata/services.txt`: grade A, SSH open to all sources as the one HIGH finding
 - `docker.iptables-save`: Docker setup with two DNAT ports blocked in INPUT. Expected: score F, two Docker bypass findings
 - `insecure.iptables-save`: Default ACCEPT policies and rules behind a catch-all ACCEPT. Expected: grade F, one finding for the default accept and one for the unreachable rules
-- `ufw.iptables-save` with `ufw-services.txt`: the chains that ufw creates, with `ufw limit 22/tcp`. Expected: no effectiveness finding above INFO, SSH as rate limited, the DHCP client as LOW
+- `ufw.iptables-save` with `ufw-services.txt`: the chains that ufw creates, with `ufw limit 22/tcp`. Expected: no effectiveness finding above INFO, SSH as rate limited (MEDIUM), the DHCP client as LOW, fixes as `ufw` commands
 - `docker29.iptables-save` / `docker29.ip6tables-save`: unmodified captures from Docker 29.9.3 (iptables 1.8.11, nf_tables). `internal/analyzer/docker_test.go` derives variants from them (an INPUT block, `DOCKER-USER --dport`, raw/mangle drops, removed raw protection, ...). Each variant was reproduced on a live host with a probe container, and the test asserts the observed verdict
 
 ### Verifying Docker behavior on a host
@@ -193,21 +246,26 @@ interface, so only use it for rules that do not match on the ingress interface.
 
 1. **Add to analyzer package**:
    - Create function in appropriate file (e.g., `analyzer/newcheck.go`)
-   - Function should return `[]Finding` or similar
-   - Call it from `analyzer.Analyze()` or add to orchestration
+   - The function states a fact about the rules: it returns a typed finding
+     (`models.EffectivenessFinding` or similar) with a stable code
+   - Call it from `analyzer.AnalyzeHost()`
 
-2. **Update UI**:
-   - Add rendering function in `ui/ui.go` if needed
-   - Use existing color and formatting functions
+2. **Add it to the report** (`internal/report/build.go`):
+   - Convert the fact into a `report.Finding`: title, detail, the rules as evidence,
+     the category of the score and the points
+   - Add the fix in `fixes.go`. Write a command only when it keeps the restrictions
+     of the rule that it changes, and quote every value from the rules with
+     `textsafe.ShellQuote`
+   - The text, JSON and HTML reports show every finding of the report: the renderers
+     need no change
 
-3. **Add recommendation**:
-   - Update `recommender.Generate()` to suggest improvements
-   - Provide specific iptables commands
+3. **Document it**:
+   - Add the code to `docs/json.md` and the deduction to `docs/usage.md`
 
 4. **Test it**:
    - Add test fixture to `testdata/` if needed
    - Add unit tests to `*_test.go`
-   - Run `make test`
+   - Run `make test`, then `make update-golden` and read the diff
 
 ### New CLI Flag
 
@@ -218,7 +276,7 @@ interface, so only use it for rules that do not match on the ingress interface.
 
 2. **Update help**:
    - Flag automatically appears in `--help`
-   - Update README.md examples if user-facing
+   - Update README.md, `docs/usage.md`, the manpage and the bash completion
 
 ## Debugging
 
@@ -230,12 +288,13 @@ fmt.Fprintf(os.Stderr, "Debug: %+v\n", obj)
 
 ### Detailed output
 ```bash
-./iptables-analyzer -f rules.v4 --verbose
+./iptables-analyzer rules.v4 --verbose --rules
 ```
 
 ### JSON output for inspection
 ```bash
-./iptables-analyzer -f rules.v4 --json | jq .ShadowedRules
+./iptables-analyzer rules.v4 --json | jq '.findings[] | {id, code, severity, points, gain}'
+DUMP=1 go test ./internal/report -run TestDumpForReview -v   # the reports of the fixtures, finding by finding
 ```
 
 ### Test parsing

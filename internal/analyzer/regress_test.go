@@ -326,8 +326,8 @@ func TestUFWRulesetIsJudgedThroughItsChains(t *testing.T) {
 		condition string
 	}{
 		22:   {models.ScopeExposed, models.SeverityMedium, "rate limit"}, // ufw limit
-		80:   {models.ScopeExposed, models.SeverityHigh, ""},
-		443:  {models.ScopeExposed, models.SeverityHigh, ""},
+		80:   {models.ScopeExposed, models.SeverityLow, ""},              // web: public by purpose
+		443:  {models.ScopeExposed, models.SeverityLow, ""},
 		5432: {models.ScopeLocalnet, models.SeverityLow, ""},
 		68:   {models.ScopeExposed, models.SeverityLow, "source port 67"}, // DHCP replies
 	}
@@ -421,5 +421,46 @@ func TestClusterInterfacesAreNotGuestBridges(t *testing.T) {
 		if status := serviceStatus(t, result, 10250); status != models.ServiceInternal {
 			t.Errorf("%s is a host-only bridge: status %s", iface, status)
 		}
+	}
+}
+
+// The severity of an open port follows what usually listens on it (audit
+// D5, E5): a database is worse than a web server on the same kind of rule.
+func TestExposureSeverityFollowsThePort(t *testing.T) {
+	for _, tt := range []struct {
+		port     int
+		severity models.Severity
+	}{
+		{22, models.SeverityHigh}, {3306, models.SeverityHigh}, {6379, models.SeverityHigh}, {445, models.SeverityHigh}, {23, models.SeverityHigh},
+		{80, models.SeverityLow}, {443, models.SeverityLow}, {25, models.SeverityLow}, {53, models.SeverityLow},
+		{8080, models.SeverityMedium}, {631, models.SeverityMedium}, {51820, models.SeverityMedium},
+	} {
+		if got := ExposureSeverity(tt.port, tt.port, ""); got != tt.severity {
+			t.Errorf("port %d: %s, want %s", tt.port, got, tt.severity)
+		}
+	}
+	if got := ExposureSeverity(22, 22, "rate limit"); got != models.SeverityMedium {
+		t.Errorf("rate-limited SSH: %s", got)
+	}
+	if got := ExposureSeverity(68, 68, "source port 67"); got != models.SeverityLow {
+		t.Errorf("reply rule: %s", got)
+	}
+	if got := ExposureSeverity(1, 65535, ""); got != models.SeverityHigh {
+		t.Errorf("a range that holds sensitive ports: %s", got)
+	}
+	if got := ExposureSeverity(80, 81, ""); got != models.SeverityMedium {
+		t.Errorf("a range that is not public in full: %s", got)
+	}
+}
+
+func TestRulePathNamesTheJumps(t *testing.T) {
+	rs := mustParse(t, readFixture(t, "ufw.iptables-save"), models.IPv4)
+	rule := &rs.Tables["filter"].Chains["ufw-user-input"].Rules[3]
+	if got := strings.Join(RulePath(rs, rule), " > "); got != "INPUT #2 > ufw-before-input #13 > ufw-user-input #4" {
+		t.Fatalf("path to the rule: %s", got)
+	}
+	direct := &rs.Tables["filter"].Chains["INPUT"].Rules[0]
+	if got := RulePath(rs, direct); len(got) != 1 || got[0] != "INPUT #1" {
+		t.Fatalf("a rule in a built-in chain is one step: %v", got)
 	}
 }

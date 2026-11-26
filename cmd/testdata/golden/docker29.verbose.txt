@@ -1,0 +1,299 @@
+iptables-analyzer vdev · file analysis · 2026-11-25 12:00
+inputs: ../testdata/docker29.iptables-save, ../testdata/docker29.ip6tables-save,
+../testdata/services.txt
+IPv4: 55 rules in 24 chains (docker) · INPUT ACCEPT · FORWARD DROP · OUTPUT ACCEPT
+IPv6: 15 rules in 24 chains (docker) · INPUT ACCEPT · FORWARD DROP · OUTPUT ACCEPT
+
+  Grade F  56/100    3 high · 2 medium · 1 info
+  Grade limited to F: IPv4 INPUT accepts every new connection.
+
+  Policy                ▰▰▰▰▱▱▱▱▱▱ 10/25    Hygiene               ▰▰▰▰▰▰▰▰▰▰ 15/15
+  Exposure              ▱▱▱▱▱▱▱▱▱▱  0/25    IPv6                  ▰▰▰▰▰▰▰▰▰▰ 10/10
+  Shadows and bypasses  ▰▰▰▰▰▰▰▰▱▱ 21/25    
+
+  Fix first
+    1. F1   INPUT accepts new connections to any port                                   +15, grade C
+    2. F4   6 Docker published ports are open to any source                                      +11
+    3. F3   All ports of the containers on bridge br-982052ef0162 are reachable by direct         +3
+            routing
+
+  Findings
+
+  HIGH     F1   INPUT accepts new connections to any port                                        -15
+                No rule refuses them, and the policy of filter/INPUT is ACCEPT. Every port that no
+                rule names is open: a service that listens on one, now or later, is reachable at
+                once.
+                fix  Add rules for the traffic that is needed and test them, with a way back, then
+                     set the policy to DROP. The recommended baseline (--baseline) is a complete
+                     rule set to start from.
+                     Deny by default (IPv4):
+                       iptables -P INPUT DROP
+                     Deny by default (IPv6):
+                       ip6tables -P INPUT DROP
+
+  HIGH     F2   5 services are open to any source because INPUT accepts by default               -14
+                No rule names their ports: sshd on 22/tcp; nginx on 80/tcp (IPv4 only); nginx on
+                443/tcp (IPv4 only); mysqld on 3306/tcp (IPv4 only); dhclient on 68/udp (IPv4 only).
+                Close the default first; then accept each port that must stay reachable, for its
+                clients only.
+
+  HIGH     F3   All ports of the containers on bridge br-982052ef0162 are reachable by direct     -3
+                routing (IPv4, possible)
+                Every port of containers on bridge br-982052ef0162 (gateway mode nat-unprotected) is
+                forwarded to hosts that route 172.29.0.2 via this host (for example on the same L2
+                segment), including ports that were never published; neither INPUT nor
+                published-port rules apply.
+                fix  Use the default gateway mode "nat" for this network, or drop new non-DNAT
+                     connections into the bridge in DOCKER-USER.
+                     Drop packets for the containers that do not arrive from their bridge (published
+                     ports keep working):
+                       iptables -t raw -I PREROUTING -d 172.29.0.0/24 ! -i br-982052ef0162 -j DROP
+                     Or refuse new connections into the bridge that no published port translated:
+                       iptables -I DOCKER-USER -o br-982052ef0162 ! -i br-982052ef0162 -m conntrack --ctstate NEW -m conntrack ! --ctstate DNAT -j DROP
+
+  MEDIUM   F4   6 Docker published ports are open to any source                                  -16
+                Docker translates these ports to containers, and filter/FORWARD accepts them from
+                any source; the rules of filter/INPUT do not apply: IPv4 8080/tcp to 172.17.0.2:80;
+                IPv4 8082/tcp to 172.17.0.4:80; IPv4 9053/udp to 172.17.0.5:53; IPv4 9000-9002/tcp
+                to 172.17.0.6:9000-9002; IPv4 8091/tcp to 172.29.0.2:80; IPv4 8443/tcp to
+                172.30.0.2:443; IPv6 8443/tcp to [fd00:dead:beef::2]:443.
+                IPv4 nat/DOCKER #1:  ! -i docker0 -p tcp -m tcp --dport 8080 -j DNAT --to-destination 172.17.0.2:80
+                  reached by PREROUTING #1
+                IPv4 nat/DOCKER #3:  -d 192.168.88.217/32 ! -i docker0 -p tcp -m tcp --dport 8082 -j DNAT --to-destination 172.17.0.4:80
+                  reached by PREROUTING #1
+                IPv4 nat/DOCKER #4:  ! -i docker0 -p udp -m udp --dport 9053 -j DNAT --to-destination 172.17.0.5:53
+                  reached by PREROUTING #1
+                IPv4 nat/DOCKER #5:  ! -i docker0 -p tcp -m tcp --dport 9000 -j DNAT --to-destination 172.17.0.6:9000
+                  reached by PREROUTING #1
+                IPv4 nat/DOCKER #9:  ! -i br-982052ef0162 -p tcp -m tcp --dport 8091 -j DNAT --to-destination 172.29.0.2:80
+                  reached by PREROUTING #1
+                IPv4 nat/DOCKER #8:  ! -i br-7a3442937ee6 -p tcp -m tcp --dport 8443 -j DNAT --to-destination 172.30.0.2:443
+                  reached by PREROUTING #1
+                IPv6 nat/DOCKER #1:  ! -s fe80::/10 ! -i br-7a3442937ee6 -p tcp -m tcp --dport 8443 -j DNAT --to-destination [fd00:dead:beef::2]:443
+                  reached by PREROUTING #1
+                fix  Docker translates published ports in nat/PREROUTING, so they are forwarded and
+                     never reach filter/INPUT (this includes INPUT rules of ufw or firewalld).
+                     Restrict them in DOCKER-USER, which runs before Docker's own rules and which
+                     Docker never flushes. Packets are already translated there: match the published
+                     port with --ctorigdstport, not --dport. A service that only local clients need
+                     can be published on loopback instead (docker run -p
+                     127.0.0.1:8080:<container-port>).
+                     Allow the trusted sources of port 8080 first:
+                       iptables -I DOCKER-USER 1 -p tcp -m conntrack --ctorigdstport 8080 --ctdir ORIGINAL -s <trusted-cidr> -j RETURN
+                     Then drop the rest of that port:
+                       iptables -I DOCKER-USER 2 -p tcp -m conntrack --ctorigdstport 8080 --ctdir ORIGINAL -j DROP
+
+  MEDIUM   F5   Container port 172.31.0.2:80 is reachable by direct routing (IPv4, possible)      -1
+                Container port 172.31.0.2:80/tcp on bridge br-84b7b034b576 (gateway mode routed) is
+                forwarded without NAT to hosts that route 172.31.0.2 via this host (for example on
+                the same L2 segment); host INPUT rules do not apply to it.
+                fix  Restrict the container port in DOCKER-USER (match -d 172.31.0.2 --dport 80), or
+                     use gateway mode nat.
+                     Drop the container port for all but the trusted sources:
+                       iptables -I DOCKER-USER -o br-84b7b034b576 -d 172.31.0.2 -p tcp --dport 80 ! -s <trusted-cidr> -j DROP
+
+  INFO     F6   OUTPUT default policy is ACCEPT
+                All outbound traffic is allowed. This is the usual setup; an OUTPUT allowlist can
+                limit what a compromised service is able to reach.
+
+  Open to any source
+    tcp  22 sshd · 80 nginx (IPv4 only) · 443 nginx (IPv4 only) · 3306 mysqld (IPv4 only) · all
+         ports that no rule names
+    udp  68 dhclient (IPv4 only) · all ports that no rule names
+
+  Translated to other hosts
+    IPv4 8080/tcp → 172.17.0.2:80 (docker0): any source
+    IPv4 192.168.88.217:8082/tcp → 172.17.0.4:80 (docker0): any source
+    IPv4 9053/udp → 172.17.0.5:53 (docker0): any source
+    IPv4 9000-9002/tcp → 172.17.0.6:9000-9002 (docker0): any source
+    IPv4 8443/tcp → 172.30.0.2:443 (br-7a3442937ee6): any source
+    IPv4 8091/tcp → 172.29.0.2:80 (br-982052ef0162): any source
+    IPv6 8443/tcp → [fd00:dead:beef::2]:443 (br-7a3442937ee6): any source
+    These ports are translated in nat/PREROUTING and pass filter/FORWARD, not filter/INPUT.
+
+  Listening sockets
+    tcp   22     0.0.0.0                  sshd               EXPOSED
+    tcp   631    127.0.0.1                cupsd              LOCALHOST
+    tcp   80     0.0.0.0                  nginx              EXPOSED
+    tcp   443    0.0.0.0                  nginx              EXPOSED
+    tcp   3306   0.0.0.0                  mysqld             EXPOSED
+    tcp   22     ::                       sshd               EXPOSED
+    tcp   631    ::1                      cupsd              LOCALHOST
+    udp   68     0.0.0.0                  dhclient           EXPOSED
+    udp   53     127.0.0.53%lo            systemd-resolve    LOCALHOST
+
+  Sandbox
+    Landlock is not available
+
+  Rules, IPv4
+
+    filter/INPUT (policy ACCEPT, 0 rules)
+
+    filter/FORWARD (policy DROP, 2 rules)
+       1 -j DOCKER-USER
+       2 -j DOCKER-FORWARD
+
+    filter/OUTPUT (policy ACCEPT, 0 rules)
+
+    filter/DOCKER (14 rules, docker)
+       1 -d 172.31.0.2/32 ! -i br-84b7b034b576 -o br-84b7b034b576 -p tcp -m tcp --dport 80 -j ACCEPT
+       2 -d 172.30.0.2/32 ! -i br-7a3442937ee6 -o br-7a3442937ee6 -p tcp -m tcp --dport 443 -j ACCEPT
+       3 -d 172.17.0.6/32 ! -i docker0 -o docker0 -p tcp -m tcp --dport 9002 -j ACCEPT
+       4 -d 172.17.0.6/32 ! -i docker0 -o docker0 -p tcp -m tcp --dport 9001 -j ACCEPT
+       5 -d 172.17.0.6/32 ! -i docker0 -o docker0 -p tcp -m tcp --dport 9000 -j ACCEPT
+       6 -d 172.17.0.5/32 ! -i docker0 -o docker0 -p udp -m udp --dport 53 -j ACCEPT
+       7 -d 172.17.0.4/32 ! -i docker0 -o docker0 -p tcp -m tcp --dport 80 -j ACCEPT
+       8 -d 172.17.0.3/32 ! -i docker0 -o docker0 -p tcp -m tcp --dport 80 -j ACCEPT
+       9 -d 172.17.0.2/32 ! -i docker0 -o docker0 -p tcp -m tcp --dport 80 -j ACCEPT
+      10 ! -i docker0 -o docker0 -j DROP
+      11 ! -i br-7a3442937ee6 -o br-7a3442937ee6 -j DROP
+      12 -o br-84b7b034b576 -p icmp -j ACCEPT
+      13 ! -i br-84b7b034b576 -o br-84b7b034b576 -j DROP
+      14 ! -i br-982052ef0162 -o br-982052ef0162 -j ACCEPT
+
+    filter/DOCKER-BRIDGE (4 rules, docker)
+       1 -o docker0 -j DOCKER
+       2 -o br-7a3442937ee6 -j DOCKER
+       3 -o br-84b7b034b576 -j DOCKER
+       4 -o br-982052ef0162 -j DOCKER
+
+    filter/DOCKER-CT (4 rules, docker)
+       1 -o docker0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+       2 -o br-7a3442937ee6 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+       3 -o br-84b7b034b576 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+       4 -o br-982052ef0162 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+    filter/DOCKER-FORWARD (8 rules, docker)
+       1 -j DOCKER-CT
+       2 -j DOCKER-INTERNAL
+       3 -j DOCKER-BRIDGE
+       4 -i docker0 -j ACCEPT
+       5 -i br-7a3442937ee6 -j ACCEPT
+       6 -i br-84b7b034b576 -j ACCEPT
+       7 -i br-982052ef0162 -j ACCEPT
+       8 -i br-1843f3e4f373 -o br-1843f3e4f373 -j ACCEPT
+
+    filter/DOCKER-INTERNAL (2 rules, docker)
+       1 ! -s 172.28.0.0/24 -o br-1843f3e4f373 -j DROP
+       2 ! -d 172.28.0.0/24 -i br-1843f3e4f373 -j DROP
+
+    filter/DOCKER-USER (0 rules, docker)
+
+    nat/PREROUTING (policy ACCEPT, 1 rule)
+       1 -m addrtype --dst-type LOCAL -j DOCKER
+
+    nat/INPUT (policy ACCEPT, 0 rules)
+
+    nat/OUTPUT (policy ACCEPT, 1 rule)
+       1 ! -d 127.0.0.0/8 -m addrtype --dst-type LOCAL -j DOCKER
+
+    nat/POSTROUTING (policy ACCEPT, 3 rules)
+       1 -s 172.29.0.0/24 ! -o br-982052ef0162 -j MASQUERADE
+       2 -s 172.30.0.0/24 ! -o br-7a3442937ee6 -j MASQUERADE
+       3 -s 172.17.0.0/16 ! -o docker0 -j MASQUERADE
+
+    nat/DOCKER (9 rules, docker)
+       1 ! -i docker0 -p tcp -m tcp --dport 8080 -j DNAT --to-destination 172.17.0.2:80 [F4]
+       2 -d 127.0.0.1/32 ! -i docker0 -p tcp -m tcp --dport 8081 -j DNAT --to-destination 172.17.0.3:80
+       3 -d 192.168.88.217/32 ! -i docker0 -p tcp -m tcp --dport 8082 -j DNAT --to-destination 172.17.0.4:80 [F4]
+       4 ! -i docker0 -p udp -m udp --dport 9053 -j DNAT --to-destination 172.17.0.5:53 [F4]
+       5 ! -i docker0 -p tcp -m tcp --dport 9000 -j DNAT --to-destination 172.17.0.6:9000 [F4]
+       6 ! -i docker0 -p tcp -m tcp --dport 9001 -j DNAT --to-destination 172.17.0.6:9001
+       7 ! -i docker0 -p tcp -m tcp --dport 9002 -j DNAT --to-destination 172.17.0.6:9002
+       8 ! -i br-7a3442937ee6 -p tcp -m tcp --dport 8443 -j DNAT --to-destination 172.30.0.2:443 [F4]
+       9 ! -i br-982052ef0162 -p tcp -m tcp --dport 8091 -j DNAT --to-destination 172.29.0.2:80 [F4]
+
+    mangle/PREROUTING (policy ACCEPT, 0 rules)
+
+    mangle/INPUT (policy ACCEPT, 0 rules)
+
+    mangle/FORWARD (policy ACCEPT, 0 rules)
+
+    mangle/OUTPUT (policy ACCEPT, 0 rules)
+
+    mangle/POSTROUTING (policy ACCEPT, 0 rules)
+
+    raw/PREROUTING (policy ACCEPT, 7 rules)
+       1 -d 172.17.0.2/32 ! -i docker0 -j DROP
+       2 -d 172.17.0.3/32 ! -i docker0 -j DROP
+       3 -d 127.0.0.1/32 ! -i lo -p tcp -m tcp --dport 8081 -j DROP
+       4 -d 172.17.0.4/32 ! -i docker0 -j DROP
+       5 -d 172.17.0.5/32 ! -i docker0 -j DROP
+       6 -d 172.17.0.6/32 ! -i docker0 -j DROP
+       7 -d 172.30.0.2/32 ! -i br-7a3442937ee6 -j DROP
+
+    raw/OUTPUT (policy ACCEPT, 0 rules)
+
+    security/INPUT (policy ACCEPT, 0 rules)
+
+    security/FORWARD (policy ACCEPT, 0 rules)
+
+    security/OUTPUT (policy ACCEPT, 0 rules)
+
+  Rules, IPv6
+
+    filter/INPUT (policy ACCEPT, 0 rules)
+
+    filter/FORWARD (policy DROP, 2 rules)
+       1 -j DOCKER-USER
+       2 -j DOCKER-FORWARD
+
+    filter/OUTPUT (policy ACCEPT, 0 rules)
+
+    filter/DOCKER (2 rules, docker)
+       1 -d fd00:dead:beef::2/128 ! -i br-7a3442937ee6 -o br-7a3442937ee6 -p tcp -m tcp --dport 443 -j ACCEPT
+       2 ! -i br-7a3442937ee6 -o br-7a3442937ee6 -j DROP
+
+    filter/DOCKER-BRIDGE (1 rule, docker)
+       1 -o br-7a3442937ee6 -j DOCKER
+
+    filter/DOCKER-CT (1 rule, docker)
+       1 -o br-7a3442937ee6 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+    filter/DOCKER-FORWARD (4 rules, docker)
+       1 -j DOCKER-CT
+       2 -j DOCKER-INTERNAL
+       3 -j DOCKER-BRIDGE
+       4 -i br-7a3442937ee6 -j ACCEPT
+
+    filter/DOCKER-INTERNAL (0 rules, docker)
+
+    filter/DOCKER-USER (0 rules, docker)
+
+    nat/PREROUTING (policy ACCEPT, 1 rule)
+       1 -m addrtype --dst-type LOCAL -j DOCKER
+
+    nat/INPUT (policy ACCEPT, 0 rules)
+
+    nat/OUTPUT (policy ACCEPT, 1 rule)
+       1 ! -d ::1/128 -m addrtype --dst-type LOCAL -j DOCKER
+
+    nat/POSTROUTING (policy ACCEPT, 1 rule)
+       1 -s fd00:dead:beef::/64 ! -o br-7a3442937ee6 -j MASQUERADE
+
+    nat/DOCKER (1 rule, docker)
+       1 ! -s fe80::/10 ! -i br-7a3442937ee6 -p tcp -m tcp --dport 8443 -j DNAT --to-destination [fd00:dead:beef::2]:443 [F4]
+
+    mangle/PREROUTING (policy ACCEPT, 0 rules)
+
+    mangle/INPUT (policy ACCEPT, 0 rules)
+
+    mangle/FORWARD (policy ACCEPT, 0 rules)
+
+    mangle/OUTPUT (policy ACCEPT, 0 rules)
+
+    mangle/POSTROUTING (policy ACCEPT, 0 rules)
+
+    raw/PREROUTING (policy ACCEPT, 1 rule)
+       1 -d fd00:dead:beef::2/128 ! -i br-7a3442937ee6 -j DROP
+
+    raw/OUTPUT (policy ACCEPT, 0 rules)
+
+    security/INPUT (policy ACCEPT, 0 rules)
+
+    security/FORWARD (policy ACCEPT, 0 rules)
+
+    security/OUTPUT (policy ACCEPT, 0 rules)
+
+  Not shown: recommended baseline (--baseline)
+  Interactive report: --html FILE · machine-readable: --json

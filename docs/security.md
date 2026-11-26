@@ -17,7 +17,8 @@ A person who controls this data must not be able to:
 - run code with the privileges of the tool,
 - read or change files through the tool,
 - send terminal escape sequences to the terminal of the administrator,
-- hide a command in a recommended command, so that it runs when the administrator copies it,
+- hide a command in the command of a fix, so that it runs when the administrator copies it,
+- put markup or a script into the HTML report,
 - make the tool use all memory or all CPU time.
 
 ## Protections
@@ -70,10 +71,10 @@ and writes the report. The steps:
    | 9 | — | Also: connect to UNIX sockets with a path |
    | 10 | — | Also: UDP bind and send |
 
-The file descriptors that are open before the sandbox, for example standard output,
-continue to operate.
+The file descriptors that are open before the sandbox, for example standard output
+and the file for `--html`, continue to operate.
 
-The report shows the sandbox status in the overview. The JSON output has the status in `Sandbox`.
+`--verbose` and the HTML report show the sandbox status. The JSON report has it in `sandbox`.
 
 #### Sandbox modes
 
@@ -119,18 +120,51 @@ Interface names from the live system get the same treatment.
 Thus an escape sequence in a rule comment or in a process name has no effect on the terminal.
 The placeholders contain no quotes or backslashes, so the rules parse the same.
 
-### 5. Safe recommended commands
+### 5. Safe commands in a fix
 
-A recommended command contains values from the analyzed rules: comments, chain names,
+The command of a fix contains values from the analyzed rules: comments, chain names,
 interface names and addresses. The tool puts each value in POSIX shell quotes.
 Thus a comment such as `$(curl ... | sh)` stays one argument when you copy the command
 into a shell:
 
 ```text
-iptables -R INPUT 2 -p tcp --dport 22 -m comment --comment '$(curl ... | sh)' -m limit --limit 3/min --limit-burst 5 -j ACCEPT
+iptables -R INPUT 2 -s <trusted-cidr> -p tcp --dport 22 -m comment --comment '$(curl ... | sh)' -j ACCEPT
 ```
 
 Values without special characters, for example `tcp`, `10.0.0.0/8` or `DOCKER-USER`, have no quotes.
+
+A value that you must supply is a placeholder in angle brackets, for example `<trusted-cidr>`.
+A shell refuses a command with a placeholder, so a command that is not complete cannot run.
+
+### 6. The HTML report
+
+`--html FILE` writes the report as one HTML page. A browser shows it, so text from the
+rules must not become markup or a script there.
+
+- **Only text**: the page is written with Go `html/template`, which escapes each value
+  for the place where it stands. Each value from the input stands in a text node.
+  No class name, `id`, link or other attribute value is made from the input:
+  class names come from fixed lists, and anchors from counters.
+- **Content security policy**: the page has the policy
+  `default-src 'none'; style-src 'sha256-...'; script-src 'sha256-...'; base-uri 'none'; form-action 'none'`.
+  The two hashes are those of the style sheet and of the script in the page.
+  The browser thus loads nothing from the network, and it runs no script but that one,
+  also when markup would get past the escaping.
+- **The script** attaches its functions to the elements of the page. It does not build
+  markup from text, and it does not send or load data.
+- **No other parts**: the page has no images, fonts or links to other sites, except
+  one link to the project.
+
+The file:
+
+- The tool opens `FILE` before it starts the sandbox, and writes it from inside the sandbox.
+- A symbolic link at `FILE` is not followed. A report that root writes must not go into
+  a file that a different user of the host chose, for example in `/tmp`.
+- `FILE` cannot be one of the input files, and it must be a regular file.
+- The tool makes the page in memory first. When a run fails, an older report stays as it was.
+
+The report shows the rules of the host and the listening processes. Keep it, and the
+JSON report, where only the right persons can read them.
 
 ## Tests
 
@@ -138,10 +172,16 @@ Values without special characters, for example `tcp`, `10.0.0.0/8` or `DOCKER-US
   The test makes sure that all threads cannot read files, that the process cannot create files,
   list directories, start programs or connect over TCP, and that open descriptors operate.
 - `cmd`: the real command runs in a child process with each sandbox mode.
-  The JSON report must be the same with and without the sandbox.
+  The JSON report must be the same with and without the sandbox, and the HTML report
+  must be written from inside the sandbox.
 - Fuzz tests send random rules and `ss` data through the full command.
   The `--no-color` report must not contain control characters.
-- `internal/recommender`: a rule comment with shell syntax must stay one literal argument.
+- `internal/report`: a shell splits each command of the fixes. A rule comment with shell
+  syntax must stay one literal argument, and nothing from it may run.
+- `internal/ui`: each string of a report is replaced by a string full of markup. The
+  elements of the page, their attributes and the values of the attributes must stay the
+  same. A fuzz test reads the page for random input strictly against the vocabulary of
+  the template.
 - `internal/safeio`: tests for the input limits, the environment, the time limit and the
   ownership checks.
 

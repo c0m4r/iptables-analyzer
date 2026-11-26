@@ -1,0 +1,66 @@
+iptables-analyzer vdev · file analysis · 2026-11-25 12:00
+inputs: ../testdata/ufw.iptables-save, ../testdata/ufw-services.txt
+IPv4: 71 rules in 35 chains (ufw) · INPUT DROP · FORWARD DROP · OUTPUT ACCEPT
+IPv6: not supplied
+
+  Grade A  95/100    1 medium · 3 low · 1 info
+
+  Policy                ▰▰▰▰▰▰▰▰▰▰ 25/25    Hygiene               ▰▰▰▰▰▰▰▰▰▰ 15/15
+  Exposure              ▰▰▰▰▰▰▰▰▱▱ 20/25    IPv6                  ▰▰▰▰▰▰▰▰▰▰ 10/10
+  Shadows and bypasses  ▰▰▰▰▰▰▰▰▰▰ 25/25    
+
+  note: No IPv6 rules were supplied: only IPv4 was analyzed, and IPv4 rules do not filter IPv6. Add
+  the output of ip6tables-save as another file.
+
+  Findings
+
+  MEDIUM   F1   sshd is open to any source on 22/tcp                                              -2
+                IPv4: accepted by filter/ufw-user-limit-accept rule #1. Limited by: rate limit.
+                filter/ufw-user-limit-accept #1:  -j ACCEPT
+                  reached by INPUT #2 → ufw-before-input #13 → ufw-user-input #3
+                fix  ufw manages this rule, and a change made with iptables is lost at its next
+                     reload. If the clients are known, allow only them and delete the open rule.
+                     Allow the known clients:
+                       ufw allow from <trusted-cidr> to any port 22 proto tcp
+                     Delete the rule for any source:
+                       ufw delete limit 22/tcp
+
+  LOW      F2   systemd-network is open to any source on 68/udp                                   -1
+                IPv4: accepted by filter/ufw-before-input rule #9, for packets that arrive on eth0.
+                Limited by: source port 67. A rule of this form admits replies (DHCP, DNS): only a
+                sender that uses that source port passes.
+                filter/ufw-before-input #9:  -p udp -m udp --sport 67 --dport 68 -j ACCEPT
+                  reached by INPUT #2
+
+  LOW      F3   nginx is open to any source on 80/tcp                                             -1
+                IPv4: accepted by filter/ufw-user-input rule #4.
+                filter/ufw-user-input #4:  -p tcp -m tcp --dport 80 -j ACCEPT
+                  reached by INPUT #2 → ufw-before-input #13
+                fix  ufw manages this rule, and a change made with iptables is lost at its next
+                     reload. If the clients are known, allow only them and delete the open rule.
+                     Allow the known clients:
+                       ufw allow from <trusted-cidr> to any port 80 proto tcp
+                     Delete the rule for any source:
+                       ufw delete allow 80/tcp
+
+  LOW      F4   nginx is open to any source on 443/tcp                                            -1
+                IPv4: accepted by filter/ufw-user-input rule #5.
+                filter/ufw-user-input #5:  -p tcp -m tcp --dport 443 -j ACCEPT
+                  reached by INPUT #2 → ufw-before-input #13
+                fix  ufw manages this rule, and a change made with iptables is lost at its next
+                     reload. If the clients are known, allow only them and delete the open rule.
+                     Allow the known clients:
+                       ufw allow from <trusted-cidr> to any port 443 proto tcp
+                     Delete the rule for any source:
+                       ufw delete allow 443/tcp
+
+  Open to any source
+    tcp  22 sshd (rate limit) · 80 nginx · 443 nginx
+    udp  68 systemd-network (source port 67)
+
+  Open to restricted sources
+    tcp  5432 postgres (private networks)
+
+  Not shown: 71 rules (--rules) · 1 info finding, 7 listening sockets (-v) · recommended baseline
+  (--baseline)
+  Interactive report: --html FILE · machine-readable: --json

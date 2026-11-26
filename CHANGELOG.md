@@ -10,38 +10,64 @@ Types of changes: Added, Changed, Deprecated, Removed, Fixed, Security
 ## [Unreleased]
 
 The changes of this release follow the audit in `docs/audit-0.7.1.md`; `ROADMAP.md` has the plan.
+This release changes the report, the JSON form and some options. See "Changed" before you update scripts.
 
 ### Added
 
-- open ports: the report lists the ports for which INPUT accepts new connections, with their sources, without a list of listening services (`OpenPorts` in JSON)
+- an interactive HTML report: `--html FILE` writes one page that loads nothing from the network, with filters and a search for the findings, links between findings and rules, copy buttons for the commands of a fix, the rules of each chain, the recommended baseline, and a light and a dark theme
+- file names as arguments: `iptables-analyzer rules.v4 rules.v6 ss.txt`; the tool finds out what each file holds
+- `--fail-on SEVERITY` and `--min-grade GRADE`: exit status 2 when the result is below the threshold, for scripts and CI
+- `--quiet`: one line with the score, the grade and the number of findings
+- `--rules`: the rules of each chain, with the findings that name them
+- `--public LIST`: ports that are open to all sources on purpose (`tcp/80,tcp/443`) are notes without a deduction
+- every finding names the rules that cause it; for a rule in a user-defined chain the report shows the jumps that lead to it (`INPUT #2 → ufw-before-input #13 → ufw-user-input #4`)
+- every finding has its fix with it: what to do and why, then the commands, each with its purpose
+- "Fix first": the findings whose fix alone gives a better grade, then those that gain the most points (`gain` and `grade_after` in JSON)
+- fixes for rules in the chains of ufw are `ufw` commands; for chains of other programs (Docker, firewalld, fail2ban, ...) the fix says where to make the change
+- open ports: the report lists the ports for which INPUT accepts new connections, with their sources, without a list of listening sockets (`open_ports` in JSON)
+- finding `no_rules`: an address family without any rule is one finding
+- finding `open_port`: a port that is open to all sources, when no list of listening sockets was read
 - finding `broad_accept`: a range of 1,024 or more ports that is open to any source
 - finding `ipv6_wider_than_ipv4`: ports that IPv6 opens to any source while IPv4 restricts or filters them
 - finding `family_blocked`: an address family with a DROP policy and no accepting rule is one note instead of three findings
-- access scope `RESTRICTED` for sources that an ipset, a MAC address, a GeoIP match, a `recent` list or an IPsec policy selects; the finding names the set
-- conditions on exposure findings (`Condition`): rate limit, connection limit, time window, source port
+- access scope `RESTRICTED` for sources that an ipset, a MAC address, a GeoIP match, a `recent` list or an IPsec policy selects; the report names the set
+- conditions on open ports (`condition`): rate limit, connection limit, time window, source port
 - service status `INTERNAL` for listeners that only containers or virtual machines of the host reach (`docker0`, `virbr0`, ...)
-- family status (`IPv4Status`, `IPv6Status`): analyzed, no rules loaded, excluded, not supplied, or unreadable (native nftables)
-- assessment notes for rules that `iptables-save` cannot show (`iptables-legacy tables present`, `is incompatible, use 'nft' tool`) and for `REDIRECT` rules
-- a grade limit: F when INPUT accepts all new connections, D when it accepts by default for one protocol or interface, C for a critical Docker bypass (`Cap` in JSON)
+- family status (`families[].status`): analyzed, no rules loaded, excluded, not supplied, or unreadable (native nftables)
+- notes for rules that `iptables-save` cannot show (`iptables-legacy tables present`, `is incompatible, use 'nft' tool`) and for `REDIRECT` rules
+- a grade limit: F when INPUT accepts all new connections, D when it accepts by default for one protocol or interface, C for a critical Docker bypass (`score.cap` in JSON)
 - the baseline repeats the jumps of INPUT to chains of other programs (fail2ban, libvirt, Tailscale), lists the present `DOCKER-USER` rules as comments, keeps the FORWARD policy of hosts that route packets, and warns on hosts that ufw manages
 - modeled matches: `--syn` and `--tcp-flags` for the first packet of a connection, `iprange`, `multiport --ports`, `pkttype`
+- `docs/json.md`: the fields of the JSON report
+- golden files for the text, JSON and HTML reports of the fixtures (`make update-golden`)
 
 ### Changed
 
+- the text report starts with the grade and what to fix first, then lists the findings with their rules and fixes, then the open ports; it wraps to the width of the terminal
+- the text report no longer prints the rules and the recommended baseline: use `--rules` and `--baseline`, or the HTML report
+- `--verbose` adds the findings of severity INFO, the listening sockets and the sandbox status; the raw rules are in `--rules`
+- the JSON form is new (`schema_version` 2): lower-case keys, one `findings` list with the fix of each finding, severities as names, the rules only with `--rules`; see `docs/json.md`
+- the grade is complete without a list of listening sockets: each open port is then judged as if a service uses it, and a note says so
+- the severity and the deduction of a port that is open to all sources follow the kind of service that usually listens on it: 5 points for remote administration, databases, file services and clear-text protocols, 1 for public services (mail, DNS, web), 2 for other ports
+- findings that say the same for IPv4 and IPv6 are one finding; more than 8 open ports of one severity are one finding; the services that are open only because INPUT accepts by default are one finding
+- `--score-only` prints the score and the grade (`87 B`)
+- the exit status is 0 for a complete analysis, 1 for an error and 2 for a result below `--fail-on` or `--min-grade`
 - the checks for the default policy, the conntrack rule and unused rules use the packet-path evaluator instead of the form of the rules in `filter/INPUT`; they follow user-defined chains
 - `policy_accept` means that a chain accepts the traffic that no rule names, by its policy or by a rule; the title and the detail name the cause
 - rules after a rule that ends the chain are one `dead_rule` finding for the chain, and they are no longer reported as shadowed too
 - every deduction of the score comes from a finding; a `POSSIBLE` finding costs half; FORWARD ACCEPT costs 5 points while nothing shows that the host routes packets
 - OUTPUT ACCEPT is INFO
-- the SSH recommendation inserts a per-source `hashlimit` DROP in front of the accepting rule; it no longer replaces the rule with a global `-m limit`
+- the fix for SSH that is open to all sources inserts a per-source `hashlimit` DROP in front of the accepting rule; it no longer replaces the rule with a global `-m limit`
 - a DNAT rule outside Docker's chains is a port forward: no Docker titles, no `DOCKER-USER` commands
 - a Docker bypass is CRITICAL only when an INPUT rule names the port or the destination address
-- assessment notes of one kind are one note with a count
+- notes of one kind are one note with a count
 - source sets are sorted address ranges; the scope of sources follows from the addresses and no longer from the form of the rules
 
 ### Removed
 
 - findings `missing_final_drop` and `late_conntrack`
+- the separate list of recommendations: each finding has its fix
+- the packages `internal/scorer` and `internal/recommender`: `internal/report` builds the findings, the fixes and the score
 
 ### Fixed
 
@@ -54,13 +80,22 @@ The changes of this release follow the audit in `docs/audit-0.7.1.md`; `ROADMAP.
 - allowlists with `iprange`, `set` or `mac` were reported as "may be accessible from the network" and scored as exposure; an ipset allowlist written as a negated DROP was reported as definitely exposed
 - rate-limited accepts and `--syn` rules were reported as only possible
 - the DHCP client rule (`--sport 67 --dport 68`) was a HIGH exposure
+- a web server on ports 80 and 443 was a HIGH exposure
 - a comment that starts with `-` or equals `!` stopped the analysis (`--comment requires a value`)
 - the second argument of `--tcp-flags` and `--match-set` was lost; a negation in front of a rule option after a match was taken for a match option
 - the old form of a negation (`--option ! value`), which iptables still accepts, was not read; an argument that belongs to no option is now an error, as it is for `iptables-restore`
 - process names with spaces were lost; a socket-activated daemon was named `systemd`; a socket bound to a device (`0.0.0.0%virbr0`) was evaluated for every interface
+- a tab in a process name was printed as it is; it is now shown as `^I`
 - analysis time grew with the square of the number of single-address rules (3,000 rules: 30 s); 20,000 rules now take approximately one second
 - unused-rule findings for negated port predicates named the wrong port, and a file without a filter table lost 25 points without a finding
 - the recommendation text named `--baseline 6`, which is not accepted
+- advice for rules in ufw chains named `iptables` commands, which ufw overwrites
+- the same advice was repeated for each published port and for each address family
+
+### Security
+
+- the HTML report writes text from the input only into text nodes, and the page has a content security policy that names its style sheet and its script by hash; see `docs/security.md`
+- the file for `--html` is opened before the sandbox starts and written from inside it; a symbolic link at that path is not followed, and an input file cannot be the output
 
 ## [0.7.1] - 2026-11-09
 

@@ -142,6 +142,9 @@ func Host() (*models.HostContext, error) {
 		return nil, fmt.Errorf("listing network interfaces: %w", err)
 	}
 	host := &models.HostContext{}
+	if name, err := os.Hostname(); err == nil {
+		host.Hostname = textsafe.Escape(name)
+	}
 	for _, iface := range interfaces {
 		// Interface names may contain any byte but '/', ':' and whitespace;
 		// escape them like names read from rules files.

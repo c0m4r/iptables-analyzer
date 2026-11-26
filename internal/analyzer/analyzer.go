@@ -234,10 +234,8 @@ func deduplicateServices(services []models.ListeningService) []models.ListeningS
 
 // addServiceFinding builds and appends an ExposedServiceFinding.
 func addServiceFinding(result *models.AnalysisResult, svc models.ListeningService, exposure serviceExposure, ipLabel string, ipVersion models.IPVersion) {
-	sev := models.SeverityHigh
-	if svc.Port >= 1024 {
-		sev = models.SeverityMedium
-	}
+	// How much an open port matters depends on what usually listens there.
+	sev := ExposureSeverity(svc.Port, svc.Port, exposure.condition)
 	audience := "the network"
 	switch {
 	case exposure.scope == models.ScopeRestricted:
@@ -246,12 +244,6 @@ func addServiceFinding(result *models.AnalysisResult, svc models.ListeningServic
 	case exposure.scope != models.ScopeExposed:
 		sev = models.SeverityLow
 		audience = scopeAudience(exposure.scope)
-	case strings.HasPrefix(exposure.condition, "source port"):
-		// Only for senders that pick a privileged or a specific source port:
-		// the usual shape of DHCP and of replies in stateless rule sets.
-		sev = models.SeverityLow
-	case rateLimited(exposure.condition) && sev > models.SeverityMedium:
-		sev = models.SeverityMedium
 	}
 
 	reachability := "is accessible"
@@ -486,6 +478,11 @@ func findUnusedRules(result *models.AnalysisResult) {
 		result.UnusedRules = append(result.UnusedRules, models.UnusedRuleFinding{
 			Code:      models.FindingUnusedRule,
 			Certainty: open.Certainty,
+			IPVersion: open.IPVersion,
+			Protocol:  open.Protocol,
+			First:     open.First,
+			Last:      open.Last,
+			Scope:     open.Scope,
 			Rule:      *open.Rule,
 			Reason: fmt.Sprintf("%s %s %s/%s is open to %s by rule #%d in %s/%s, but nothing listens on it",
 				stackName(open.IPVersion), noun, portRangeText(open.First, open.Last), open.Protocol, audience,
